@@ -1,0 +1,41 @@
+# —— Python ——
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# —— 构建 / 打包产物 ——
+build/
+dist/
+*.spec
+
+# —— 项目归档与发布产物（二进制 exe 走 GitHub Releases，不入库）——
+aase001/
+
+# —— 个人目录（用户自用，含本机配置副本，不公开）——
+user_personal_edition/
+
+# —— 内部交接文档（含本机路径/环境细节，不公开）——
+handover_documents/
+
+# —— 运行时 / 崩溃与日志 ——
+crash.log
+*.log
+nuitka-crash-report.xml
+
+# —— 编辑器 / OS ——
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# —— 自检输出残留 ——
+tools/_check*.txt
+tools/setting.yaml
+
+# —— 过时的图标/截图（不再入库，保留本地）——
+icon1.png
+icon2.png
+preview_breath.png
+screenshot_after.png
+screenshot_settings.png
