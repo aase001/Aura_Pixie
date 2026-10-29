@@ -9,6 +9,9 @@ build/
 dist/
 *.spec
 
+# —— MinGW 工具链（1.1G，位于项目内 msys2/，不入库）——
+msys2/
+
 # —— 项目归档与发布产物（二进制 exe 走 GitHub Releases，不入库）——
 aase001/
 
