@@ -97,7 +97,7 @@ window:
 > pip 安装依赖建议使用清华镜像源（`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple ...`），项目 `.venv\pip.ini` 已配置。
 ### 运行与自检
 ```
-D:\Temp\Aura_Pixie\.venv\Scripts\activate
+D:\Temp\02_Aura_Pixie\.venv\Scripts\activate
 python main.py                        # 运行桌面圆球
 python main.py --selftest             # 主程序内置自检
 python tools\check_breath.py          # 全量离屏自检（248 项，应全 PASS）
