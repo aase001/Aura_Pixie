@@ -1490,6 +1490,102 @@ def main() -> int:
           " | ".join(f"{s['name']}{'(灰)' if s['placeholder'] else ''}" for s in sectors_now)
           + f" → 圆环 {len(sectors_now)} 等分")
 
+    # ====== V9 次级动态扇形自检 ======
+    print("\nV9 次级动态扇形")
+
+    # 1. 成对标记解析器
+    print("\n成对标记解析")
+    test_code_1 = """cmd: echo main
+【【【子1】】】
+cmd: echo sub1
+【【【子1】】】
+【【【子2】】】
+cmd: echo sub2
+【【【子2】】】"""
+    parsed_1 = M.parse_special_sections(test_code_1)
+    check("解析器：主指令提取",
+          parsed_1["main"] == "cmd: echo main",
+          f"（main={parsed_1['main']!r}）", failures)
+    check("解析器：次级项数量",
+          len(parsed_1["items"]) == 2,
+          f"（items数={len(parsed_1['items'])}）", failures)
+    check("解析器：次级项1名称与代码",
+          parsed_1["items"][0]["name"] == "子1" and parsed_1["items"][0]["code"] == "cmd: echo sub1",
+          f"（items[0]={parsed_1['items'][0]}）", failures)
+    check("解析器：次级项2名称与代码",
+          parsed_1["items"][1]["name"] == "子2" and parsed_1["items"][1]["code"] == "cmd: echo sub2",
+          f"（items[1]={parsed_1['items'][1]}）", failures)
+
+    # 2. 无标记场景
+    test_code_2 = "cmd: echo only_main"
+    parsed_2 = M.parse_special_sections(test_code_2)
+    check("解析器：无标记时主指令完整",
+          parsed_2["main"] == "cmd: echo only_main",
+          f"（main={parsed_2['main']!r}）", failures)
+    check("解析器：无标记时次级项为空",
+          len(parsed_2["items"]) == 0,
+          f"（items数={len(parsed_2['items'])}）", failures)
+
+    # 3. 标记未闭合错误
+    test_code_3 = """cmd: echo main
+【【【未闭合】】】
+cmd: echo orphan"""
+    parsed_3 = M.parse_special_sections(test_code_3)
+    check("解析器：未闭合标记报错",
+          parsed_3["err"] != "" and "未闭合" in parsed_3["err"],
+          f"（err={parsed_3['err']!r}）", failures)
+
+    # 4. 测试剥标记逻辑
+    print("\n测试剥标记")
+    test_code_4 = """cmd: echo main_cmd
+【【【子功能】】】
+cmd: echo sub_cmd
+【【【子功能】】】"""
+    _kk, _pp, argv_test, _cl, err_test = M.build_code_test(test_code_4)
+    check("测试构造：含标记时剥标记只测主指令",
+          err_test == "" and argv_test is not None and argv_test[0] == "cmd.exe",
+          f"（err={err_test!r}, argv={argv_test}）", failures)
+
+    # 5. 保存校验适配
+    print("\n保存校验适配")
+    save_code_1 = """cmd: echo main
+【【【子1】】】
+cmd: echo sub1
+【【【子1】】】"""
+    _k, _p, e_save_1 = M.classify_code(save_code_1)
+    check("保存校验：含标记的主指令段合法",
+          e_save_1 == "",
+          f"（err={e_save_1!r}）", failures)
+
+    save_code_2 = """py: print(1)
+【【【子1】】】
+py: 1 +
+【【【子1】】】"""
+    _k, _p, e_save_2 = M.classify_code(save_code_2)
+    check("保存校验：次级项语法错误被拦截",
+          e_save_2 != "" and "语法" in e_save_2,
+          f"（err={e_save_2!r}）", failures)
+
+    # 6. 状态机字段存在性
+    print("\n状态机字段")
+    ball_test = M.AuraBall()
+    check("状态机：_sub_sectors 字段存在",
+          hasattr(ball_test, "_sub_sectors"),
+          "（缺少 _sub_sectors）", failures)
+    check("状态机：_sub_launching 字段存在",
+          hasattr(ball_test, "_sub_launching"),
+          "（缺少 _sub_launching）", failures)
+    check("状态机：_sub_pending_items 字段存在",
+          hasattr(ball_test, "_sub_pending_items"),
+          "（缺少 _sub_pending_items）", failures)
+    check("状态机：_sub_timer 字段存在",
+          hasattr(ball_test, "_sub_timer"),
+          "（缺少 _sub_timer）", failures)
+    check("状态机：_ctx_consumed 字段存在",
+          hasattr(ball_test, "_ctx_consumed"),
+          "（缺少 _ctx_consumed）", failures)
+    ball_test.deleteLater()
+
     print("总判定:", "PASS" if not failures else "NEEDS_REVIEW")
     for f in failures:
         print("  -", f)

@@ -342,6 +342,77 @@ def classify_code(text: str) -> tuple[str, str, str]:
     return kind, body, ""
 
 
+# ---------------------------------------------------------------- 次级动态扇形：成对特殊标记解析
+_SPECIAL_MARK_RE = re.compile(r"^\s*【{3}(.+?)】{3}\s*$")
+
+
+def parse_special_sections(text: str) -> dict:
+    """解析指令中的「次级动态扇形」成对特殊标记。
+
+    语义（成对标记，示例）：
+      cmd: echo 123456          ← 第一个标记行之前 = 主指令（左键执行，可空）
+      【【【子代码1】】】
+      cmd: echo 234567
+      【【【子代码1】】】         ← 同一对标记之间的代码 = 次级项「子代码1」的指令
+      【【【子代码2】】】
+      cmd: echo 345678
+      【【【子代码2】】】
+
+    规则：
+      · 标记行 = 整行 `【【【标题】】】`（标题经 clamp_name 截断，空标题兜底「未命名」）；
+      · 同名标记按「开→闭」顺序配对（最近同名配对；不支持嵌套），配对区间内的
+        代码 = 该次级项指令；多个标记对按出现顺序生成多个次级项，独立生效；
+      · 第一个标记行之前的所有代码 = 主指令；无任何标记时全文即主指令（向后兼容）；
+      · 标记必须成对闭合，否则 err 非空（保存/测试校验会拦截）；
+      · 次级项最多取前 MAX_SECTORS 个，超出截断。
+
+    返回 {"main": 主指令文本, "items": [{"name","code"},...], "err": 校验错误或空串}
+    """
+    body = text or ""
+    if not body.strip():
+        return {"main": "", "items": [], "err": ""}
+    lines = body.splitlines()
+    marks: list[int] = []       # 标记行的行索引
+    for idx, ln in enumerate(lines):
+        if _SPECIAL_MARK_RE.match(ln):
+            marks.append(idx)
+    if not marks:
+        return {"main": body.strip(), "items": [], "err": ""}
+
+    # 栈式同名配对：栈顶同名 → 视为闭合弹出配对；否则压栈（首个标记必然是「开」）
+    stack: list[tuple[int, str]] = []            # (行索引, 标题)
+    pairs: list[tuple[int, int, str]] = []       # (开行, 闭行, 标题)
+    err = ""
+    for idx in marks:
+        tag = _SPECIAL_MARK_RE.match(lines[idx]).group(1).strip()
+        if stack and stack[-1][1] == tag:
+            open_idx, _ = stack.pop()
+            pairs.append((open_idx, idx, tag))
+        elif any(s[1] == tag for s in stack):
+            if not err:
+                err = f"特殊标记「{tag}」配对顺序异常（不支持嵌套）"
+            stack.append((idx, tag))   # 继续尽力配对，错误以 err 拦下
+        else:
+            stack.append((idx, tag))
+    if stack:
+        names = "、".join(sorted({s[1] for s in stack}))
+        suffix = f"；且「{names}」配对顺序异常" if err else ""
+        err = err or f"特殊标记「{names}」未成对闭合{suffix}"
+
+    # 主指令 = 第一个标记行之前全部行（保持原换行/缩进）
+    main = "\n".join(lines[:marks[0]]).strip()
+    # 次级项 = 各配对区间内的代码，按出现顺序（先出现的在前）
+    pairs.sort(key=lambda p: p[0])
+    items = []
+    for o, c, tag in pairs:
+        code = "\n".join(lines[o + 1:c]).strip()
+        items.append({"name": clamp_name(tag, CONFIG["label_max_units"]) or "未命名",
+                      "code": code})
+    if len(items) > MAX_SECTORS:
+        items = items[:MAX_SECTORS]
+    return {"main": main, "items": items, "err": err}
+
+
 def _log_crash(where: str, exc: BaseException) -> None:
     """拦截回调异常并写入 crash.log。
 
@@ -458,6 +529,17 @@ def build_code_test(text: str):
       · cleanup = 进程结束后应删除的临时文件路径列表（可能为空；py 脚本 / cmd bat）。
     """
     import base64
+    # 含【【【…】】】成对特殊标记（次级扇形指令）：测试仅执行「主指令」（标记前），
+    # 标记块与次级项代码一律剥除——避免标记行混入代码造成语法报错。
+    parsed = parse_special_sections(text)
+    if parsed["err"]:
+        return "py", "", None, [], parsed["err"]
+    if parsed["items"]:
+        if not parsed["main"].strip():
+            return ("py", "", None, [],
+                    "该指令仅含次级功能（特殊标记），没有可测试的主指令；"
+                    "请先填写主指令或改用「保存」校验格式。")
+        text = parsed["main"]
     kind, payload, err = classify_code(text)
     if err:
         return kind, payload, None, [], err
@@ -1613,12 +1695,26 @@ class CodeEditDialog(QDialog):
         self.btn_test.setEnabled(True)
 
     def _on_save(self) -> None:
-        """保存：仅校验格式/语法（不执行）。合法→accept 写回单元格；非法→弹窗提示留在编辑。"""
+        """保存：仅校验格式/语法（不执行）。合法→accept 写回单元格；非法→弹窗提示留在编辑。
+
+        含【【【…】】】成对特殊标记时，分别校验主指令与每个次级项代码（任一非法即拒）。
+        """
         code = self.editor.toPlainText()
-        _kind, _payload, err = classify_code(code)
-        if err:
-            QMessageBox.warning(self, "代码异常请查证", f"指令未通过校验：\n\n{err}")
+        parsed = parse_special_sections(code)
+        if parsed["err"]:
+            QMessageBox.warning(self, "代码异常请查证", f"特殊标记未通过校验：\n\n{parsed['err']}")
             return
+        # 主指令（若有内容）与每个次级项代码（若有内容）逐段校验
+        candidates = [("主指令", parsed["main"])]
+        candidates += [(f"次级项「{it['name']}」", it["code"]) for it in parsed["items"]]
+        for label, seg in candidates:
+            if not seg.strip():
+                continue   # 空段=仅占位/仅含次级功能，合法
+            _kind, _payload, err = classify_code(seg)
+            if err:
+                QMessageBox.warning(self, "代码异常请查证",
+                                    f"{label} 未通过校验：\n\n{err}")
+                return
         self.accept()
 
     def _on_finished(self, _result: int) -> None:
@@ -1701,7 +1797,30 @@ CODE_HELP_TEXT = (
     "  · 保存 = 仅校验指令的格式/语法是否合法，不执行；校验不通过会弹窗提示\n"
     "    「代码异常请查证」，修正后才能写回指令框。\n"
     "  · 取消 = 不做任何更改，直接返回设置界面。\n\n"
-    "  提示：多行指令建议用右键「高级编辑」编写；测试按钮会真实执行，请谨慎。"
+    "  提示：多行指令建议用右键「高级编辑」编写；测试按钮会真实执行，请谨慎。\n\n"
+    "────────────────────────────\n"
+    "■ 次级动态扇形（右键展开子菜单）\n"
+    "  主扇形展开后，在某个扇区上【右键】可展开该扇区专属的「次级动态扇形」\n"
+    "  （先收回主扇形，约 300ms 后沿球心顺时针展开一圈新扇区，操作方式与主扇区相同）。\n\n"
+    "  如何定义：在指令中用「成对特殊标记」把代码分区——\n"
+    "    · 第一个标记行之前的所有代码 = 主指令（左键点击该扇区时执行，可为空）；\n"
+    "    · 一对【【【名字】】】之间的代码 = 该次级项的指令；多对标记可定义多个次级项；\n"
+    "    · 标记必须成对闭合（同名配对，不支持嵌套），配对顺序异常会校验失败。\n\n"
+    "  示例（cmd 格式）：\n"
+    "    cmd: echo 这是主指令\n"
+    "    【【【子代码1】】】\n"
+    "    cmd: echo 这是次级项1\n"
+    "    【【【子代码1】】】\n"
+    "    【【【子代码2】】】\n"
+    "    cmd: echo 这是次级项2\n"
+    "    【【【子代码2】】】\n\n"
+    "  说明：\n"
+    "    · 标题限 6 个汉字 / 12 个字母，超长自动截断；空标题显示「未命名」；\n"
+    "    · 左键点击含标记的扇区 = 只执行「主指令」；主指令为空则仅收起、不执行、不闪红；\n"
+    "    · 右键点击无标记的扇区 = 红色闪光提示（无下级功能）；\n"
+    "    · 次级环上的扇区再右键不会继续套娃（不递归），仅闪红提示；\n"
+    "    · 「测试」按钮对含标记指令只会测试「主指令」（标记块会被跳过，避免误报语法）。\n\n"
+    "  提示：含『代码1』『代码2』等多子功能的扇区，最适合用右键一键展开次级菜单执行。"
 )
 
 
@@ -2412,6 +2531,18 @@ class AuraBall(QWidget):
         self._press: dict | None = None      # {grab: 全局按下点, offset: 球心相对鼠标}
         self._dragging = False
         self._snap: dict | None = None       # {from, to, ms, dur} 非线性吸附/回位
+        # —— 次级动态扇形（V9）——
+        # 右键展开的主列表保存；_sub_sectors 展开期间临时替换 _sectors；
+        # _sub_pending_items = 待展开的次级项；_sub_launching = 收起飞行中等待
+        # 延迟展开（禁止收回途中回球重开）；_sub_launching_aborted = 期间被打断
+        # （拖动/休眠/二次操作）应取消本次次级展开。
+        self._main_sectors = list(self._sectors)
+        self._sub_sectors: list[dict] | None = None
+        self._sub_pending_items: list[dict] | None = None
+        self._sub_launching = False
+        self._sub_launching_aborted = False
+        self._sub_timer: QTimer | None = None
+        self._ctx_consumed = False   # 右键已消费（环上触发次级/闪红）→ 抑制默认菜单
         self._warn_ms = 0.0                  # 越界累计时长，用于闪烁
         self._warn_on = False
         # —— 定位闪烁（「在哪儿？」跨进程定位红框）——
@@ -2517,6 +2648,9 @@ class AuraBall(QWidget):
         if self._press is None:
             return False
         if not self._dragging:
+            # 右键次级展开的收起飞行中若开始拖动球体 → 取消次级展开（先保证拖动手感）
+            if self._sub_launching:
+                self._abort_sub_launch()
             grab = self._press["grab"]
             if math.hypot(gp.x() - grab.x(), gp.y() - grab.y()) < CONFIG["drag_start_px"]:
                 return False
@@ -2764,6 +2898,9 @@ class AuraBall(QWidget):
         """
         if self._asleep:
             return
+        # 休眠前取消等待中的次级展开（若有）：避免残留定时器在休眠中意外展开
+        if self._sub_launching:
+            self._abort_sub_launch()
         self._asleep = True
         self._breath_frozen = True
         self._frozen_phase = self._phase
@@ -2882,10 +3019,12 @@ class AuraBall(QWidget):
             self._settle_out(in_ball, in_ring, dt_ms)
         elif self._state == "collapsing":
             # 收起途中鼠标回球/环 → 立即重新展开，不重等 300ms；冻结色按当时本色刷新
-            # 例外：长按回收（_hold_collapsed 且仍按住）期间不得重开，否则扇形
-            # 刚收起就被展开——此前该分支未排除长按场景，导致回收永远不生效。
+            # 例外1：长按回收（_hold_collapsed 且仍按住）期间不得重开，否则扇形
+            #   刚收起就被展开——此前该分支未排除长按场景，导致回收永远不生效。
+            # 例外2：次级展开的收起飞行（_sub_launching）同样不得重开，必须等
+            #   收起完成 + 300ms 延迟，否则次级环会在未完全收回时被重开打断。
             if in_ball or in_ring:
-                if self._hold_collapsed and self._press is not None:
+                if (self._hold_collapsed and self._press is not None) or self._sub_launching:
                     self._hover_ms = 0.0
                 else:
                     self._state = "expanding"
@@ -2925,11 +3064,26 @@ class AuraBall(QWidget):
         self._highlight = -1
 
     def _on_hidden(self) -> None:
-        """扇形彻底回收：呼吸解冻，从此刻的相位继续（视觉连续）。"""
+        """扇形彻底回收：呼吸解冻，从此刻的相位继续（视觉连续）。
+
+        次级环场景：若正在等待次级展开（收起飞行中），此处不恢复主列表——
+        延迟展开回调会替换 `_sectors` 并重新展开；若次级环完成点击/离开被收回
+        （_sub_sectors 非 None 且非等待展开），则恢复主列表。
+        """
+        was_waiting_sub = bool(self._sub_launching)
         self._state = "hidden"
         self._hover_ms = 0.0
         self._breath_frozen = False
         self._resize_keep_center(IDLE_SIZE)
+        if was_waiting_sub:
+            return   # 等待延迟展开：_open_sub_ring 负责换列表并展开
+        # 若此前展开的是次级环，收起完成 → 恢复主列表
+        if self._sub_sectors is not None:
+            self._sectors = self._main_sectors
+            self._sub_sectors = None
+            self._sub_launching = False
+            self._sub_launching_aborted = False
+            self._sub_pending_items = None
 
     def _resize_keep_center(self, size: int) -> None:
         self.setFixedSize(size, size)
@@ -2962,8 +3116,16 @@ class AuraBall(QWidget):
 
     # ------------------------------------------------------------ 交互：拖动与吸附
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        """左键按住球体：记下抓取偏移，等待移动阈值判定是点击还是拖动。"""
+        """左键按住球体：记下抓取偏移，等待移动阈值判定是点击还是拖动。
+
+        右键：环上命中扇区 → 次级动态扇形（无标记闪红 / 有标记收起后展开）；
+        球体或环外空白 → 交给 contextMenuEvent 的默认菜单处理。
+        """
         try:
+            # 右键：优先判定环上扇区的「次级动态扇形」触发
+            if event.button() == Qt.MouseButton.RightButton:
+                self._on_right_press(event)
+                return
             if event.button() != Qt.MouseButton.LeftButton:
                 return
             # 系统判定本击不是双击（若是双击，第二击会以 MouseButtonDblClick 派发、
@@ -2982,6 +3144,92 @@ class AuraBall(QWidget):
             self._follow = False
         except Exception as exc:  # noqa: BLE001
             _log_crash("mousePressEvent", exc)
+
+    def _on_right_press(self, event) -> None:
+        """右键环上扇区 → 次级动态扇形处理。
+
+        · 鼠标在展开环上且命中扇区：
+            - 该扇区指令无【【【…】】】标记 → 复用失败红闪（无下级功能）；
+            - 有标记（成对）→ 记录待展开次级项 → 收起主环 → 延迟 300ms
+              后顺时针整环展开次级环；
+        · 无论在哪种状态，非环上命中（球体/空白）→ 不吞事件，放行默认右键菜单。
+        """
+        # 收起中且正在等次级展开：忽略重复右键
+        if self._sub_launching:
+            return
+        if self._state not in ("open", "expanding") or self._highlight < 0:
+            return   # 未展开 / 不在环上 → 保留默认右键菜单
+        i = self._highlight
+        sec = self._sectors[i]
+        self._ctx_consumed = True   # 环上右键一律替换默认菜单
+        if sec.get("placeholder"):
+            # 占位扇区：闪红提示无下级功能
+            self._flash = {"sector": i, "ok": False, "ms": 0.0,
+                           "dur": CONFIG["flash_ms_fail"]}
+            return
+        parsed = parse_special_sections(sec["code"])
+        if parsed["err"]:
+            # 标记校验失败（不成对等）→ 闪红并以 stderr 提示，避免静默
+            print(f"[次级扇形] {sec['name']} 标记异常：{parsed['err']}", file=sys.stderr)
+            self._flash = {"sector": i, "ok": False, "ms": 0.0,
+                           "dur": CONFIG["flash_ms_fail"]}
+            return
+        if not parsed["items"]:
+            # 无标记：复用失败红闪（无下级功能）
+            self._flash = {"sector": i, "ok": False, "ms": 0.0,
+                           "dur": CONFIG["flash_ms_fail"]}
+            return
+        # 有标记：记录待展开项 → 收起主环 → 延迟 300ms 展开次级环
+        self._sub_pending_items = parsed["items"]
+        self._sub_launching = True
+        self._enter_collapsing()
+        # 收起完成后（_on_hidden）触发延迟展开
+        self._sub_timer = QTimer(self)
+        self._sub_timer.setSingleShot(True)
+        self._sub_timer.setInterval(300)
+        self._sub_timer.timeout.connect(self._open_sub_ring)
+        self._sub_timer.start()
+
+    def _open_sub_ring(self) -> None:
+        """300ms 延迟后：把 _sectors 替换为次级项并展开（渲染/命中/执行全复用）。"""
+        self._sub_timer = None
+        if self._sub_launching_aborted or self._sub_pending_items is None:
+            self._sub_pending_items = None
+            self._sub_launching = False
+            self._sub_launching_aborted = False
+            return
+        # 收起尚未完成（如被拖动/休眠打断）→ 取消本次次级展开
+        if self._state != "hidden":
+            self._sub_pending_items = None
+            self._sub_launching = False
+            self._sub_launching_aborted = False
+            return
+        self._sub_sectors = [{
+            "name": it["name"],
+            "code": it["code"],
+            "placeholder": not it["code"].strip(),
+        } for it in self._sub_pending_items]
+        if len(self._sub_sectors) < MIN_SECTORS:   # 补齐到最少 2 个占位
+            while len(self._sub_sectors) < MIN_SECTORS:
+                self._sub_sectors.append({"name": f"空位 {len(self._sub_sectors) + 1}",
+                                          "code": "", "placeholder": True})
+        self._sectors = self._sub_sectors
+        self._sub_pending_items = None
+        self._sub_launching = False
+        self._sub_launching_aborted = False
+        self._enter_expanding()
+
+    def _abort_sub_launch(self) -> None:
+        """取消等待中的次级展开（右键后收起飞行内被拖动/其他强交互打断时）。"""
+        self._sub_launching = False
+        self._sub_launching_aborted = True
+        self._sub_pending_items = None
+        if self._sub_timer is not None:
+            try:
+                self._sub_timer.stop()
+            except RuntimeError:
+                pass
+            self._sub_timer = None
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         """按住移动超过阈值即进入拖动：球心用临界阻尼弹簧跟随鼠标轨迹。
@@ -3094,29 +3342,51 @@ class AuraBall(QWidget):
     def trigger_sector(self, i: int) -> None:
         """执行一个扇区：占位/空代码只收起；正常扇区起闪光并派发代码。
 
-        执行 fire-and-forget，主程序绝不等待子进程（文档避坑 3：同步调用会冻结 UI）。
+        含特殊标记的扇区：左键执行主指令（第一个标记前），主指令为空则只收起
+        （占位语义）。执行 fire-and-forget，主程序绝不等待子进程（避坑 3）。
         """
         self._enter_collapsing()
         sec = self._sectors[i]
         if sec["placeholder"]:
             return
-        try:
-            err = run_code(sec["code"])
-        except Exception as exc:  # noqa: BLE001 - 派发失败也不能带走进程
-            _log_crash("run_code", exc)
-            err = f"启动失败：{exc}"
-        ok = err is None
-        if not ok:
+        code = sec["code"]
+        # 含成对特殊标记（次级功能）时，左键只执行「主指令」（标记前）；无标记原样
+        parsed = parse_special_sections(code)
+        if parsed["err"]:
+            err = parsed["err"]
+            run_ok = False
+        elif parsed["items"]:
+            main_code = parsed["main"]
+            if not main_code.strip():
+                return   # 仅含次级功能、主指令为空 → 只收起不执行、不闪红
+            try:
+                err = run_code(main_code)
+            except Exception as exc:  # noqa: BLE001
+                _log_crash("run_code", exc)
+                err = f"启动失败：{exc}"
+            run_ok = err is None
+        else:
+            try:
+                err = run_code(code)
+            except Exception as exc:  # noqa: BLE001
+                _log_crash("run_code", exc)
+                err = f"启动失败：{exc}"
+            run_ok = err is None
+        if not run_ok:
             print(f"[执行] {sec['name']} 未执行：{err}", file=sys.stderr)
         self._flash = {
             "sector": i,
-            "ok": ok,
+            "ok": run_ok,
             "ms": 0.0,
-            "dur": CONFIG["flash_ms_ok"] if ok else CONFIG["flash_ms_fail"],
+            "dur": CONFIG["flash_ms_ok"] if run_ok else CONFIG["flash_ms_fail"],
         }
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         try:
+            # 环上右键已被「次级动态扇形」处理（展开/闪红）→ 不弹默认菜单
+            if self._ctx_consumed:
+                self._ctx_consumed = False
+                return
             menu = QMenu(self)
             act_settings = menu.addAction("设置")
             act_reload = menu.addAction("重载")
@@ -3178,6 +3448,7 @@ class AuraBall(QWidget):
 
     def reload_config(self) -> None:
         self._sectors = load_functions()
+        self._main_sectors = list(self._sectors)   # 主列表同步刷新（含次级环状态则丢弃）
         self._highlight = -1
         self.update()
 
