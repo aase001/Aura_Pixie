@@ -124,6 +124,7 @@ CONFIG = {
     "snap_margin": 200.0,      # 扇形外边缘距屏幕边缘 ≤200px → 松手即吸附
     "snap_anim_ms": 280.0,     # 吸附 / 回位的非线性动画时长
     "warn_period_ms": 500.0,   # 越界闪烁周期
+    "pos_settle_ms": 10000.0,  # 球心位置记忆：移动停止（上次采样后 <0.5px 位移）满该时长 → 立即写入配置
     "press_hold_ms": 500.0,    # 悬停展开扇形后按住球体超过该时长 → 判为即将拖动，回收扇形
     "drag_grace_ms": 500.0,    # 按住拖动回收宽限期：从按下起 500ms 内，无论是否已进入拖动，
                                # 都强制持续推进扇形收起（回收动画 220ms < 500ms，保证收完才跟手），
@@ -2601,6 +2602,12 @@ class AuraBall(QWidget):
         self._sub_launching_aborted = False
         self._sub_timer: QTimer | None = None
         self._ctx_consumed = False   # 右键已消费（环上触发次级/闪红）→ 抑制默认菜单
+        # —— 球心位置记忆：移动停止 10s 无位移 → 立即写配置 ——
+        # _last_motion_center = 上次采样的球心参考点（与该点位移 ≥0.5px 视为「在动」）；
+        # _settle_ms = 持续「无位移」的累计时长；_pos_dirty = 是否移动过待落盘。
+        self._pos_dirty = False
+        self._settle_ms = 0.0
+        self._last_motion_center = QPointF(self._center)
         self._warn_ms = 0.0                  # 越界累计时长，用于闪烁
         self._warn_on = False
         # —— 定位闪烁（「在哪儿？」跨进程定位红框）——
@@ -2657,6 +2664,9 @@ class AuraBall(QWidget):
         self._last_ms = 0
         self._last_poll_ms = 0
         self._last_frame = -1
+        self._pos_dirty = False
+        self._settle_ms = 0.0
+        self._last_motion_center = QPointF(self._center)
         self._timer.start()
         self._poll.start()
 
@@ -2690,6 +2700,11 @@ class AuraBall(QWidget):
             self._advance_motion(dt_ms)
         except Exception as exc:  # noqa: BLE001 - 槽函数异常默认会终止进程，必须兜住
             _log_crash("motion", exc)
+        # 球心位置记忆：运动推进后检测位移；静止满 10s 自动写配置
+        try:
+            self._note_motion_settle(dt_ms)
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("motion_settle", exc)
         self.frames_drawn += 1
         self.update()
 
@@ -2733,6 +2748,35 @@ class AuraBall(QWidget):
         off = self._press["offset"]
         self._target = QPointF(gp.x() + off.x(), gp.y() + off.y())
         return True
+
+    def _note_motion_settle(self, dt_ms: float) -> None:
+        """球心位置记忆：移动停止 10s 无位移 → 立即写配置。
+
+        在心跳帧（_on_tick）里调用：以「距上次参考点位移 ≥0.5px」判定在动；
+        每次位移即视为已改变位置（_pos_dirty），并重置静止计时；持续静止满
+        pos_settle_ms（10s）且确实移动过 → 写入配置，供下次启动恢复。
+        退出不再写坐标（closeEvent 中已移除），此机制接管位置记忆。
+        """
+        if not self._clock.isValid():
+            return
+        try:
+            moved = (math.hypot(self._center.x() - self._last_motion_center.x(),
+                                self._center.y() - self._last_motion_center.y())
+                     >= 0.5)
+            if moved:
+                self._last_motion_center = QPointF(self._center)
+                self._pos_dirty = True
+                self._settle_ms = 0.0
+                return
+            if not self._pos_dirty:
+                return
+            self._settle_ms += dt_ms
+            if self._settle_ms >= CONFIG["pos_settle_ms"]:
+                self._settle_ms = 0.0
+                self._pos_dirty = False
+                save_ball_position(self._center.x(), self._center.y())
+        except Exception as exc:  # noqa: BLE001 - 位置保存失败不打断运行
+            _log_crash("note_motion_settle", exc)
 
     def _advance_collapse_under_drag(self, dt_ms: float, elapsed_ms: float) -> None:
         """拖动期间的扇形回收推进（按住拖动回收宽限 drag_grace_ms 的落实）。
@@ -3514,12 +3558,8 @@ class AuraBall(QWidget):
     # 属于误触隐患；移除退出逻辑后，双击与单击保持相同行为（单击仍正常执行扇区）。
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # 关闭前保存球心坐标（下次启动按记录打开）；失败不打断退出
-        try:
-            save_ball_position(self._center.x(), self._center.y())
-        except Exception as exc:  # noqa: BLE001
-            _log_crash("close_save_pos", exc)
-        # 只删已经跑完的临时脚本，绝不等待仍在运行的子进程
+        # 球心位置记忆已由「移动停止 10s 自动写配置」接管（_note_motion_settle），
+        # 退出时不再写坐标；此处仅清理已结束的临时脚本，绝不等待仍在运行的子进程
         for proc, path in list(SESSION_RUNNERS):
             if proc.poll() is not None:
                 try:

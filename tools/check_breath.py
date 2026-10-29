@@ -1375,20 +1375,59 @@ def main() -> int:
           dlg_ml.rows()[0]["code"] == "py:\nimport os\nx = 1\n    y = 2", "", failures)
     dlg_ml.deleteLater()
 
-    # ---------- 22 关闭前保存球心坐标（接线：closeEvent → save_ball_position） ----------
-    print("\n关闭保存球心坐标")
+    # ---------- 22 球心位置记忆：退出不再写坐标；移动停止 10s 自动落盘 ----------
+    print("\n球心位置记忆（静止 10s 自动落盘）")
     _cfg = M.CONFIG_PATH
     _backup22 = _cfg + ".bak_selftest22"
     shutil.copyfile(_cfg, _backup22)
     try:
+        # 22a. 退出不写坐标：closeEvent 不得再调 save_ball_position
+        M.save_ball_position(100.0, 100.0, _cfg)   # 写入基准坐标
         b22 = fresh_ball((1500, 700))
         b22._center = QPointF(1500, 700)  # noqa: SLF001 - 直接摆球心
-        b22.close()   # closeEvent 会写配置；离屏窗口 close 不弹真实退出
+        b22.close()   # closeEvent 不应写配置；离屏窗口 close 不弹真实退出
         app.processEvents()
-        pos22 = M.saved_ball_position()
-        check("关窗后球心坐标写入配置",
-              pos22 is not None and abs(pos22[0] - 1500) < 1e-6
-              and abs(pos22[1] - 700) < 1e-6, f"（实得 {pos22}）", failures)
+        pos22 = M.saved_ball_position(_cfg)
+        check("退出（close）后坐标不被改写",
+              pos22 is not None and abs(pos22[0] - 100) < 1e-6
+              and abs(pos22[1] - 100) < 1e-6,
+              f"（实得 {pos22}，期望 (100.0, 100.0)）", failures)
+
+        # 22b. 移动停止 10s 无位移 → 立即写坐标
+        _pre = M.saved_ball_position(_cfg) or (0.0, 0.0)
+        b23 = fresh_ball((1500, 700))
+        b23._clock.start()                    # 需要时钟有效（离屏未自启）
+        b23._last_motion_center = QPointF(1500, 700)
+        # 模拟移动到位 (1600, 800)
+        b23._center = QPointF(1600, 800)      # noqa: SLF001
+        b23._note_motion_settle(16)           # 检测到位移 → dirty=True, settle 归零
+        # 连续静止累计 5000ms×2 = 10000ms → 触发落盘
+        b23._note_motion_settle(5000)
+        b23._note_motion_settle(5000)
+        pos23 = M.saved_ball_position(_cfg)
+        check("静止累计满 10s 自动写入坐标",
+              pos23 is not None and abs(pos23[0] - 1600) < 1e-6
+              and abs(pos23[1] - 800) < 1e-6,
+              f"（实得 {pos23}，期望 (1600.0, 800.0)）", failures)
+        # 静止不足 10s 不写
+        b24 = fresh_ball((10, 10))
+        b24._clock.start()
+        b24._last_motion_center = QPointF(10, 10)
+        b24._center = QPointF(11, 11)         # noqa: SLF001 - 移动 <0.5 不算位移
+        b24._note_motion_settle(16)           # 位移 1.41px ≥0.5 → dirty
+        pos_before = M.saved_ball_position(_cfg)
+        b24._note_motion_settle(3000)         # 静止 3s < 10s
+        pos_after = M.saved_ball_position(_cfg)
+        check("静止未满 10s 不写入",
+              pos_after == pos_before,
+              f"（写前 {pos_before} 写后 {pos_after}）", failures)
+
+        # 22c. 源码防回归：closeEvent 不再调 save_ball_position
+        import inspect as _inspect
+        _src_close = _inspect.getsource(M.AuraBall.closeEvent)
+        check("防回归：closeEvent 不再保存坐标",
+              "save_ball_position" not in _src_close,
+              "（closeEvent 仍含 save_ball_position）", failures)
     finally:
         shutil.copyfile(_backup22, _cfg)
         os.remove(_backup22)
