@@ -1586,6 +1586,46 @@ py: 1 +
           "（缺少 _ctx_consumed）", failures)
     ball_test.deleteLater()
 
+    # 7. 子功能块数量校验（V9 追加：2~9）
+    print("\n子功能块数量校验")
+    parsed_empty = M.parse_special_sections("cmd: echo no_mark")
+    check("数量校验：无标记 total=0",
+          parsed_empty["total"] == 0,
+          f"（total={parsed_empty.get('total')!r}）", failures)
+    # 调用方策略：仅当 total 非 0（含标记）才做数量校验 → 无标记不会被拦截
+    check("数量校验：无标记不触发数量校验",
+          (not parsed_empty["total"]) or M.validate_sub_items_count(parsed_empty["total"]) == "",
+          f"（total={parsed_empty['total']}）", failures)
+
+    def _mk_code(n: int) -> str:
+        """构造含 n 个成对子功能块的指令文本。"""
+        lines = ["cmd: echo main"]
+        for i in range(1, n + 1):
+            lines.append(f"【【【块{i}】】】")
+            lines.append(f"cmd: echo 块{i}")
+            lines.append(f"【【【块{i}】】】")
+        return "\n".join(lines)
+
+    for n, expect_ok in ((1, False), (2, True), (3, True), (9, True), (10, False)):
+        pn = M.parse_special_sections(_mk_code(n))
+        en = M.validate_sub_items_count(pn["total"]) if pn["total"] else ""
+        check(f"数量校验：{n} 个{'通过' if expect_ok else '拦截'}",
+              (en == "") == expect_ok and pn["total"] == n,
+              f"（total={pn['total']}, err={en!r}）", failures)
+
+    # 8. 行内编辑首行不显示修复（V9 追加）
+    #    旧实现 updateEditorGeometry 向上扩展（y 减高出部分）→ 编辑第 1 行时
+    #    首行内容被顶出视口不可见；现改为自单元格顶部向下展开、不越出视口。
+    import inspect as _inspect
+    _src_geo = _inspect.getsource(M.MultilineEditDelegate.updateEditorGeometry)
+    check("首行修复：不再向上扩展（源码无 option.rect.y() - 表达式）",
+          "- (h - option.rect.height())" not in _src_geo
+          and "option.rect.y() -" not in _src_geo,
+          "（源码仍含向上扩展）", failures)
+    check("首行修复：编辑器顶部夹进视口（source 含 max(0, option.rect.y())）",
+          "max(0, option.rect.y())" in _src_geo,
+          "（源码未夹紧视口顶部）", failures)
+
     print("总判定:", "PASS" if not failures else "NEEDS_REVIEW")
     for f in failures:
         print("  -", f)

@@ -366,18 +366,19 @@ def parse_special_sections(text: str) -> dict:
       · 标记必须成对闭合，否则 err 非空（保存/测试校验会拦截）；
       · 次级项最多取前 MAX_SECTORS 个，超出截断。
 
-    返回 {"main": 主指令文本, "items": [{"name","code"},...], "err": 校验错误或空串}
+    返回 {"main": 主指令文本, "total": 全部配对对数(未截断), "items": [{"name","code"},...],
+          "err": 校验错误或空串}
     """
     body = text or ""
     if not body.strip():
-        return {"main": "", "items": [], "err": ""}
+        return {"main": "", "total": 0, "items": [], "err": ""}
     lines = body.splitlines()
     marks: list[int] = []       # 标记行的行索引
     for idx, ln in enumerate(lines):
         if _SPECIAL_MARK_RE.match(ln):
             marks.append(idx)
     if not marks:
-        return {"main": body.strip(), "items": [], "err": ""}
+        return {"main": body.strip(), "total": 0, "items": [], "err": ""}
 
     # 栈式同名配对：栈顶同名 → 视为闭合弹出配对；否则压栈（首个标记必然是「开」）
     stack: list[tuple[int, str]] = []            # (行索引, 标题)
@@ -403,6 +404,7 @@ def parse_special_sections(text: str) -> dict:
     main = "\n".join(lines[:marks[0]]).strip()
     # 次级项 = 各配对区间内的代码，按出现顺序（先出现的在前）
     pairs.sort(key=lambda p: p[0])
+    total = len(pairs)              # 全部成对标记数量（子功能块；不截断，供数量校验）
     items = []
     for o, c, tag in pairs:
         code = "\n".join(lines[o + 1:c]).strip()
@@ -410,7 +412,21 @@ def parse_special_sections(text: str) -> dict:
                       "code": code})
     if len(items) > MAX_SECTORS:
         items = items[:MAX_SECTORS]
-    return {"main": main, "items": items, "err": err}
+    return {"main": main, "total": total, "items": items, "err": err}
+
+
+def validate_sub_items_count(total: int, limit_min: int = MIN_SECTORS,
+                             limit_max: int = MAX_SECTORS) -> str:
+    """校验子功能块（成对特殊标记）数量是否在 [limit_min, limit_max]。
+
+    返回错误信息；合法返回空串。用于保存校验：含特殊标记的指令，子功能块
+    数量必须 ≥2 且 ≤9（与主环形扇区上限一致）。
+    """
+    if limit_min <= total <= limit_max:
+        return ""
+    if total < limit_min:
+        return f"子功能块数量不足：当前 {total} 个，最少 {limit_min} 个"
+    return f"子功能块数量过多：当前 {total} 个，最多 {limit_max} 个"
 
 
 def _log_crash(where: str, exc: BaseException) -> None:
@@ -1502,11 +1518,16 @@ class MultilineEditDelegate(QStyledItemDelegate):
 
     def updateEditorGeometry(self, editor, option, index) -> None:  # noqa: N802
         if isinstance(editor, QPlainTextEdit):
-            # 向下展开：基于单元格矩形，高度按内容行数增长（最多 6 行）
+            # 向下展开：从单元格顶部向下延伸，保证被编辑行的首行内容始终可见
+            # （旧实现向上扩展，y 减去高出部分——编辑第 1 行时编辑器顶部越出
+            #   视口顶部，第一行内容被裁剪不可见；现改为夹在视口范围内）
             lines = editor.document().lineCount()
-            h = max(option.rect.height(), min(6, lines + 1) * 22 + 6)
-            editor.setGeometry(option.rect.x(), option.rect.y() - (h - option.rect.height()),
-                               option.rect.width(), h)
+            want_h = max(option.rect.height(), min(6, lines + 1) * 22 + 6)
+            vp = editor.parentWidget()   # QAbstractItemView 的编辑器父对象 = viewport
+            vp_h = vp.height() if vp is not None else want_h
+            y = max(0, option.rect.y())              # 顶部不越出视口：首行必定可见
+            h = min(want_h, vp_h - y)                # 底部不越出视口，超出回缩
+            editor.setGeometry(option.rect.x(), y, option.rect.width(), h)
         else:
             super().updateEditorGeometry(editor, option, index)
 
@@ -1704,6 +1725,14 @@ class CodeEditDialog(QDialog):
         if parsed["err"]:
             QMessageBox.warning(self, "代码异常请查证", f"特殊标记未通过校验：\n\n{parsed['err']}")
             return
+        # 子功能块数量校验：含特殊标记时，成对数量必须 2~9
+        if parsed["total"]:
+            err_count = validate_sub_items_count(parsed["total"])
+            if err_count:
+                QMessageBox.warning(self, "代码异常请查证",
+                                    f"{err_count}\n\n（次级环形最多 {MAX_SECTORS} 个，"
+                                    f"至少 {MIN_SECTORS} 个才能形成环形菜单）")
+                return
         # 主指令（若有内容）与每个次级项代码（若有内容）逐段校验
         candidates = [("主指令", parsed["main"])]
         candidates += [(f"次级项「{it['name']}」", it["code"]) for it in parsed["items"]]
@@ -2063,6 +2092,35 @@ class SettingsDialog(QDialog):
         except OSError as exc:
             _log_crash("topmost", exc)
             QMessageBox.warning(self, "设置", f"保持球体置顶设置失败：{exc}")
+        # 指令校验：子功能块数量（成对特殊标记）必须 2~9，且每段代码格式合法
+        for row in self.rows():
+            row_code = row["code"]
+            parsed = parse_special_sections(row_code)
+            if parsed["err"]:
+                QMessageBox.warning(
+                    self, "代码异常请查证",
+                    f"「{row['name']}」的指令未通过校验：\n\n{parsed['err']}")
+                return
+            if parsed["total"]:
+                err_count = validate_sub_items_count(parsed["total"])
+                if err_count:
+                    QMessageBox.warning(
+                        self, "代码异常请查证",
+                        f"「{row['name']}」{err_count}\n\n"
+                        f"（次级环形最多 {MAX_SECTORS} 个，至少 {MIN_SECTORS} 个才能形成环形菜单）")
+                    return
+                candidates = [("主指令", parsed["main"])]
+                candidates += [(f"次级项「{it['name']}」", it["code"])
+                               for it in parsed["items"]]
+                for label2, seg in candidates:
+                    if not seg.strip():
+                        continue
+                    _k2, _p2, err2 = classify_code(seg)
+                    if err2:
+                        QMessageBox.warning(
+                            self, "代码异常请查证",
+                            f"「{row['name']}」的{label2}未通过校验：\n\n{err2}")
+                        return
         save_functions(self.rows())
         self.accept()
 
