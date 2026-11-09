@@ -2081,20 +2081,14 @@ class SettingsDialog(QDialog):
         if self._help_dlg is not None and self._help_dlg.isVisible():
             self._help_dlg.close()
         self._help_dlg = None
-        # 开机自启动：按复选框状态写入/删除注册表启动项；失败提示但不打断保存
-        try:
-            set_autostart(self.chk_autostart.isChecked())
-        except OSError as exc:
-            _log_crash("autostart", exc)
-            QMessageBox.warning(self, "设置", f"开机自启动设置失败：{exc}")
-        # 保持球体置顶：写 setting.yaml 的 window.always_on_top 并立即生效
-        try:
-            set_topmost(self.chk_topmost.isChecked())
-        except OSError as exc:
-            _log_crash("topmost", exc)
-            QMessageBox.warning(self, "设置", f"保持球体置顶设置失败：{exc}")
-        # 指令校验：子功能块数量（成对特殊标记）必须 2~9，且每段代码格式合法
-        for row in self.rows():
+        # 指令校验（先校验、后写盘）：子功能块数量（成对特殊标记）必须 2~9，
+        # 且每段代码格式合法。
+        # 修复（置顶不稳定·根因一）：旧实现把置顶/自启写盘放在校验之前，
+        # 校验失败 return 时磁盘已是新值、运行时却未生效，形成
+        # 「配置说开、实际没开」的状态错位；下次重启读到新值又自动生效，
+        # 用户视角即置顶时好时坏。现在校验不通过时不写任何配置。
+        rows = self.rows()
+        for row in rows:
             row_code = row["code"]
             parsed = parse_special_sections(row_code)
             if parsed["err"]:
@@ -2122,7 +2116,21 @@ class SettingsDialog(QDialog):
                             self, "代码异常请查证",
                             f"「{row['name']}」的{label2}未通过校验：\n\n{err2}")
                         return
-        save_functions(self.rows())
+        # 校验全部通过后，才把复选框状态落盘。
+        # 开机自启动：写入/删除注册表启动项；失败提示但不打断保存
+        try:
+            set_autostart(self.chk_autostart.isChecked())
+        except OSError as exc:
+            _log_crash("autostart", exc)
+            QMessageBox.warning(self, "设置", f"开机自启动设置失败：{exc}")
+        # 保持球体置顶：写 setting.yaml 的 window.always_on_top
+        # （运行时生效在设置窗 Accepted 后的 _on_settings_closed 统一处理）
+        try:
+            set_topmost(self.chk_topmost.isChecked())
+        except OSError as exc:
+            _log_crash("topmost", exc)
+            QMessageBox.warning(self, "设置", f"保持球体置顶设置失败：{exc}")
+        save_functions(rows)
         self.accept()
 
     # ------------------------------------------------------------ 导入 / 导出配置
@@ -3160,6 +3168,13 @@ class AuraBall(QWidget):
         self._hover_ms = 0.0
         if self.width() != ACTIVE_SIZE:
             self._resize_keep_center(ACTIVE_SIZE)
+        # 修复（置顶不稳定·根因三）：置顶组内"后来者居上"，第三方置顶窗
+        # （截图工具、IM 悬浮窗等）显示或 raise 后会压住球，Windows 无告警、
+        # 程序也无夺回机制。展开是交互最需要可见的时刻，此时主动 raise_()
+        # 夺回置顶组第一名；平时（空闲/休眠/收起）不抢，避免干扰其他置顶窗
+        # 的下拉菜单等浮层。次级环展开同样复用本函数，一处覆盖两条链路。
+        if self._topmost:
+            self.raise_()
 
     def _enter_collapsing(self) -> None:
         self._state = "collapsing"
@@ -3541,9 +3556,15 @@ class AuraBall(QWidget):
     def _on_settings_closed(self, result: int) -> None:
         try:
             if result == int(QDialog.DialogCode.Accepted):
+                # reload_config 末尾会统一同步置顶，这里不再单独调用
                 self.reload_config()
-                self.apply_topmost_setting(topmost_enabled())   # 置顶即时生效
                 self.update()
+            else:
+                # 修复（置顶不稳定·根因二）：取消/直接关窗也要对表。
+                # 磁盘 window 块可能在设置窗外被改过（手改 yaml、导入配置后
+                # 校验失败等），旧实现只在 Accepted 时同步，运行时与磁盘长期
+                # 错位。非 Accepted 分支不动 functions，仅按磁盘值对齐置顶。
+                self.apply_topmost_setting(topmost_enabled())
             self._settings_dlg = None
         except Exception as exc:  # noqa: BLE001
             _log_crash("settings_closed", exc)
@@ -3552,6 +3573,10 @@ class AuraBall(QWidget):
         self._sectors = load_functions()
         self._main_sectors = list(self._sectors)   # 主列表同步刷新（含次级环状态则丢弃）
         self._highlight = -1
+        # 修复（置顶不稳定·根因二）：「重载」过去只刷 functions，不碰 window 块，
+        # 手改 yaml / 导入配置后置顶要重启才生效。现在重载即按磁盘值对齐置顶
+        # （apply_topmost_setting 内部已一致则跳过，不产生多余副作用）。
+        self.apply_topmost_setting(topmost_enabled())
         self.update()
 
     # 双击不触发任何操作：此前双击（含双击展开的扇形）会直接退出程序，
