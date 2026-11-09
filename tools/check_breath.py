@@ -527,8 +527,43 @@ def main() -> int:
     b10._open_sub_ring()  # 手动触发残留回调（防御性验证）→ 不应展开
     check("休眠后误触回调不展开次级环",
           b10._sub_sectors is None, "", failures)
+
+    # —— V10.1 拖动「移动」光标：判定成立挂起、松手恢复、成对防抖 ——
+    b11 = fresh_ball()
+    c0 = QApplication.overrideCursor()
+    check("前置：无 override 光标残留", c0 is None, "", failures)
+    b11._press = {"grab": QPointF(b11._center), "offset": QPointF(0, 0),
+                  "t0": float(b11._clock.elapsed()) if b11._clock.isValid() else 0.0}
+    moved = QPointF(b11._center.x() + 10, b11._center.y())
+    b11._update_drag_target(moved)  # noqa: SLF001  # 位移超阈值 → 拖动判定成立
+    c1 = QApplication.overrideCursor()
+    check("拖动判定成立 → 挂起 SizeAll 移动光标",
+          c1 is not None and c1.shape() == Qt.CursorShape.SizeAllCursor
+          and b11._move_cursor, "", failures)
+    # 成对防抖：重复触发不叠加（restore 一次即须完全干净）
+    b11._set_move_cursor()  # noqa: SLF001
+    b11._set_move_cursor()  # noqa: SLF001
+    check("重复挂载不叠加 override 栈", b11._move_cursor is True, "", failures)
+    # 松手路径：走真实 mouseReleaseEvent（拖动分支 → _finish_drag + 恢复）
+    b11._dragging = True
+    send_mouse(b11, QEvent.Type.MouseButtonRelease)
+    c2 = QApplication.overrideCursor()
+    check("松手 → 移动光标恢复（override 已清空）",
+          c2 is None and b11._move_cursor is False, "", failures)
+    b11._clear_move_cursor()  # noqa: SLF001  # 多余恢复不得报错也不得反挂
+    check("恢复幂等：未挂时 clear 无副作用",
+          QApplication.overrideCursor() is None, "", failures)
+    # 源码级防回归：成立点挂起 + 松开两分支恢复都在
+    import inspect as _insp_cur
+    _src_udt = _insp_cur.getsource(M.AuraBall._update_drag_target)
+    _src_rel = _insp_cur.getsource(M.AuraBall.mouseReleaseEvent)
+    check("防回归：_update_drag_target 挂载点存在",
+          "_set_move_cursor()" in _src_udt, "", failures)
+    check("防回归：松手两分支都恢复光标（≥2 处 clear）",
+          _src_rel.count("_clear_move_cursor()") >= 2, "", failures)
     b9.deleteLater()
     b10.deleteLater()
+    b11.deleteLater()
 
     # ---------- 10 项目名宽度规则 ----------
     print("\n项目名宽度规则（6 汉字 = 12 字母 = 12 单位）")
