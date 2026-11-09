@@ -1,0 +1,991 @@
+# -*- coding: utf-8 -*-
+"""
+Aura Pixie 资源监视模块 · 接口层（monitor_hub.py）
+
+架构（依据《资源监视集成到Python单文件-方案评估》方式③）：
+    MetricsHub ─┬─ SidecarRunner  → hwcollector.exe --stream（LibreHardwareMonitorLib 0.9.6）
+                │                    温度 / 功耗 / CPU逐核频率 / GPU / 硬盘SMART / 风扇
+                └─ PsutilSource   → 运行时间 / CPU使用率 / 内存 / 网速 / 盘符映射兜底
+    侧车断连或不存在时，自动降级为纯 psutil（温度/功耗/频率等项标记为不可用）。
+
+对外核心接口：
+    hub = MetricsHub(); hub.start(); ...
+    hub.get("cpu.temp")            -> Metric | None
+    hub.uptime()                   -> (秒, "H:MM:SS")
+    hub.list_disks()               -> [DiskInfo]        （多硬盘顺序罗列）
+    hub.list_fans()                -> [FanInfo]         （多风扇顺序罗列）
+    hub.snapshot()                 -> {key: Metric}     （UI 一次拉全）
+    hub.stop()
+
+状态口径（UI 据此渲染置灰/引导，不抛异常）：
+    ok              有可信读数
+    need_admin      需管理员权限（+PawnIO 驱动）：CPU温度/功耗/逐核频率/硬盘温度
+    unsupported     本机硬件/平台不暴露该传感器（如大量笔记本无风扇读数）
+    not_installed   侧车 exe 不存在或无法启动（除 psutil 项外全部不可用）
+    stale           采集中断，展示的是最后一次读数
+
+硬约束：
+    · LibreHardwareMonitorLib 锁 0.9.6，映射表随该版本标定（本机 i7-11800H +
+      RTX 3060 + UHD 核显 + 双 NVMe 实测），升级库版本必须重测。
+    · GPU 型号匹配用「家族关键字」而非精确名（独显/NVIDIA/AMD/Radeon → 独显，
+      Intel UHD/Iris/核显 → 核显），跨机型可用。
+    · 本文件不得 import PySide6——保持可被 tools/ 自检脚本独立运行。
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import string
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+try:
+    import psutil
+except ImportError:  # 允许在无 psutil 环境下 import 本模块（自检 mock 场景）
+    psutil = None
+
+# ---------------------------------------------------------------------------
+# 常量与状态
+# ---------------------------------------------------------------------------
+
+STATUS_OK = "ok"
+STATUS_NEED_ADMIN = "need_admin"
+STATUS_UNSUPPORTED = "unsupported"
+STATUS_NOT_INSTALLED = "not_installed"
+STATUS_STALE = "stale"
+
+CREATE_NO_WINDOW = 0x08000000
+
+#: 侧车 exe 查找顺序：环境变量 → onefile 解压目录（Nuitka）→ 源码期 collector/pub
+_SIDECAR_NAME = "hwcollector.exe"
+
+
+def find_sidecar() -> Optional[str]:
+    env = os.environ.get("AURA_HWCOLLECTOR")
+    if env and os.path.isfile(env):
+        return env
+    cands = []
+    try:  # Nuitka onefile：内嵌数据解压在 __file__ 同级
+        cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), _SIDECAR_NAME))
+    except NameError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands += [
+        os.path.join(here, "collector", "pub", _SIDECAR_NAME),
+        os.path.join(here, _SIDECAR_NAME),
+    ]
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+@dataclass
+class Metric:
+    key: str                 # 指标 key，见 METRIC_DEFS
+    label: str               # 中文名（UI 直接展示）
+    group: str               # cpu / mem / gpu_i / gpu_d / fan / disk / net / sys
+    value: Optional[float]   # 换算后的值（GHz/℃/W/%/GB/MB/s/RPM/秒）；None=无读数
+    unit: str
+    status: str              # STATUS_* 之一
+    source: str = ""         # "sidecar" / "psutil" / "psutil+sidecar"
+    ts: float = 0.0          # time.time() 采样时刻
+
+    @property
+    def available(self) -> bool:
+        return self.status == STATUS_OK and self.value is not None
+
+
+# 指标定义表 = 白名单（加/减指标只改这里，UI 按 group 分组渲染）
+# (key, label, group, unit)
+METRIC_DEFS: list[tuple[str, str, str, str]] = [
+    ("sys.uptime",      "系统运行时间",        "sys",   "s"),
+    ("cpu.load",        "CPU使用率",           "cpu",   "%"),
+    ("cpu.freq",        "CPU频率",             "cpu",   "GHz"),
+    ("cpu.temp",        "CPU温度",             "cpu",   "℃"),
+    ("cpu.power",       "CPU功耗",             "cpu",   "W"),
+    ("mem.load",        "内存使用率",          "mem",   "%"),
+    ("mem.used",        "内存用量",            "mem",   "GB"),
+    ("gpu_i.load",      "GPU(核显)使用率",     "gpu_i", "%"),
+    ("gpu_i.shared",    "共享内存用量",        "gpu_i", "GB"),
+    ("gpu_d.load",      "GPU(独显)使用率",     "gpu_d", "%"),
+    ("gpu_d.temp",      "GPU(独显)温度",       "gpu_d", "℃"),
+    ("gpu_d.vram_load", "GPU(独显)显存使用率", "gpu_d", "%"),
+    ("gpu_d.vram_used", "GPU(独显)显存用量",   "gpu_d", "GB"),
+    ("net.tx",          "网络发送速率",        "net",   "MB/s"),
+    ("net.rx",          "网络接收速率",        "net",   "MB/s"),
+    # 动态键（按实例数量展开）：disk.{i}.temp / disk.{i}.usage / fan.{slot}.{i}
+]
+
+_DISK_DEFS = [("disk.{i}.temp", "硬盘温度", "disk", "℃"),
+              ("disk.{i}.usage", "硬盘使用率", "disk", "%")]
+_FAN_DEFS = [("fan.{slot}.{i}", "风扇转速", "fan", "RPM")]
+_FAN_SLOTS = ("cpu", "gpu_d", "mobo")  # 主板风扇；CPU/GPU 风扇按命名启发归类
+
+
+# ---------------------------------------------------------------------------
+# 侧车客户端：进程管理 + 流式解析 + 断连重启
+# ---------------------------------------------------------------------------
+
+class SidecarRunner:
+    """常驻 hwcollector.exe --stream，守护线程逐行解析 NDJSON。
+
+    重启策略：进程退出/断流超过 stale_sec 秒则重启，连续失败 max_restarts 次后
+    静默放弃（上层指标转 not_installed / stale，不弹窗不报错）。
+    """
+
+    def __init__(self, exe_path: Optional[str] = None, interval_ms: int = 1000,
+                 stale_sec: float = 5.0, max_restarts: int = 3,
+                 on_frame: Optional[Callable[[dict], None]] = None):
+        self.exe = exe_path if exe_path is not None else find_sidecar()
+        self.interval_ms = max(200, int(interval_ms))
+        self.stale_sec = stale_sec
+        self.max_restarts = max_restarts
+        self.on_frame = on_frame
+
+        self._proc: Optional[subprocess.Popen] = None
+        self._thread: Optional[threading.Thread] = None
+        self._watch: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._latest: Optional[dict] = None      # {"ts":..,"sensors":[..]}
+        self._meta: Optional[dict] = None        # {"elevated":..,"hwIndex":[..]}
+        self._last_frame_time = 0.0
+        self._restarts = 0
+        self.alive = False                        # 侧车可用（含曾经可用后 stale）
+        self.installed = bool(self.exe and os.path.isfile(self.exe))
+
+    # ------------------------------------------------------------- 生命周期 --
+    def start(self) -> bool:
+        """启动侧车与读取线程；返回是否成功 spawn（不代表已出帧，出帧看 latest）。"""
+        if not self.installed:
+            return False
+        self._stop.clear()
+        try:
+            self._spawn()
+        except OSError:
+            self.installed = False
+            return False
+        self._thread = threading.Thread(target=self._read_loop,
+                                        name="hwcollector-reader", daemon=True)
+        self._watch = threading.Thread(target=self._watch_loop,
+                                       name="hwcollector-watch", daemon=True)
+        self._thread.start()
+        self._watch.start()
+        self.alive = True
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        p = self._proc
+        if p is not None:
+            try:
+                p.terminate()   # 侧车无状态，直接 terminate；不 kill 强杀避免驱动句柄残留
+            except OSError:
+                pass
+        for t in (self._thread, self._watch):
+            if t is not None and t.is_alive():
+                t.join(timeout=2.0)
+        self.alive = False
+
+    def wait_first_frame(self, timeout: float = 15.0) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if self._latest is not None:
+                return True
+            if not self.alive or self._stop.is_set():
+                return False
+            time.sleep(0.05)
+        return False
+
+    # ------------------------------------------------------------------ 数据 --
+    @property
+    def elevated(self) -> Optional[bool]:
+        return None if self._meta is None else bool(self._meta.get("elevated"))
+
+    @property
+    def hw_index(self) -> list[dict]:
+        return (self._meta or {}).get("hwIndex", [])
+
+    def latest_frame(self) -> Optional[dict]:
+        with self._lock:
+            return self._latest
+
+    def is_stale(self) -> bool:
+        if self._latest is None:
+            return True
+        return (time.time() - self._last_frame_time) > self.stale_sec
+
+    # -------------------------------------------------------------- 内部实现 --
+    def _spawn(self) -> None:
+        assert self.exe is not None
+        self._proc = subprocess.Popen(
+            [self.exe, "--stream", "--interval", str(self.interval_ms)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            bufsize=1,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+    def _read_loop(self) -> None:
+        while not self._stop.is_set():
+            proc = self._proc
+            if proc is None or proc.stdout is None:
+                break
+            line = proc.stdout.readline()
+            if not line:  # EOF：进程退出
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue  # 偶发脏行直接跳过
+            if obj.get("meta"):
+                self._meta = obj
+            elif "sensors" in obj:
+                with self._lock:
+                    self._latest = obj
+                self._last_frame_time = time.time()
+                self._restarts = 0  # 成功出帧即重置重启预算
+                if self.on_frame:
+                    try:
+                        self.on_frame(obj)
+                    except Exception:
+                        pass
+        self._stop.set()
+
+    def _watch_loop(self) -> None:
+        """进程死了或断流 → 重启；连续失败超限 → 静默放弃。"""
+        while not self._stop.wait(1.0):
+            proc_dead = self._proc is not None and self._proc.poll() is not None
+            if not (proc_dead or self.is_stale()):
+                continue
+            if self._restarts >= self.max_restarts:
+                self.alive = False
+                self._stop.set()
+                return
+            self._restarts += 1
+            try:
+                if self._proc is not None:
+                    self._proc.terminate()
+                self._spawn()
+                # 重启后读取线程已因 EOF 退出，需要新线程
+                self._thread = threading.Thread(target=self._read_loop,
+                                                name="hwcollector-reader", daemon=True)
+                self._thread.start()
+            except OSError:
+                self.alive = False
+                self._stop.set()
+                return
+
+
+# ---------------------------------------------------------------------------
+# 传感器 → 指标 key 映射（LibreHardwareMonitorLib 0.9.6 标定，勿盲改）
+# ---------------------------------------------------------------------------
+
+def _match_gpu_family(hw_name: str, hw_type: str) -> Optional[str]:
+    """独显/核显家族判定。返回 "dedicated" / "integrated" / None。
+    用关键字而非精确型号名，跨机型可用；顺序敏感（Iris Xe 也含 Intel）。"""
+    n = (hw_name or "").lower()
+    t = (hw_type or "")
+    if any(k in n for k in ("nvidia", "geforce", "rtx", "gtx",
+                            "radeon", "amd rx", "arc ")) or t == "GpuNvidia" or t == "GpuAmd":
+        # Intel Arc 归独显；GpuNvidia/GpuAmd 类型即独显
+        if "arc" in n:
+            return "dedicated"
+        return "dedicated"
+    if any(k in n for k in ("intel", "uhd", "iris", "hd graphics")) or t in ("GpuIntel",):
+        return "integrated"
+    # GpuIntegrated/GpuDiscrete 是 LHM 的抽象类型，按类型兜底
+    if t == "GpuDiscrete":
+        return "dedicated"
+    if t == "GpuIntegrated":
+        return "integrated"
+    return None
+
+
+@dataclass
+class _MapResult:
+    """一帧传感器映射后的中间结果（供 MetricsHub 合并）。"""
+    fixed: dict[str, tuple[float, str]] = field(default_factory=dict)  # key -> (value, sensor)
+    disks: list[dict] = field(default_factory=list)   # 每盘: {name, temp, usage_lhm}
+    fans: list[dict] = field(default_factory=list)    # {slot, name, value}
+    hit_need_admin: set[str] = field(default_factory=set)  # 明确「有槽位但值为 null」的指标
+
+
+def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
+    r = _MapResult()
+    sensors = frame.get("sensors", [])
+
+    # 独显可能有多块（SLI/工作站）：取 hwOrder 最小的第一块；核显同理。
+    gpu_d_order: Optional[int] = None
+    gpu_i_order: Optional[int] = None
+    fam_by_hw: dict[str, str] = {}
+    for h in (meta or {}).get("hwIndex", []):
+        fam = _match_gpu_family(h.get("name", ""), h.get("type", ""))
+        if fam == "dedicated":
+            fam_by_hw[h["name"]] = "d"
+            if gpu_d_order is None or h["order"] < gpu_d_order:
+                gpu_d_order = h["order"]
+        elif fam == "integrated":
+            fam_by_hw[h["name"]] = "i"
+            if gpu_i_order is None or h["order"] < gpu_i_order:
+                gpu_i_order = h["order"]
+
+    cpu_clocks: list[float] = []
+    vram_total: Optional[float] = None
+
+    for s in sensors:
+        hw, hwt, sen, name = s.get("hw", ""), s.get("hwType", ""), s.get("sensor", ""), s.get("name", "")
+        val = s.get("value")
+
+        # ---- CPU ----
+        if hwt == "Cpu":
+            if sen == "Load" and name == "CPU Total":
+                r.fixed["cpu.load"] = (val, "CPU Total")
+            elif sen == "Temperature" and name == "CPU Package":
+                _cpu_temp_put(r, val)
+            elif sen == "Power" and name in ("CPU Package", "CPU Platform"):
+                # Package 优先（不含 SoC 外的平台功耗）；缺失时不降级到 Platform。
+                # ⚠ 非管理员下该传感器存在但恒为 0 → 0 视为无读数（need_admin 信号）
+                if name == "CPU Package" and val:
+                    r.fixed["cpu.power"] = (val, name)
+            elif sen == "Clock" and name.startswith("CPU Core #") and val:
+                cpu_clocks.append(val)  # MHz
+
+        # ---- 内存（Total Memory = 物理内存条聚合，勿用 Virtual Memory）----
+        elif hwt == "Memory" and hw == "Total Memory":
+            if sen == "Load" and name == "Memory":
+                r.fixed["mem.load"] = (val, "Memory")
+            elif sen == "Data" and name == "Memory Used":
+                r.fixed["mem.used"] = (val, "Memory Used")  # 单位 GB
+
+        # ---- GPU ----
+        elif hwt.startswith("Gpu"):
+            fam = fam_by_hw.get(hw) or _gpu_family_from_type(hwt)
+            if fam == "d":
+                if sen == "Load" and name == "GPU Core":
+                    r.fixed["gpu_d.load"] = (val, name)
+                elif sen == "Temperature" and name == "GPU Core":
+                    r.fixed["gpu_d.temp"] = (val, name)
+                elif sen == "Load" and name == "GPU Memory":
+                    r.fixed["gpu_d.vram_load"] = (val, name)
+                elif sen == "SmallData" and name == "GPU Memory Used":
+                    r.fixed["gpu_d.vram_used"] = (val / 1024.0, name)  # MB→GB
+                elif sen == "SmallData" and name == "GPU Memory Total":
+                    vram_total = val / 1024.0
+            elif fam == "i":
+                if sen == "Load" and name == "D3D 3D":
+                    r.fixed["gpu_i.load"] = (val, name)
+                elif sen == "SmallData" and name == "D3D Shared Memory Used":
+                    r.fixed["gpu_i.shared"] = (val / 1024.0, name)  # MB→GB
+
+        # ---- 硬盘：顺序 = 侧车枚举顺序（hwIndex 已给 order）----
+        elif hwt == "Storage":
+            _disk_update(r, hw, sen, name, val, meta)
+
+        # ---- 风扇：LHM SensorType=Fan，hwType 常为 Motherboard；GPU 风扇在子硬件 ----
+        if sen == "Fan" and val is not None:
+            ln = name.lower()
+            if "cpu" in ln:
+                slot = "cpu"
+            elif fam_by_hw.get(hw) == "d" or "gpu" in ln:
+                slot = "gpu_d"
+            else:
+                slot = "mobo"
+            r.fans.append({"slot": slot, "name": name, "value": val, "hw": hw})
+
+    if cpu_clocks:
+        r.fixed["cpu.freq"] = (max(cpu_clocks) / 1000.0, "CPU Core Max MHz")
+
+    # 显存使用率缺失时用 Used/Total 兜底（AMD 卡常见只给绝对值）
+    if "gpu_d.vram_load" not in r.fixed and "gpu_d.vram_used" in r.fixed and vram_total:
+        used = r.fixed["gpu_d.vram_used"][0]
+        r.fixed["gpu_d.vram_load"] = (used / vram_total * 100.0, "vram calc")
+
+    return r
+
+
+def _gpu_family_from_type(hwt: str) -> Optional[str]:
+    if hwt in ("GpuNvidia", "GpuAmd", "GpuDiscrete"):
+        return "d"
+    if hwt in ("GpuIntel", "GpuIntegrated"):
+        return "i"
+    return None
+
+
+def _cpu_temp_put(r: _MapResult, val) -> None:
+    """CPU 温度：非管理员下 LHM 仍会列出温度槽位但值为 null——这正是要区分
+    need_admin（槽位在、无权限）与 unsupported（整机没这条传感器）的信号。"""
+    if val is None:
+        return
+    r.fixed["cpu.temp"] = (val, "CPU Package")
+
+
+_CPU_TEMP_SLOTS = ("CPU Package", "Core Max", "Core Average", "CPU Core #1")
+
+
+def map_absent_signals(sensors: list[dict]) -> dict[str, str]:
+    """扫描原始帧（含 null 值无——侧车只输出有值传感器），因此这里反向判断：
+    对「需要管理员的指标」，若整帧无任何候选行 → need_admin。
+    返回 key -> STATUS_NEED_ADMIN/STATUS_UNSUPPORTED 提示。
+    注意：侧车只回传有值传感器，null 已被过滤；因此「CPU 有 Temperature 行但非
+    Package 族」也按 need_admin 处理（非管理员时 CPU 温度整族消失）。"""
+    out: dict[str, str] = {}
+    has_cpu_temp = any(s["hwType"] == "Cpu" and s["sensor"] == "Temperature" for s in sensors)
+    has_cpu_clock = any(s["hwType"] == "Cpu" and s["sensor"] == "Clock" and
+                        s["name"].startswith("CPU Core #") for s in sensors)
+    has_cpu_power = any(s["hwType"] == "Cpu" and s["sensor"] == "Power" and
+                        s["value"] > 0 for s in sensors)
+    has_storage = any(s["hwType"] == "Storage" for s in sensors)
+    has_fan = any(s["sensor"] == "Fan" for s in sensors)
+    if not has_cpu_temp:
+        out["cpu.temp"] = STATUS_NEED_ADMIN
+    if not has_cpu_clock:
+        out["cpu.freq"] = STATUS_NEED_ADMIN
+    if not has_cpu_power:
+        out["cpu.power"] = STATUS_NEED_ADMIN
+    if not has_storage:
+        # 非管理员下存储设备整类不枚举
+        out["__storage__"] = STATUS_NEED_ADMIN
+    if not has_fan:
+        out["__fan__"] = STATUS_UNSUPPORTED  # 提权也拿不到时 = 平台不暴露
+    return out
+
+
+def _disk_update(r: _MapResult, hw: str, sen: str, name: str, val, meta) -> None:
+    for d in r.disks:
+        if d["name"] == hw:
+            break
+    else:
+        d = {"name": hw, "temp": None, "usage_lhm": None, "total_gb": None}
+        r.disks.append(d)
+    if sen == "Temperature" and name == "Composite Temperature" and d["temp"] is None:
+        d["temp"] = val
+    elif sen == "Load" and name == "Used Space" and d["usage_lhm"] is None:
+        d["usage_lhm"] = val
+    elif sen == "Data" and name == "Total Space" and d["total_gb"] is None:
+        d["total_gb"] = val
+
+
+# ---------------------------------------------------------------------------
+# psutil 数据源（运行时间/CPU%/内存兜底/网速差分/盘符→物理盘映射）
+# ---------------------------------------------------------------------------
+
+# ---- Windows 盘符 → 物理盘号 映射（IOCTL_STORAGE_GET_DEVICE_NUMBER，免管理员）----
+_IOCTL_STORAGE_GET_DEVICE_NUMBER = 0x002D1080
+_FILE_DEVICE_DISK = 0x00000007
+
+
+class _STORAGE_DEVICE_NUMBER(ctypes.Structure):
+    _fields_ = [("DeviceType", ctypes.c_uint32),
+                ("DeviceNumber", ctypes.c_uint32),
+                ("PartitionNumber", ctypes.c_uint32)]
+
+
+def map_drive_letters() -> dict[int, list[str]]:
+    """{physical_drive_number: ["C:", "D:", ...]}；失败返回空表（优雅降级）。"""
+    if os.name != "nt":
+        return {}
+    out: dict[int, list[str]] = {}
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                     ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                     ctypes.c_void_p]
+    kernel32.DeviceIoControl.restype = ctypes.c_int
+    kernel32.DeviceIoControl.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+                                         ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                                         ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    # 以 0 访问权限打开卷句柄：只查 IOCTL 元数据，不需要管理员，也不受写锁影响
+    open_existing = 3
+    INVALID = ctypes.c_void_p(-1).value
+    for letter in string.ascii_uppercase:
+        vol = f"\\\\.\\{letter}:"
+        h = kernel32.CreateFileW(vol, 0, 0x7, None, open_existing, 0x80, None)
+        if h in (None, INVALID, -1, 0xFFFFFFFFFFFFFFFF):
+            continue
+        try:
+            buf = _STORAGE_DEVICE_NUMBER()
+            ret = ctypes.c_uint32(0)
+            ok = kernel32.DeviceIoControl(h, _IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                                          None, 0, ctypes.byref(buf), ctypes.sizeof(buf),
+                                          ctypes.byref(ret), None)
+            if ok and ret.value >= ctypes.sizeof(buf) and buf.DeviceType == _FILE_DEVICE_DISK:
+                out.setdefault(int(buf.DeviceNumber), []).append(letter)
+        finally:
+            kernel32.CloseHandle(h)
+    return out
+
+
+class PsutilSource:
+    """psutil 差分与瞬时采样。所有方法线程安全（psutil 本身是），
+    速率类指标需在固定节拍调用 sample_rates() 做窗口差分。"""
+
+    def __init__(self) -> None:
+        self._prev_net: Optional[tuple[float, int, int]] = None  # (t, bytes_sent, bytes_recv)
+        self._prev_disk: Optional[dict] = None                   # {drive: (t, rtime+wtime)}
+        self._drive_map: Optional[dict[int, list[str]]] = None
+        self._partitions: list = []
+
+    # ------------------------------------------------------------- 瞬时值 ----
+    def uptime(self) -> Optional[float]:
+        return time.time() - psutil.boot_time() if psutil else None
+
+    def cpu_load(self) -> Optional[float]:
+        # interval=None：与上次调用区间的均值，由 hub 轮询节拍保证窗口
+        return psutil.cpu_percent(interval=None) if psutil else None
+
+    def cpu_freq_ghz(self) -> Optional[float]:
+        if not psutil:
+            return None
+        f = psutil.cpu_freq()
+        return (f.current / 1000.0) if f and f.current else None
+
+    def mem(self) -> tuple[Optional[float], Optional[float]]:
+        if not psutil:
+            return None, None
+        vm = psutil.virtual_memory()
+        return vm.percent, vm.used / (1024 ** 3)
+
+    def disk_usage_pct(self, total_gb: Optional[float] = None) -> Optional[float]:
+        """按容量把 LHM 盘匹配到物理盘，返回该物理盘已挂载分区的最大已用占比。
+
+        ⚠ 不能用 LHM 枚举序号当物理盘号——两者无对应关系。
+        匹配策略：每个物理盘号 → 盘符 → 分区容量求和，与 total_gb 最接近者胜出；
+        匹配误差 >15% 视为不可信返回 None（宁缺勿错）。
+        """
+        if not psutil:
+            return None
+        if self._drive_map is None:
+            self._refresh_partitions()
+        if not self._partitions:
+            return None
+        if total_gb is None:
+            # 无容量信息时退化为全盘最大已用占比（单盘场景正确，多盘标注来源）
+            try:
+                return max(psutil.disk_usage(p.mountpoint).percent for p in self._partitions)
+            except OSError:
+                return None
+        per_drive: dict[int, tuple[float, list[str]]] = {}
+        for phys, letters in (self._drive_map or {}).items():
+            cap, parts = 0.0, []
+            for part in self._partitions:
+                mount = part.device.rstrip("\\").rstrip("/")  # "C:"
+                if any(mount.upper() == l.upper() for l in letters):
+                    cap += part.total / 1e9  # 十进制 GB，与 SMART Total Space 同口径
+                    parts.append(mount)
+            if parts:
+                per_drive[phys] = (cap, parts)
+        target = total_gb
+        best, best_err = None, None
+        for cap, parts in per_drive.values():
+            err = abs(cap - target) / max(target, 1e-9)
+            if (best_err is None or err < best_err) and err <= 0.15:
+                best, best_err = parts, err
+        if not best:
+            return None
+        pct = None
+        for mount in best:
+            try:
+                u = psutil.disk_usage(mount + "\\").percent
+            except OSError:
+                continue
+            if pct is None or u > pct:
+                pct = u
+        return pct
+
+    def _refresh_partitions(self) -> None:
+        self._drive_map = map_drive_letters()
+        self._partitions = psutil.disk_partitions(all=False) if psutil else []
+
+    # ------------------------------------------------------------- 速率值 ----
+    def net_rates_mb(self) -> tuple[Optional[float], Optional[float]]:
+        """返回本窗口的 (发送, 接收) MB/s。首次调用返回 (None, None) 建基线。"""
+        if not psutil:
+            return None, None
+        now = time.time()
+        io = psutil.net_io_counters()
+        cur = (now, io.bytes_sent, io.bytes_recv)
+        if self._prev_net is None:
+            self._prev_net = cur
+            return None, None
+        dt = max(cur[0] - self._prev_net[0], 1e-6)
+        tx = (cur[1] - self._prev_net[1]) / dt / (1024 ** 2)
+        rx = (cur[2] - self._prev_net[2]) / dt / (1024 ** 2)
+        self._prev_net = cur
+        return max(tx, 0.0), max(rx, 0.0)
+
+    def disk_busy_pct(self) -> dict[int, Optional[float]]:
+        """物理盘 IO 忙碌率（备用口径，非用户选定口径；保留供 UI 后续切换）。"""
+        if not psutil:
+            return {}
+        now = time.time()
+        d = psutil.disk_io_counters(perdisk=True)
+        res: dict[int, Optional[float]] = {}
+        if self._prev_disk is None:
+            self._prev_disk = {k: (now, v) for k, v in d.items()}
+            return {}
+        for key, counters in d.items():
+            prev = self._prev_disk.get(key)
+            if prev is None:
+                continue
+            dt = max(now - prev[0], 1e-6)
+            busy = getattr(counters, "read_time", 0) + getattr(counters, "write_time", 0)
+            pbusy = getattr(prev[1], "read_time", 0) + getattr(prev[1], "write_time", 0)
+            pct = (busy - pbusy) / (dt * 1000.0) * 100.0
+            idx = None
+            if key.lower().startswith("physicaldrive"):
+                try:
+                    idx = int(key.lower().replace("physicaldrive", ""))
+                except ValueError:
+                    pass
+            if idx is not None:
+                res[idx] = min(pct, 100.0)
+        self._prev_disk = {k: (now, v) for k, v in d.items()}
+        return res
+
+
+# ---------------------------------------------------------------------------
+# MetricsHub：聚合出口（UI 只认这一层）
+# ---------------------------------------------------------------------------
+
+class MetricsHub:
+    """采集聚合层。线程模型：侧车读取线程更新最新帧（SidecarRunner 内部锁），
+    本类不轮询；snapshot()/get() 在调用线程把最新帧映射成 Metric（映射成本
+    ~200 行 dict，微秒级）。psutil 速率类指标由后台 poller 线程按 poll_ms 固定
+    节拍差分，保证窗口准确。"""
+
+    def __init__(self, sidecar_path: Optional[str] = None,
+                 interval_ms: int = 1000, poll_ms: int = 1000,
+                 max_fans: int = 8, max_disks: int = 8):
+        self.runner = SidecarRunner(exe_path=sidecar_path, interval_ms=interval_ms)
+        self.ps = PsutilSource()
+        self.poll_ms = max(200, int(poll_ms))
+        self.max_fans = max_fans
+        self.max_disks = max_disks
+        self._poller: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        # psutil 侧最新值（poller 写、snapshot 读）
+        self._ps_cache: dict[str, tuple[float, Optional[float]]] = {}
+
+    # ------------------------------------------------------------- 生命周期 --
+    def start(self) -> None:
+        self.runner.start()
+        # 立即采一轮基线（cpu_percent / 网速 / 盘忙碌首次调用建锚点）
+        self._poll_ps()
+        self._stop.clear()
+        self._poller = threading.Thread(target=self._poll_loop,
+                                        name="metrics-hub-poller", daemon=True)
+        self._poller.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._poller is not None and self._poller.is_alive():
+            self._poller.join(timeout=2.0)
+        self.runner.stop()
+
+    def _poll_loop(self) -> None:
+        while not self._stop.wait(self.poll_ms / 1000.0):
+            self._poll_ps()
+
+    def _poll_ps(self) -> None:
+        now = time.time()
+        cache = {}
+        tx, rx = self.ps.net_rates_mb()
+        cache["net.tx"] = (now, tx)
+        cache["net.rx"] = (now, rx)
+        cache["sys.uptime"] = (now, self.ps.uptime())
+        cache["cpu.load"] = (now, self.ps.cpu_load())
+        mload, mused = self.ps.mem()
+        cache["mem.load"] = (now, mload)
+        cache["mem.used"] = (now, mused)
+        cache["cpu.freq_ps"] = (now, self.ps.cpu_freq_ghz())
+        cache["disk_busy"] = (now, self.ps.disk_busy_pct())
+        with self._lock:
+            self._ps_cache = cache
+
+    def _ps(self, key: str) -> tuple[Optional[float], float]:
+        with self._lock:
+            hit = self._ps_cache.get(key)
+        return (hit[1], hit[0]) if hit else (None, 0.0)
+
+    # ------------------------------------------------------------ 核心出口 ---
+    def uptime(self) -> tuple[Optional[float], str]:
+        """(运行秒, "H:MM:SS")。需求口径：时分秒。"""
+        v, _ = self._ps("sys.uptime")
+        if v is None:
+            return None, "--:--:--"
+        secs = int(v)
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        return v, f"{h}:{m:02d}:{s:02d}"
+
+    def snapshot(self) -> dict[str, Metric]:
+        """一次拉全所有指标。key 全集 = METRIC_DEFS 固定键 + disk.{i}.* + fan.{slot}.{i}。"""
+        out: dict[str, Metric] = {}
+        frame = self.runner.latest_frame()
+        meta = self.runner._meta
+        mr = map_frame(frame, meta) if frame else _MapResult()
+        absent = map_absent_signals(frame.get("sensors", [])) if frame else {}
+        now = time.time()
+
+        # 侧车状态机：not_installed → starting(frame 未到) → ok / stale
+        if not self.runner.installed:
+            st_sidecar = STATUS_NOT_INSTALLED
+        elif frame is None:
+            st_sidecar = STATUS_STALE          # 正在启动/尚未出帧，勿误标 need_admin
+        elif self.runner.is_stale():
+            st_sidecar = STATUS_STALE          # 断流，展示旧值语义由 UI 处理
+        else:
+            st_sidecar = STATUS_OK
+        sidecar_ok = st_sidecar == STATUS_OK
+
+        def mk(key: str, val, source: str, status: str = STATUS_OK) -> Metric:
+            d = _def(key)
+            return Metric(key=key, label=d[1], group=d[2], value=val,
+                          unit=d[3], status=status, source=source, ts=now)
+
+        # ---- 固定键：优先侧车，psutil 兜底 ----
+        v, t = self._ps("sys.uptime")
+        out["sys.uptime"] = mk("sys.uptime", v, "psutil",
+                               STATUS_OK if v is not None else STATUS_STALE)
+
+        # CPU 使用率：psutil 为准（与任务管理器同口径、采样连续），侧车仅作 psutil 缺失兜底
+        v_ps, v_ps_ts = self._ps("cpu.load")
+        if v_ps is not None and now - v_ps_ts < self.poll_ms * 3 / 1000.0:
+            out["cpu.load"] = mk("cpu.load", v_ps, "psutil")
+        elif "cpu.load" in mr.fixed:
+            out["cpu.load"] = mk("cpu.load", mr.fixed["cpu.load"][0], "sidecar")
+        else:
+            out["cpu.load"] = mk("cpu.load", None, "psutil", STATUS_STALE)
+
+        # CPU 频率：侧车逐核最大（真实睿频）> psutil（Windows 下常为标称值）
+        if "cpu.freq" in mr.fixed and sidecar_ok:
+            out["cpu.freq"] = mk("cpu.freq", mr.fixed["cpu.freq"][0], "sidecar")
+        else:
+            v, t = self._ps("cpu.freq_ps")
+            status = STATUS_OK if v is not None else (
+                st_sidecar if not sidecar_ok else absent.get("cpu.freq", STATUS_NEED_ADMIN))
+            out["cpu.freq"] = mk("cpu.freq", v, "psutil", status)
+
+        for key in ("cpu.temp", "cpu.power"):
+            if key in mr.fixed and sidecar_ok:
+                out[key] = mk(key, mr.fixed[key][0], "sidecar")
+            else:
+                out[key] = mk(key, None, "sidecar",
+                              st_sidecar if not sidecar_ok else absent.get(key, STATUS_NEED_ADMIN))
+
+        # 内存：psutil 为准（口径稳定），侧车留作对照
+        v, t = self._ps("mem.load")
+        out["mem.load"] = mk("mem.load", v, "psutil",
+                             STATUS_OK if v is not None else STATUS_STALE)
+        v, t = self._ps("mem.used")
+        out["mem.used"] = mk("mem.used", v, "psutil",
+                             STATUS_OK if v is not None else STATUS_STALE)
+
+        for key in ("gpu_i.load", "gpu_i.shared", "gpu_d.load", "gpu_d.temp",
+                    "gpu_d.vram_load", "gpu_d.vram_used"):
+            if key in mr.fixed and sidecar_ok:
+                out[key] = mk(key, mr.fixed[key][0], "sidecar")
+            elif not sidecar_ok:
+                out[key] = mk(key, None, "sidecar", st_sidecar)
+            else:
+                # 侧车正常但无该槽位 → 本机没有对应 GPU（如无独显机型）
+                out[key] = mk(key, None, "sidecar", STATUS_UNSUPPORTED)
+
+        for key in ("net.tx", "net.rx"):
+            v, t = self._ps(key)
+            out[key] = mk(key, v, "psutil",
+                          STATUS_OK if v is not None else STATUS_STALE)
+
+        # ---- 硬盘（多盘顺序罗列；使用率=容量使用率，用户已定口径）----
+        disks = mr.disks[: self.max_disks]
+        if not disks:
+            if sidecar_ok:
+                # 侧车正常却无任何存储设备 = 非管理员（存储整类不枚举）
+                st = absent.get("__storage__", STATUS_NEED_ADMIN)
+            else:
+                st = st_sidecar
+            out["disk.0.temp"] = mk("disk.0.temp", None, "sidecar", st)
+            out["disk.0.usage"] = mk("disk.0.usage", None, "sidecar", st)
+        for i, d in enumerate(disks):
+            st = st_sidecar if not sidecar_ok else STATUS_OK
+            out[f"disk.{i}.temp"] = mk(f"disk.{i}.temp", d["temp"], "sidecar",
+                                       st if d["temp"] is None else STATUS_OK)
+            usage = d["usage_lhm"]
+            src = "sidecar"
+            if usage is None:
+                # SMART 无 Used Space → 按容量匹配到盘符，用分区容量占比兜底
+                usage = self.ps.disk_usage_pct(d.get("total_gb"))
+                src = "psutil"
+            out[f"disk.{i}.usage"] = mk(f"disk.{i}.usage", usage, src,
+                                        st if usage is None else STATUS_OK)
+
+        # ---- 风扇（多风扇按槽位顺序罗列）----
+        fans = self.list_fans()
+        for f in fans:
+            key = f"fan.{f.slot}.{f.index}"
+            out[key] = mk(key, f.value, "sidecar",
+                          STATUS_OK if f.value is not None else STATUS_STALE)
+        if not fans:
+            if not sidecar_ok:
+                reason = st_sidecar
+            elif self.runner.elevated is False:
+                # 非管理员：无法区分"权限挡着"还是"平台没暴露"，一律引导提权
+                reason = STATUS_NEED_ADMIN
+            else:
+                # 已提权仍无风扇传感器 = 本机平台不暴露（笔记本 EC 控制常见）
+                reason = STATUS_UNSUPPORTED
+            for slot in _FAN_SLOTS:
+                out[f"fan.{slot}.0"] = mk(f"fan.{slot}.0", None, "sidecar", reason)
+
+        return {k: v for k, v in out.items() if v is not None}
+
+    def get(self, key: str) -> Optional[Metric]:
+        return self.snapshot().get(key)
+
+    # ------------------------------------------------------------ 枚举接口 ---
+    def list_disks(self, snapshot: Optional[dict] = None) -> list[dict]:
+        """[{index, name, temp, usage_pct, usage_src}]，顺序=侧车枚举顺序=物理盘展示顺序。"""
+        frame = self.runner.latest_frame()
+        if not frame:
+            return []
+        mr = map_frame(frame, self.runner._meta)
+        snap = snapshot if snapshot is not None else self.snapshot()
+        out = []
+        for i, d in enumerate(mr.disks[: self.max_disks]):
+            m = snap.get(f"disk.{i}.usage")
+            out.append({
+                "index": i,
+                "name": d["name"],
+                "temp": d["temp"],
+                "usage_pct": m.value if m else None,
+                "usage_src": m.source if m else "",
+            })
+        return out
+
+    # ---- 便捷格式化（UI 直接用，避免各处重复换算）----
+    @staticmethod
+    def fmt(m: Optional[Metric], nd: int = 1) -> str:
+        if m is None or m.value is None:
+            if m is not None and m.status == STATUS_NEED_ADMIN:
+                return "需管理员"
+            if m is not None and m.status == STATUS_UNSUPPORTED:
+                return "不可用"
+            return "--"
+        if m.key == "sys.uptime":
+            return MetricsHub.uptime_fmt(m.value)
+        if m.key.startswith("fan."):
+            return f"{m.value:.0f} {m.unit}"
+        return f"{m.value:.{nd}f} {m.unit}"
+
+    @staticmethod
+    def uptime_fmt(secs: Optional[float]) -> str:
+        if secs is None:
+            return "--:--:--"
+        h, rem = divmod(int(secs), 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}"
+
+
+# 风扇信息对象（list_fans 返回；定义后置以避免前向引用问题）
+@dataclass
+class FanInfo:
+    slot: str            # cpu / gpu_d / mobo
+    index: int           # 同槽位内序号，多风扇顺序罗列
+    name: str            # 传感器原始名（"Fan #1"/"CPU Fan"…）
+    value: Optional[float]
+    status: str
+
+
+# snapshot() 里 list_fans() 需要返回 FanInfo；用真实实现覆盖上面的占位：
+def _list_fans(self: MetricsHub) -> list[FanInfo]:
+    frame = self.runner.latest_frame()
+    out: list[FanInfo] = []
+    if not frame:
+        return out
+    mr = map_frame(frame, self.runner._meta)
+    counters: dict[str, int] = {slot: 0 for slot in _FAN_SLOTS}
+    for f in mr.fans[: self.max_fans]:
+        slot = f["slot"] if f["slot"] in counters else "mobo"
+        idx = counters[slot]
+        counters[slot] += 1
+        out.append(FanInfo(slot=slot, index=idx, name=f["name"],
+                           value=f["value"], status=STATUS_OK))
+    return out
+
+
+MetricsHub.list_fans = _list_fans  # type: ignore[method-assign]
+
+
+def _def(key: str) -> tuple[str, str, str, str]:
+    """key → 定义行；动态键按模板还原。"""
+    for row in METRIC_DEFS:
+        if row[0] == key:
+            return row
+    for tpl, label, group, unit in _DISK_DEFS:
+        head, _, _ = tpl.partition(".")
+        if key.startswith(head + ".") and key.split(".")[1].isdigit():
+            return (key, f"{label}·盘{int(key.split('.')[1]) + 1}", group, unit)
+    if key.startswith("fan."):
+        parts = key.split(".")
+        slot = parts[1]
+        idx = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        label = {"cpu": "CPU风扇", "gpu_d": "GPU(独显)风扇", "mobo": "主板风扇"}.get(slot, slot)
+        if idx > 0:
+            label += f"·{idx + 1}"
+        return (key, label + "转速", "fan", "RPM")
+    return (key, key, key.split(".")[0], "")
+
+
+# ---------------------------------------------------------------------------
+# 独立运行：开发期冒烟（python monitor_hub.py [采样秒数]）
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    dur = float(sys.argv[1]) if len(sys.argv) > 1 else 4.0
+    hub = MetricsHub()
+    hub.start()
+    ok = hub.runner.wait_first_frame(timeout=15)
+    print(f"sidecar installed={hub.runner.installed} first_frame={ok} "
+          f"elevated={hub.runner.elevated}")
+    t_end = time.time() + dur
+    snap = {}
+    while time.time() < t_end:
+        time.sleep(0.5)
+        snap = hub.snapshot()
+    up = hub.uptime()
+    print(f"系统运行时间: {up[1]}")
+    order = ["cpu.load", "cpu.freq", "cpu.temp", "cpu.power",
+             "mem.load", "mem.used",
+             "gpu_i.load", "gpu_i.shared",
+             "gpu_d.load", "gpu_d.temp", "gpu_d.vram_load", "gpu_d.vram_used",
+             "net.tx", "net.rx"]
+    for k in order:
+        m = snap.get(k)
+        print(f"{m.label:<16} {MetricsHub.fmt(m):>12}   [{m.status}]")
+    for d in hub.list_disks():
+        print(f"硬盘#{d['index'] + 1} {d['name'][:28]:<28} 温度={d['temp']}℃ "
+              f"使用率={d['usage_pct']}%({d['usage_src']})")
+    for f in hub.list_fans():
+        print(f"风扇 {f.slot}#{f.index} {f.name}: {f.value} RPM")
+    if not hub.list_fans():
+        print("风扇: 本机无传感器输出（平台不暴露或需管理员）")
+    hub.stop()
+    print("done")
