@@ -2,7 +2,8 @@
 
 规格
     · 呼吸圆球：基础 100×100px → 浮动 110×110px
-    · 颜色循环：白 → #283FFE → 白，20 秒一周期，尺寸与颜色共用同一条时间轴
+    · 颜色循环：起始色 → 过渡色 →（末尾色 →）起始色，周期 = 各段渐变时长之和
+      （V10 起废弃固定 20s；球体呼吸可关，关闭时恒渲染起始色、大小静止）
     · 光晕：球边缘外 +3px
     · 帧率：60 FPS（15ms 心跳 + 帧点节流）
     · 悬停：鼠标在球体 100×100 范围内累计 ≥300ms → 扇形外框展开
@@ -10,6 +11,8 @@
     · 扇形填充色：= 触发瞬间球体中心本色，展开期间冻结
     · 右键-设置：三列表格（复选框=激活 / 项目名 / 功能代码），支持拖拽排序，
       保存写回 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml 并立即重新加载（不得嵌套模态窗导致主程序退出）
+    · 扇区交互（V10 反转）：主环单击=展开次级扇形（有标记时）/ 立即执行（无标记）；
+      双击=执行主扇形代码；次级环单击=执行该项（不递归）；右键恢复默认菜单
     · 扇区点击：闪光反馈 → 静默执行代码 → 圆球复位
 
 功能代码格式（标准化，三种终端）
@@ -84,15 +87,25 @@ from PySide6.QtWidgets import (
 CONFIG = {
     "size_base": 100.0,
     "size_breath": 110.0,
-    # 呼吸颜色三段式：起始色 → 中间彩色 → 末尾色（「Aura」光效设置中可调）
-    "color_start": "#FFFFFF",   # 呼吸起点色（固定白色，光效设置不可改）
-    "color_mid": "#283FFE",     # 呼吸中间彩色（光效设置填十六进制 / 取色）
-    "color_end": "#FFFFFF",     # 呼吸末尾色（固定白色，光效设置不可改）
-    "aura_scale": 1.0,          # 呼吸动画速度倍率 0.1x~3x：相位推进 × 倍率（默认 1.0x）
+    # 呼吸颜色三段式：起始色 → 过渡色（中段） → 末尾色 → 起始色（「动效设置」可调）
+    "color_start": "#FFFFFF",   # 呼吸起始色（可配；呼吸关闭时球体恒渲此色）
+    "color_mid": "#283FFE",     # 呼吸过渡色（可配，原「主题色」）
+    "color_end": "#FFFFFF",     # 呼吸末尾色（可配）
+    # —— V10 呼吸开关与分段渐变时长 ——
+    #   breath=False → 颜色+大小全停，恒渲染起始色；
+    #   起始色==末尾色（两色态）→ 起始→过渡 用 dur_start_mid、过渡→起始 用 dur_mid_end，
+    #     忽略末尾色与 dur_end_start；
+    #   起始色≠末尾色（三色态）→ 起→中(d1) 中→末(d2) 末→起(d3) 三段顺次。
+    # 原固定周期 cycle_ms=20s 废弃：周期由渐变时长决定，倍率为全局速度微调
+    #（每段实际耗时 = 设定秒数 ÷ 倍率）。
+    "breath": True,
+    "dur_start_mid": 5,         # 起始→过渡 渐变时长（s，1~30 整数，默认 5）
+    "dur_mid_end": 5,           # 过渡→末尾 渐变时长（三色态中段；两色态回程）
+    "dur_end_start": 5,         # 末尾→起始 渐变时长（仅三色态生效）
+    "aura_scale": 1.0,          # 呼吸动画速度倍率 0.1x~3x：相位推进速度 × 倍率
     "idle_sec": 60,             # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停+透明度10%（10~600）
     "opacity": 100,             # 总体透明度（%）：球体渲染 alpha 缩放，范围 10~100，默认 100
     "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 1~20，默认 10（超过总体透明度则存 10）
-    "cycle_ms": 20000,
     "fps": 60,
 
     "glow_px": 3.0,
@@ -286,19 +299,68 @@ def breath_colors() -> tuple[QColor, QColor, QColor]:
             QColor(CONFIG["color_end"]))
 
 
+def _clamp_dur(v) -> int:
+    """渐变时长归一：float 解析 → 向下取整 → 钳制 [1,30]；非法回退 5。"""
+    try:
+        n = math.floor(float(v))
+    except (TypeError, ValueError):
+        return 5
+    return max(1, min(30, n))
+
+
+def breath_durations_ms() -> tuple[int, ...] | None:
+    """当前生效的分段渐变时长（ms，不含倍率）。
+
+    · 球体呼吸关闭 → None（颜色与大小全停）；
+    · 起始色 == 末尾色（两色态）→ (d1, d2)：起始→过渡 用 d1、过渡→起始 用 d2，
+      忽略末尾色与 dur_end_start；
+    · 起始色 != 末尾色（三色态）→ (d1, d2, d3)：起→中、中→末、末→起 三段顺次。
+    """
+    if not bool(CONFIG.get("breath", True)):
+        return None
+    c_start, _c_mid, c_end = breath_colors()
+    d1 = _clamp_dur(CONFIG.get("dur_start_mid", 5)) * 1000
+    d2 = _clamp_dur(CONFIG.get("dur_mid_end", 5)) * 1000
+    if c_start == c_end:
+        return (d1, d2)
+    d3 = _clamp_dur(CONFIG.get("dur_end_start", 5)) * 1000
+    return (d1, d2, d3)
+
+
+def breath_cycle_ms() -> int:
+    """整圈渐变周期（ms，不含倍率）；呼吸关闭返回 0。"""
+    segs = breath_durations_ms()
+    return sum(segs) if segs else 0
+
+
 def shape_at(phase: float) -> tuple[float, float, QColor]:
+    c_start, c_mid, c_end = breath_colors()
+    segs = breath_durations_ms()
+    if segs is None:
+        # 球体呼吸关闭：颜色恒起始色、大小恒基准直径（完全静止）
+        d = CONFIG["size_base"]
+        return d, d / 2.0, QColor(c_start)
     ease = ease_at(phase)
     diameter = CONFIG["size_base"] + (CONFIG["size_breath"] - CONFIG["size_base"]) * ease
-    # 三段式颜色循环（按相位分段，20s 一周期）：
-    #   前 50% 起始色→中间彩色，后 50% 中间彩色→末尾色。
-    # 注意必须按 phase（单调时间）分段；按 ease 分段会把回程（ease 递减段）
-    # 误当成新的前半程，导致中间色在周期后半重现。
-    t = phase % 1.0
-    c_start, c_mid, c_end = breath_colors()
-    if t < 0.5:
-        color = mix_color(c_start, c_mid, t * 2.0)
+    # 分段渐变必须按 phase（单调时间）切分，总周期 = 各段时长之和；
+    # 倍率作为全局速度在相位推进处生效（每段实际耗时 = 设定秒数 ÷ 倍率）。
+    # 尺寸 ease 仍按整圈位置映射（一圈 小→大→小），与色彩周期同拍。
+    total = float(sum(segs))
+    t = (phase % 1.0) * total
+    if len(segs) == 2:
+        # 两色态：起始→过渡（d1）、过渡→起始（d2）
+        if t < segs[0]:
+            color = mix_color(c_start, c_mid, t / segs[0])
+        else:
+            color = mix_color(c_mid, c_start, (t - segs[0]) / segs[1])
     else:
-        color = mix_color(c_mid, c_end, (t - 0.5) * 2.0)
+        # 三色态：起→中（d1）、中→末（d2）、末→起（d3）
+        if t < segs[0]:
+            color = mix_color(c_start, c_mid, t / segs[0])
+        elif t < segs[0] + segs[1]:
+            color = mix_color(c_mid, c_end, (t - segs[0]) / segs[1])
+        else:
+            color = mix_color(c_end, c_start, (t - segs[0] - segs[1]) / segs[2])
     return diameter, diameter / 2.0, color
 
 
@@ -611,8 +673,8 @@ def _test_spawn(argv: list[str]) -> subprocess.Popen:
 SETTINGS_HEADER = (
     "# Aura Pixie 设置（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml，"
     "由设置/动效界面写回）\n"
-    "# 分块：functions = 功能扇区列表；aura = 光效（中间彩色+倍率+透明度）；"
-    "autostart = 开机自启动；\n"
+    "# 分块：functions = 功能扇区列表；aura = 光效（breath 呼吸开关 + 起始/过渡/末尾三色 + "
+    "三段渐变时长 dur_* + 倍率 + 透明度）；autostart = 开机自启动；\n"
     "#       window = 窗口行为（always_on_top = 保持球体置顶；pos_x/pos_y = 球心记忆位置）。\n"
     "# 扇区等分数 = functions 中 active: true 的条目数；最少 2，最多 9（超出只取前 9）；"
     "扇区顺序 = 条目顺序。\n"
@@ -713,7 +775,11 @@ def default_settings() -> dict:
     """出厂默认配置块（首次运行 / 迁移合并时的缺省兜底）。"""
     return {
         "functions": [],
-        "aura": {"color_mid": "#FFFFFF", "aura_scale": 1.0, "idle_sec": 60,
+        "aura": {"breath": True,
+                 "color_start": "#FFFFFF", "color_mid": "#FFFFFF",
+                 "color_end": "#FFFFFF",
+                 "dur_start_mid": 5, "dur_mid_end": 5, "dur_end_start": 5,
+                 "aura_scale": 1.0, "idle_sec": 60,
                  "opacity": 100, "sleep_opacity": 10},
         "autostart": {"enabled": False},
         "window": {"always_on_top": False, "pos_x": None, "pos_y": None},
@@ -1829,11 +1895,11 @@ CODE_HELP_TEXT = (
     "  · 取消 = 不做任何更改，直接返回设置界面。\n\n"
     "  提示：多行指令建议用右键「高级编辑」编写；测试按钮会真实执行，请谨慎。\n\n"
     "────────────────────────────\n"
-    "■ 次级动态扇形（右键展开子菜单）\n"
-    "  主扇形展开后，在某个扇区上【右键】可展开该扇区专属的「次级动态扇形」\n"
+    "■ 次级动态扇形（单击展开子菜单）\n"
+    "  主扇形展开后，在某个扇区上【单击】可展开该扇区专属的「次级动态扇形」\n"
     "  （先收回主扇形，约 300ms 后沿球心顺时针展开一圈新扇区，操作方式与主扇区相同）。\n\n"
     "  如何定义：在指令中用「成对特殊标记」把代码分区——\n"
-    "    · 第一个标记行之前的所有代码 = 主指令（左键点击该扇区时执行，可为空）；\n"
+    "    · 第一个标记行之前的所有代码 = 主指令（双击该扇区时执行，可为空）；\n"
     "    · 一对【【【名字】】】之间的代码 = 该次级项的指令；多对标记可定义多个次级项；\n"
     "    · 标记必须成对闭合（同名配对，不支持嵌套），配对顺序异常会校验失败。\n\n"
     "  示例（cmd 格式）：\n"
@@ -1846,11 +1912,13 @@ CODE_HELP_TEXT = (
     "    【【【子代码2】】】\n\n"
     "  说明：\n"
     "    · 标题限 6 个汉字 / 12 个字母，超长自动截断；空标题显示「未命名」；\n"
-    "    · 左键点击含标记的扇区 = 只执行「主指令」；主指令为空则仅收起、不执行、不闪红；\n"
-    "    · 右键点击无标记的扇区 = 红色闪光提示（无下级功能）；\n"
-    "    · 次级环上的扇区再右键不会继续套娃（不递归），仅闪红提示；\n"
+    "    · 单击含标记的扇区 = 展开次级扇形（约 330ms 双击确认窗口后生效）；\n"
+    "    · 双击含标记的扇区 = 执行「主指令」；主指令为空则仅收起、不执行、不闪红；\n"
+    "    · 单击无标记的扇区 = 立即执行该扇区指令（无歧义，零延迟）；\n"
+    "    · 次级环上的扇区单击=直接执行该项，不会再套娃（不递归）；\n"
+    "    · 右键球体/空白处 = 呼出菜单（设置 / 重载 / 消失 / 退出）；\n"
     "    · 「测试」按钮对含标记指令只会测试「主指令」（标记块会被跳过，避免误报语法）。\n\n"
-    "  提示：含『代码1』『代码2』等多子功能的扇区，最适合用右键一键展开次级菜单执行。"
+    "  提示：含『代码1』『代码2』等多子功能的扇区，最适合用单击一键展开次级菜单执行。"
 )
 
 
@@ -1908,7 +1976,7 @@ class SettingsDialog(QDialog):
             self.table.rowCount(), {"name": "新功能", "code": "", "active": False}))
         btn_del.clicked.connect(self._delete_current)
 
-        # 底部按钮行（自定义）：主题色 | 帮助 ……… 保存 | 取消
+        # 底部按钮行（自定义）：动效 | 帮助 ……… 保存 | 取消
         # 帮助窗与设置窗同级（非模态 show），打开帮助不阻塞操作设置；
         # 点 Save 时若帮助窗还开着会一并关闭。
         btn_aura = QPushButton("动效", self)
@@ -2325,7 +2393,12 @@ def resolve_sleep_opacity(sleep_raw, opacity_raw) -> int:
 
 
 def load_aura_config() -> dict:
-    """读取光效配置块（中间彩色 + 光效倍率 + 休眠秒数）。缺省回退 CONFIG 默认值；解析失败不打断启动。"""
+    """读取光效配置块（呼吸开关+三色+三段渐变时长+倍率+休眠+透明度）。
+
+    缺省回退 CONFIG 默认值；解析失败不打断启动。
+    旧配置无 breath/color_start/color_end/dur_* 键 → 回退默认（观感与旧版一致：
+    起末皆白、呼吸开启、时长 5/5/5 的两色态 5+5=10s 周期）。
+    """
     data = read_setting().get("aura") or {}
     if not isinstance(data, dict):
         data = {}
@@ -2333,9 +2406,16 @@ def load_aura_config() -> dict:
     raw_idle = data.get("idle_sec") if "idle_sec" in data else (
         float(data["idle_min"]) * 60.0 if "idle_min" in data else CONFIG["idle_sec"])
     out = {
-        "color_start": "#FFFFFF",  # 起始/末尾固定白色，仅兼容旧配置
-        "color_mid": str(data.get("color_mid") or CONFIG["color_mid"]),
-        "color_end": "#FFFFFF",
+        "breath": bool(data.get("breath", CONFIG["breath"])),
+        "color_start": normalize_hex(
+            str(data.get("color_start") or CONFIG["color_start"]), CONFIG["color_start"]),
+        "color_mid": normalize_hex(
+            str(data.get("color_mid") or CONFIG["color_mid"]), CONFIG["color_mid"]),
+        "color_end": normalize_hex(
+            str(data.get("color_end") or CONFIG["color_end"]), CONFIG["color_end"]),
+        "dur_start_mid": _clamp_dur(data.get("dur_start_mid", CONFIG["dur_start_mid"])),
+        "dur_mid_end": _clamp_dur(data.get("dur_mid_end", CONFIG["dur_mid_end"])),
+        "dur_end_start": _clamp_dur(data.get("dur_end_start", CONFIG["dur_end_start"])),
         "aura_scale": _clamp_scale(data.get("aura_scale", CONFIG["aura_scale"])),
         "idle_sec": _clamp_idle(raw_idle),
         "opacity": _clamp_opacity(data.get("opacity", CONFIG["opacity"])),
@@ -2347,13 +2427,20 @@ def load_aura_config() -> dict:
 
 
 def save_aura_config(cfg: dict) -> None:
-    """写回光效配置块，颜色归一成 #RRGGBB 大写，倍率/休眠秒数/透明度保留；不动其他配置块。
+    """写回光效配置块：三色归一 #RRGGBB 大写、渐变时长取整钳 [1,30]、呼吸开关布尔；
+    倍率/休眠秒数/透明度保留；不动其他配置块。
 
     休眠透明度若大于总体透明度，按规则归一为 10%。
     """
     data = read_setting()
     data["aura"] = {
-        "color_mid": cfg["color_mid"].upper(),
+        "breath": bool(cfg.get("breath", True)),
+        "color_start": str(cfg.get("color_start", CONFIG["color_start"])).upper(),
+        "color_mid": str(cfg.get("color_mid", CONFIG["color_mid"])).upper(),
+        "color_end": str(cfg.get("color_end", CONFIG["color_end"])).upper(),
+        "dur_start_mid": _clamp_dur(cfg.get("dur_start_mid", CONFIG["dur_start_mid"])),
+        "dur_mid_end": _clamp_dur(cfg.get("dur_mid_end", CONFIG["dur_mid_end"])),
+        "dur_end_start": _clamp_dur(cfg.get("dur_end_start", CONFIG["dur_end_start"])),
         "aura_scale": _clamp_scale(cfg.get("aura_scale", 1.0)),
         "idle_sec": _clamp_idle(cfg.get("idle_sec", CONFIG["idle_sec"])),
         "opacity": _clamp_opacity(cfg.get("opacity", CONFIG["opacity"])),
@@ -2369,9 +2456,15 @@ def save_aura_config(cfg: dict) -> None:
 
 def apply_aura_to_config(cfg: dict) -> None:
     """把光效配置合并进 CONFIG（运行期立即生效，无需重启）。"""
-    CONFIG["color_start"] = "#FFFFFF"
+    CONFIG["breath"] = bool(cfg.get("breath", CONFIG["breath"]))
+    CONFIG["color_start"] = cfg.get("color_start", CONFIG["color_start"])
     CONFIG["color_mid"] = cfg["color_mid"]
-    CONFIG["color_end"] = "#FFFFFF"
+    CONFIG["color_end"] = cfg.get("color_end", CONFIG["color_end"])
+    CONFIG["dur_start_mid"] = _clamp_dur(
+        cfg.get("dur_start_mid", CONFIG["dur_start_mid"]))
+    CONFIG["dur_mid_end"] = _clamp_dur(cfg.get("dur_mid_end", CONFIG["dur_mid_end"]))
+    CONFIG["dur_end_start"] = _clamp_dur(
+        cfg.get("dur_end_start", CONFIG["dur_end_start"]))
     CONFIG["aura_scale"] = _clamp_scale(cfg.get("aura_scale", CONFIG["aura_scale"]))
     CONFIG["idle_sec"] = _clamp_idle(cfg.get("idle_sec", CONFIG["idle_sec"]))
     CONFIG["opacity"] = _clamp_opacity(cfg.get("opacity", CONFIG["opacity"]))
@@ -2395,8 +2488,11 @@ def normalize_hex(text: str, fallback: str) -> str:
 
 
 class AuraSettingsDialog(QDialog):
-    """光效设置对话框：中间彩色（十六进制+取色）+ 光效倍率（0.1x~3x）+
-    总体透明度（10~100%）+ 休眠透明度（1~20%）。
+    """动效设置对话框（V10）：球体呼吸开关 + 起始/过渡/末尾三色（十六进制+取色）
+    + 三段渐变时长（1~30s）+ 呼吸倍率（0.1x~3x）+ 休眠倒计时 + 总体/休眠透明度。
+
+    窗口高度不再固定，由设置项数量决定（布局自动撑开）。
+    呼吸关闭时，颜色/时长/倍率输入全部置灰（渲染全停，参数无意义）。
 
     等级高于基本设置：模态 exec() 打开，未确定/取消前不能操作设置主窗。
     """
@@ -2404,27 +2500,61 @@ class AuraSettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("动效设置")
-        self.resize(220, 245)   # 动效弹窗：220×245（新增透明度两行后加高）
+        # V10：取消固定高度，窗口随控件行数自适应；仅约束最小宽度保证排版
+        self.setMinimumWidth(220)
 
         cur = load_aura_config()
         self._fallback = cur
 
-        # 中间彩色：十六进制输入框 + 取色按钮
-        mid_row = QHBoxLayout()
-        self.edt_mid = QLineEdit(cur["color_mid"].upper(), self)
-        self.edt_mid.setMaxLength(7)
-        btn_pick = QPushButton("取色…", self)
-        btn_pick.setToolTip("打开系统取色器，点选颜色后自动填入")
-        btn_pick.clicked.connect(self._pick_mid)
-        mid_row.addWidget(self.edt_mid, 1)
-        mid_row.addWidget(btn_pick)
+        # 球体呼吸开关（放颜色设置最上面；默认勾选开启）
+        self.chk_breath = QCheckBox("球体呼吸", self)
+        self.chk_breath.setToolTip("勾选=球体按三色渐变呼吸；取消=颜色与大小完全静止，"
+                                   "只渲染起始色")
+        self.chk_breath.setChecked(bool(cur.get("breath", True)))
+        self.chk_breath.toggled.connect(self._on_breath_toggled)
 
-        # 光效倍率：0.1x ~ 3x，步进 0.1（QDoubleSpinBox）
+        def _color_row(key: str, title: str, tip: str) -> QHBoxLayout:
+            """一行「十六进制框 + 取色按钮」的颜色编辑控件。"""
+            row = QHBoxLayout()
+            edt = QLineEdit(cur[key].upper(), self)
+            edt.setMaxLength(7)
+            edt.setToolTip(f"{title}：填 #RRGGBB 十六进制色码，或点右侧取色")
+            btn = QPushButton("取色…", self)
+            btn.setToolTip(tip)
+            btn.clicked.connect(
+                lambda _=False, e=edt, t=title: self._pick_color(e, t))
+            setattr(self, f"edt_{key.split('_')[1]}", edt)
+            row.addWidget(edt, 1)
+            row.addWidget(btn)
+            return row
+
+        start_row = _color_row("color_start", "起始色", "打开系统取色器选起始色")
+        mid_row = _color_row("color_mid", "过渡色", "打开系统取色器选过渡色")
+        end_row = _color_row("color_end", "末尾色", "打开系统取色器选末尾色")
+
+        # 渐变时长：三个小框并列一行，分别对应三段顺次渐变
+        self.edit_dur = []
+        dur_row = QHBoxLayout()
+        for key, tip in (
+                ("dur_start_mid", "起始色→过渡色 渐变时长（1~30 秒，整数）"),
+                ("dur_mid_end", "过渡色→末尾色 渐变时长（1~30 秒，整数）"),
+                ("dur_end_start", "末尾色→起始色 渐变时长（1~30 秒，整数）")):
+            edt = QLineEdit(str(_clamp_dur(cur.get(key, 5))), self)
+            edt.setMaxLength(5)
+            edt.setToolTip(tip + "；超出自动取最近值，小数向下取整")
+            edt.editingFinished.connect(
+                lambda _=False, e=edt: self._clamp_dur_input(e))
+            self.edit_dur.append(edt)
+            dur_row.addWidget(edt, 1)
+
+        # 光效倍率：0.1x ~ 3x，步进 0.1（QDoubleSpinBox）——全局速度：
+        # 每段实际耗时 = 设定秒数 ÷ 倍率
         self.spin_scale = QDoubleSpinBox(self)
         self.spin_scale.setRange(0.1, 3.0)
         self.spin_scale.setSingleStep(0.1)
         self.spin_scale.setDecimals(1)
         self.spin_scale.setSuffix("x")
+        self.spin_scale.setToolTip("呼吸整体速度：每段渐变实际耗时 = 设定秒数 ÷ 倍率")
         self.spin_scale.setValue(float(cur.get("aura_scale", 1.0)))
 
         # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数后呼吸暂停+透明度 sleep
@@ -2453,8 +2583,15 @@ class AuraSettingsDialog(QDialog):
         self.spin_sleep_op.editingFinished.connect(self._clamp_sleep_op_input)
 
         grid = QVBoxLayout()
-        grid.addWidget(QLabel("主题色", self))
+        grid.addWidget(self.chk_breath)
+        grid.addWidget(QLabel("起始色", self))
+        grid.addLayout(start_row)
+        grid.addWidget(QLabel("过渡色", self))
         grid.addLayout(mid_row)
+        grid.addWidget(QLabel("末尾色", self))
+        grid.addLayout(end_row)
+        grid.addWidget(QLabel("渐变时长（秒，起→中 / 中→末 / 末→起）", self))
+        grid.addLayout(dur_row)
         grid.addWidget(QLabel("呼吸倍率（0.1x~3.0x）", self))
         grid.addWidget(self.spin_scale)
         grid.addWidget(QLabel("休眠倒计时（秒）", self))
@@ -2473,11 +2610,33 @@ class AuraSettingsDialog(QDialog):
         layout.addLayout(grid)
         layout.addWidget(box)
 
-    def _pick_mid(self) -> None:
-        initial = normalize_hex(self.edt_mid.text(), self._fallback["color_mid"])
-        color = QColorDialog.getColor(QColor(initial), self, "选择中间彩色")
+        # 初始联动：呼吸关闭则颜色/时长/倍率置灰
+        self._on_breath_toggled(self.chk_breath.isChecked())
+
+    def _on_breath_toggled(self, on: bool) -> None:
+        """球体呼吸开关联动：取消勾选 → 三色框+取色钮+三时长框+倍率全部置灰
+        （渲染全停，这些参数无意义）；休眠/透明度不受影响。"""
+        for edt in (self.edt_start, self.edt_mid, self.edt_end):
+            edt.setEnabled(on)
+        for w in self.findChildren(QPushButton):
+            if w.text() == "取色…":
+                w.setEnabled(on)
+        for edt in self.edit_dur:
+            edt.setEnabled(on)
+        self.spin_scale.setEnabled(on)
+
+    def _pick_color(self, edt: QLineEdit, title: str) -> None:
+        """通用取色：以该框当前合法色为初值打开系统取色器，选定后回填大写色码。"""
+        initial = normalize_hex(edt.text(), "#FFFFFF")
+        color = QColorDialog.getColor(QColor(initial), self, f"选择{title}")
         if color.isValid():
-            self.edt_mid.setText(color.name().upper())
+            edt.setText(color.name().upper())
+
+    def _clamp_dur_input(self, edt: QLineEdit) -> None:
+        """渐变时长失焦/回车时：float→向下取整→钳 [1,30] 后回填；
+        非数字回退当前生效值（不动其他框）。"""
+        n = _clamp_dur(edt.text())
+        edt.setText(str(n))
 
     def _clamp_idle_input(self) -> None:
         """休眠秒数输入失焦/回车时：就近取值钳制到 [10, 600] 并回填输入框，
@@ -2502,18 +2661,35 @@ class AuraSettingsDialog(QDialog):
             self.spin_sleep_op.setValue(clamped)
 
     def settings(self) -> dict:
-        """收集当前设置（中间色非法回退原值；倍率夹在 0.1~3；休眠秒数就近钳制；
-        总体透明度 [10,100]；休眠透明度按「大于总体则取 10%」规则归一）。"""
+        """收集当前设置：三色非法各自回退原值；时长取整钳 [1,30]（未失焦时
+        直接按同规则解析当前文本）；倍率夹 0.1~3；休眠秒数就近钳制；
+        总体透明度 [10,100]；休眠透明度按「大于总体则取 10%」规则归一；
+        呼吸开关取复选框状态。"""
         op = _clamp_opacity(self.spin_opacity.value())
+        d1, d2, d3 = (self._dur_value(e, k) for e, k in
+                      zip(self.edit_dur, ("dur_start_mid", "dur_mid_end",
+                                          "dur_end_start")))
         return {
-            "color_start": "#FFFFFF",
-            "color_mid": normalize_hex(self.edt_mid.text(), self._fallback["color_mid"]),
-            "color_end": "#FFFFFF",
+            "breath": self.chk_breath.isChecked(),
+            "color_start": normalize_hex(self.edt_start.text(),
+                                         self._fallback["color_start"]),
+            "color_mid": normalize_hex(self.edt_mid.text(),
+                                       self._fallback["color_mid"]),
+            "color_end": normalize_hex(self.edt_end.text(),
+                                       self._fallback["color_end"]),
+            "dur_start_mid": d1,
+            "dur_mid_end": d2,
+            "dur_end_start": d3,
             "aura_scale": round(float(self.spin_scale.value()), 2),
             "idle_sec": _clamp_idle(self.spin_idle.value()),
             "opacity": op,
             "sleep_opacity": resolve_sleep_opacity(self.spin_sleep_op.value(), op),
         }
+
+    @staticmethod
+    def _dur_value(edt: QLineEdit, key: str) -> int:
+        """时长框取值：按「向下取整+钳制」解析当前文本（回车未触发也能取对）。"""
+        return _clamp_dur(edt.text())
 
 
 def _apply_aura_config(cfg: dict) -> None:
@@ -2574,18 +2750,21 @@ class AuraBall(QWidget):
         self._idle_ms = 0.0            # 距上次球体交互的累计时长
         self._asleep = False           # 当前是否处于休眠（低透明度）
 
-        # —— 单击/双击判别 ——
-        # 需求：删除双击功能，只保留单击事件。双击由两下快速单击组成，
-        # 第一击的抬起发生时无法预知后面是否还有一击，不能在第一击就执行扇区。
-        # 因此单击执行改为「延迟确认」：松开时只登记待执行扇区并启动确认定时器；
-        # 若在双击判定窗口内系统判定为双击（第二击按下进来）→ 整段取消，双击零效果；
-        # 窗口内无第二击 → 定时器到点确认是单击，才真正执行扇区。
-        # 确认窗口 = min(系统双击间隔, 300ms) + 30ms，单击最长延迟约 330ms，
-        # 与悬停展开 300ms 的节奏一致。
-        self._click_pending: int | None = None   # 待确认执行的扇区号（None=无）
+        # —— 单击/双击判别（V10 语义反转）——
+        # 主环扇区：单击 = 展开次级扇形（仅当该扇区指令含成对标记）/ 无标记立即执行；
+        #           双击 = 执行主扇形代码（含标记时执行主指令）。
+        # 歧义只在「有标记扇区的单击」：第一击抬起无法预知后面是否还有第二击，
+        # 而双击的执行目标是同一个扇区——若单击立即收起去展次级环，第二击就
+        # 没了目标。所以有标记扇区的单击先登记「待展开」并启动确认窗口：
+        #   · 窗口内收到 DoubleClick（第二击按下）→ 取消展开，改执行主指令；
+        #   · 窗口到期 → 收起 → 300ms → 展开次级环。
+        # 无标记扇区没有歧义（单击双击同义），立即执行、零延迟。
+        # 次级环扇区：单击=直接执行（不递归）；双击自然退化（首击已执行、次击落空）。
+        # 确认窗口 = 系统双击间隔 + 30ms（约 330ms），与悬停展开节奏一致。
+        self._pending_sub_sector: int | None = None   # 待展开次级的扇区号（None=无）
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
-        self._click_timer.timeout.connect(self._commit_click)
+        self._click_timer.timeout.connect(self._commit_sub_expand)
         self._dbl_click_seen = False   # 系统已判定本次为双击，第二击的抬起整段吞掉
 
         # —— 拖动 / 吸附 ——
@@ -2599,17 +2778,16 @@ class AuraBall(QWidget):
         self._dragging = False
         self._snap: dict | None = None       # {from, to, ms, dur} 非线性吸附/回位
         # —— 次级动态扇形（V9）——
-        # 右键展开的主列表保存；_sub_sectors 展开期间临时替换 _sectors；
-        # _sub_pending_items = 待展开的次级项；_sub_launching = 收起飞行中等待
-        # 延迟展开（禁止收回途中回球重开）；_sub_launching_aborted = 期间被打断
-        # （拖动/休眠/二次操作）应取消本次次级展开。
+        # 单击（主环有标记扇区）展开次级环期间的主列表保存；_sub_sectors 展开期间
+        # 临时替换 _sectors；_sub_pending_items = 待展开的次级项；_sub_launching =
+        # 收起飞行中等待延迟展开（禁止收回途中回球重开）；_sub_launching_aborted =
+        # 期间被打断（拖动/休眠/二次操作）应取消本次次级展开。
         self._main_sectors = list(self._sectors)
         self._sub_sectors: list[dict] | None = None
         self._sub_pending_items: list[dict] | None = None
         self._sub_launching = False
         self._sub_launching_aborted = False
         self._sub_timer: QTimer | None = None
-        self._ctx_consumed = False   # 右键已消费（环上触发次级/闪红）→ 抑制默认菜单
         # —— 球心位置记忆：移动停止 10s 无位移 → 立即写配置 ——
         # _last_motion_center = 上次采样的球心参考点（与该点位移 ≥0.5px 视为「在动」）；
         # _settle_ms = 持续「无位移」的累计时长；_pos_dirty = 是否移动过待落盘。
@@ -2695,11 +2873,14 @@ class AuraBall(QWidget):
         self._last_frame = frame_index
 
         # 相位取自真实经过时间：掉帧只会变糙，循环不会被拉长。
-        # 呼吸动画倍率 aura_scale：相位推进速度 × 倍率。
-        #   0.1x → 每圈时长 = 原 20s / 0.1 = 200s（慢 10 倍）
-        #   3.0x → 每圈时长 = 原 20s / 3.0 ≈ 6.67s（快 3 倍）
+        # 周期 = 各段渐变时长之和（breath_cycle_ms，V10 起废弃固定 20s）。
+        # 呼吸动画倍率 aura_scale 为全局速度：每段实际耗时 = 设定秒数 ÷ 倍率。
+        #   例：三段各 5s、倍率 2.0x → 每圈 = 15s / 2.0 = 7.5s
         scale = max(0.1, min(3.0, float(CONFIG.get("aura_scale", 1.0))))
-        self._phase = (elapsed * scale % CONFIG["cycle_ms"]) / CONFIG["cycle_ms"]
+        cycle = breath_cycle_ms()
+        if cycle > 0:
+            self._phase = (elapsed * scale % cycle) / cycle
+        # cycle == 0（球体呼吸关闭）：相位停走；渲染由 shape_at 恒起始色+恒直径接管
         # 扇形展开 / 展开中 / 收起中途（即动态扇形可见期间）：呼吸冻结，
         # 相位停在展开瞬间；彻底回收（hidden）后继续呼吸。
         if self._breath_frozen:
@@ -2729,8 +2910,9 @@ class AuraBall(QWidget):
         if self._press is None:
             return False
         if not self._dragging:
-            # 右键次级展开的收起飞行中若开始拖动球体 → 取消次级展开（先保证拖动手感）
-            if self._sub_launching:
+            # 次级展开的收起飞行中若开始拖动球体 → 取消次级展开（先保证拖动手感）；
+            # 若还在单击确认窗（待展开登记）→ 同样取消，拖动优先
+            if self._sub_launching or self._pending_sub_sector is not None:
                 self._abort_sub_launch()
             grab = self._press["grab"]
             if math.hypot(gp.x() - grab.x(), gp.y() - grab.y()) < CONFIG["drag_start_px"]:
@@ -3008,8 +3190,10 @@ class AuraBall(QWidget):
         """
         if self._asleep:
             return
-        # 休眠前取消等待中的次级展开（若有）：避免残留定时器在休眠中意外展开
-        if self._sub_launching:
+        # 休眠前取消等待中的次级展开（若有）：避免残留定时器在休眠中意外展开。
+        # V10 补充：单击确认窗阶段（仅登记待展开、尚未收起）同样必须打断，
+        # 否则休眠后 330ms 定时器到点仍会把次级环弹出来。
+        if self._sub_launching or self._pending_sub_sector is not None:
             self._abort_sub_launch()
         self._asleep = True
         self._breath_frozen = True
@@ -3235,20 +3419,17 @@ class AuraBall(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         """左键按住球体：记下抓取偏移，等待移动阈值判定是点击还是拖动。
 
-        右键：环上命中扇区 → 次级动态扇形（无标记闪红 / 有标记收起后展开）；
-        球体或环外空白 → 交给 contextMenuEvent 的默认菜单处理。
+        V10：右键不再参与扇区交互（次级展开改由单击触发），右键一律交给
+        contextMenuEvent 的默认菜单处理。
         """
         try:
-            # 右键：优先判定环上扇区的「次级动态扇形」触发
-            if event.button() == Qt.MouseButton.RightButton:
-                self._on_right_press(event)
-                return
             if event.button() != Qt.MouseButton.LeftButton:
                 return
             # 系统判定本击不是双击（若是双击，第二击会以 MouseButtonDblClick 派发、
-            # 不会走到这里）；若此前还有未确认的单击，先确认执行——它已独立成一次单击。
-            if self._click_pending is not None:
-                self._commit_click()
+            # 不会走到这里）；若此前还有未确认的单击待展开，先让它落地——
+            # Qt 已判定不是双击，那次单击就是完整的单击（展开次级环）。
+            if self._pending_sub_sector is not None:
+                self._commit_sub_expand()
             g = QPointF(event.globalPosition().toPoint())
             dist = math.hypot(g.x() - self._center.x(), g.y() - self._center.y())
             if dist > HOVER_RADIUS:      # 只允许抓球体本身，抓环不移动
@@ -3261,51 +3442,6 @@ class AuraBall(QWidget):
             self._follow = False
         except Exception as exc:  # noqa: BLE001
             _log_crash("mousePressEvent", exc)
-
-    def _on_right_press(self, event) -> None:
-        """右键环上扇区 → 次级动态扇形处理。
-
-        · 鼠标在展开环上且命中扇区：
-            - 该扇区指令无【【【…】】】标记 → 复用失败红闪（无下级功能）；
-            - 有标记（成对）→ 记录待展开次级项 → 收起主环 → 延迟 300ms
-              后顺时针整环展开次级环；
-        · 无论在哪种状态，非环上命中（球体/空白）→ 不吞事件，放行默认右键菜单。
-        """
-        # 收起中且正在等次级展开：忽略重复右键
-        if self._sub_launching:
-            return
-        if self._state not in ("open", "expanding") or self._highlight < 0:
-            return   # 未展开 / 不在环上 → 保留默认右键菜单
-        i = self._highlight
-        sec = self._sectors[i]
-        self._ctx_consumed = True   # 环上右键一律替换默认菜单
-        if sec.get("placeholder"):
-            # 占位扇区：闪红提示无下级功能
-            self._flash = {"sector": i, "ok": False, "ms": 0.0,
-                           "dur": CONFIG["flash_ms_fail"]}
-            return
-        parsed = parse_special_sections(sec["code"])
-        if parsed["err"]:
-            # 标记校验失败（不成对等）→ 闪红并以 stderr 提示，避免静默
-            print(f"[次级扇形] {sec['name']} 标记异常：{parsed['err']}", file=sys.stderr)
-            self._flash = {"sector": i, "ok": False, "ms": 0.0,
-                           "dur": CONFIG["flash_ms_fail"]}
-            return
-        if not parsed["items"]:
-            # 无标记：复用失败红闪（无下级功能）
-            self._flash = {"sector": i, "ok": False, "ms": 0.0,
-                           "dur": CONFIG["flash_ms_fail"]}
-            return
-        # 有标记：记录待展开项 → 收起主环 → 延迟 300ms 展开次级环
-        self._sub_pending_items = parsed["items"]
-        self._sub_launching = True
-        self._enter_collapsing()
-        # 收起完成后（_on_hidden）触发延迟展开
-        self._sub_timer = QTimer(self)
-        self._sub_timer.setSingleShot(True)
-        self._sub_timer.setInterval(300)
-        self._sub_timer.timeout.connect(self._open_sub_ring)
-        self._sub_timer.start()
 
     def _open_sub_ring(self) -> None:
         """300ms 延迟后：把 _sectors 替换为次级项并展开（渲染/命中/执行全复用）。"""
@@ -3337,7 +3473,12 @@ class AuraBall(QWidget):
         self._enter_expanding()
 
     def _abort_sub_launch(self) -> None:
-        """取消等待中的次级展开（右键后收起飞行内被拖动/其他强交互打断时）。"""
+        """取消等待中的次级展开（单击确认后收起飞行内被拖动/休眠等强交互打断时）。
+
+        V10：同时清掉更早阶段的「待展开登记」（双击确认窗未到期），
+        任何一个打断点都不允许留下会在半途爆炸的展开定时器。
+        """
+        self._cancel_pending_sub()
         self._sub_launching = False
         self._sub_launching_aborted = True
         self._sub_pending_items = None
@@ -3360,14 +3501,16 @@ class AuraBall(QWidget):
             _log_crash("mouseMoveEvent", exc)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        """松手：拖动过则按边缘距离吸附或回位；没拖动则登记一次待确认的单击。
+        """松手：拖动过则按边缘距离吸附或回位；没拖动则按新语义分流单击。
 
-        单击执行采用「延迟确认」以彻底删除双击功能（详见 _arm_click）。
+        V10 分流（详见 _arm_click）：主环有标记扇区 → 登记待展开（双击窗口内
+        可被双击改判为执行主指令）；其余（无标记/次级环/占位/标记异常）→ 立即
+        走 trigger_sector 分流执行。
         """
         try:
             if event.button() != Qt.MouseButton.LeftButton:
                 return
-            # 双击第二击的抬起：DoubleClick 事件已判定并取消失效，
+            # 双击第二击的抬起：DoubleClick 事件已判定并执行主指令，
             # 本击不再产生任何动作。
             if self._dbl_click_seen:
                 self._dbl_click_seen = False
@@ -3387,52 +3530,113 @@ class AuraBall(QWidget):
                 self._finish_drag()
                 return
             if self._state in ("open", "expanding") and self._highlight >= 0:
-                self._arm_click(self._highlight)   # 单击确认后才执行（双击不执行）
+                self._arm_click(self._highlight)
         except Exception as exc:  # noqa: BLE001
             _log_crash("mouseReleaseEvent", exc)
 
-    # ---------- 双击拦截 / 单击确认 ----------
+    # ---------- 单击分流 / 次级展开确认 / 双击执行 ----------
+    def _is_main_ring_with_marks(self, sector: int) -> bool:
+        """当前展开的是主环，且该扇区指令含合法成对标记（可展开次级环）。"""
+        if self._sub_sectors is not None:   # 次级环上：不递归，永远 False
+            return False
+        sec = self._sectors[sector]
+        if sec.get("placeholder"):
+            return False
+        parsed = parse_special_sections(sec["code"])
+        return not parsed["err"] and bool(parsed["items"])
+
     def _arm_click(self, sector: int) -> None:
-        """登记一次待确认的扇区单击，等待双击判定窗口过去后才真正执行。
+        """松开后的单击分流（V10 新语义）。
 
-        双击由「第一击抬起 + 第二击按下（以 MouseButtonDblClick 派发）」组成，
-        Qt 判定双击发生在第二击按下时，晚于第一击抬起。若第一击抬起就立即
-        执行扇区，双击会连带执行一次。因此把执行延后到双击窗口结束：
-          · 窗口内收到 DoubleClick 事件 → _cancel_pending_click() 取消，双击零效果；
-          · 窗口内无第二击 → _commit_click() 确认单击并执行。
-        代价：单击执行延迟约（系统双击间隔 + 30ms），换取双击完全不触发。
+        · 主环·有合法标记扇区：存在「单击展次级 vs 双击执行主指令」歧义——
+          第一击抬起时无法预知是否还有第二击，且若立即收起去展次级环，第二击
+          就丢了目标扇区。因此登记待展开并启动确认窗口：
+              窗口内收到 DoubleClick → 取消展开，改执行主指令（_on_double_click）；
+              窗口到期 → _commit_sub_expand() 收起并展开次级环。
+          代价：该情形下展开延迟约（系统双击间隔 + 30ms）。
+        · 其余一切扇区（主环无标记/占位/标记异常、次级环全部）：无歧义，
+          立即 trigger_sector 分流（执行 / 只收起 / 闪红）。
         """
-        if self._click_timer.isActive() and self._click_pending is not None:
-            self._commit_click()          # 防御：旧的待确认先落地
-        self._click_pending = sector
-        self._click_timer.start(int(QApplication.doubleClickInterval()) + 30)
+        self._cancel_pending_sub()          # 防御：旧的待展开先作废（含连点场景）
+        if self._is_main_ring_with_marks(sector):
+            self._pending_sub_sector = sector
+            self._click_timer.start(int(QApplication.doubleClickInterval()) + 30)
+            return
+        self.trigger_sector(sector)
 
-    def _cancel_pending_click(self) -> None:
-        """取消待确认的单击（双击第二击已到达 / 其他原因放弃）。"""
+    def _cancel_pending_sub(self) -> None:
+        """取消待展开的次级扇形（双击改判执行 / 其他放弃场景）。"""
         self._click_timer.stop()
-        self._click_pending = None
+        self._pending_sub_sector = None
 
-    def _commit_click(self) -> None:
-        """双击窗口已过，确认刚才的松开是一次单击 → 执行登记的扇区。"""
+    def _commit_sub_launch(self, sector: int) -> None:
+        """确认单击成立：登记次级项 → 收起主环 → 300ms 后展开次级环。
+
+        原 V9 右键链路的收起+延迟展开逻辑整体迁到这里，由双击确认窗到期触发。
+        """
+        sec = self._sectors[sector]
+        parsed = parse_special_sections(sec["code"])
+        if parsed["err"] or not parsed["items"]:
+            # 防御：确认后标记状态理论上不变；万一异常按闪红处理
+            self._flash = {"sector": sector, "ok": False, "ms": 0.0,
+                           "dur": CONFIG["flash_ms_fail"]}
+            self._enter_collapsing()
+            return
+        self._sub_pending_items = parsed["items"]
+        self._sub_launching = True
+        self._enter_collapsing()
+        self._sub_timer = QTimer(self)
+        self._sub_timer.setSingleShot(True)
+        self._sub_timer.setInterval(300)
+        self._sub_timer.timeout.connect(self._open_sub_ring)
+        self._sub_timer.start()
+
+    def _commit_sub_expand(self) -> None:
+        """双击窗口已过，确认刚才的单击成立 → 展开次级环。
+
+        · 主环仍在（open/expanding/collapsing）：收起主环 → 300ms → 展开次级环；
+        · 已彻底收起（hidden，例如待展开期间鼠标离开触发了自动收回）：
+          直接按次级项展开，不再多余等待收起动画。
+        """
         self._click_timer.stop()
-        hl = self._click_pending
-        self._click_pending = None
+        hl = self._pending_sub_sector
+        self._pending_sub_sector = None
         if hl is None:
             return
         try:
-            self.trigger_sector(hl)
+            if self._state == "hidden":
+                self._sub_pending_items = parse_special_sections(
+                    self._sectors[hl]["code"])["items"] or None
+                if self._sub_pending_items is None:
+                    return
+                self._sub_launching = True
+                self._open_sub_ring()
+                return
+            self._commit_sub_launch(hl)
         except Exception as exc:  # noqa: BLE001
-            _log_crash("commit_click", exc)
+            _log_crash("commit_sub_expand", exc)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        """系统判定为双击：取消首击登记的单击，双击整体不产生任何动作。
+        """系统判定为双击（V10）：主扇区双击 = 执行主扇形代码。
 
-        双击功能已删除，只保留单击事件；本处理不包含退出或任何其他行为。
+        第一击若已登记「待展开次级」→ 取消展开、立即执行主指令（含标记执行
+        标记前主指令，无标记执行整段——即双击必然落到执行语义）。
+        第一击若是无歧义扇区，抬起时已执行完毕、环已收起，第二击自然落空。
+        本处理不包含退出或任何其他行为。
         """
         try:
-            if event.button() == Qt.MouseButton.LeftButton:
-                self._cancel_pending_click()
-                self._dbl_click_seen = True   # 第二击的抬起需要整段吞掉
+            if event.button() != Qt.MouseButton.LeftButton:
+                return
+            self._dbl_click_seen = True     # 第二击的抬起整段吞掉
+            if self._pending_sub_sector is None:
+                return
+            sector = self._pending_sub_sector
+            self._cancel_pending_sub()
+            # 双击目标扇区：执行主指令（trigger_sector 内含标记分流）
+            try:
+                self.trigger_sector(sector)
+            except Exception as exc:  # noqa: BLE001
+                _log_crash("double_click_exec", exc)
         except Exception as exc:  # noqa: BLE001
             _log_crash("mouseDoubleClickEvent", exc)
 
@@ -3459,7 +3663,8 @@ class AuraBall(QWidget):
     def trigger_sector(self, i: int) -> None:
         """执行一个扇区：占位/空代码只收起；正常扇区起闪光并派发代码。
 
-        含特殊标记的扇区：左键执行主指令（第一个标记前），主指令为空则只收起
+        V10 调用场景：双击（必然执行）、主环无标记单击、次级环单击、标记异常。
+        含成对特殊标记的扇区：执行主指令（第一个标记前），主指令为空则只收起
         （占位语义）。执行 fire-and-forget，主程序绝不等待子进程（避坑 3）。
         """
         self._enter_collapsing()
@@ -3467,7 +3672,7 @@ class AuraBall(QWidget):
         if sec["placeholder"]:
             return
         code = sec["code"]
-        # 含成对特殊标记（次级功能）时，左键只执行「主指令」（标记前）；无标记原样
+        # 含成对特殊标记（次级功能）时，执行「主指令」（标记前）；无标记原样执行
         parsed = parse_special_sections(code)
         if parsed["err"]:
             err = parsed["err"]
@@ -3500,10 +3705,7 @@ class AuraBall(QWidget):
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         try:
-            # 环上右键已被「次级动态扇形」处理（展开/闪红）→ 不弹默认菜单
-            if self._ctx_consumed:
-                self._ctx_consumed = False
-                return
+            # V10：右键不再触发次级扇形（改由单击），任何位置一律弹默认菜单
             menu = QMenu(self)
             act_settings = menu.addAction("设置")
             act_reload = menu.addAction("重载")
