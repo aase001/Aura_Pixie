@@ -21,6 +21,9 @@ user_personal_edition/
 # —— 内部交接文档（含本机路径/环境细节，不公开）——
 handover_documents/
 
+# —— 跨项目迁移资料（含本机路径/验证结论，不公开）——
+Project Migration/
+
 # —— 运行时 / 崩溃与日志 ——
 crash.log
 *.log
