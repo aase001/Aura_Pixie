@@ -2776,6 +2776,7 @@ class AuraBall(QWidget):
         self._follow = False
         self._press: dict | None = None      # {grab: 全局按下点, offset: 球心相对鼠标}
         self._dragging = False
+        self._move_cursor = False            # 拖动中已挂「移动」override 光标（成对设置/恢复）
         self._snap: dict | None = None       # {from, to, ms, dur} 非线性吸附/回位
         # —— 次级动态扇形（V9）——
         # 单击（主环有标记扇区）展开次级环期间的主列表保存；_sub_sectors 展开期间
@@ -2897,6 +2898,25 @@ class AuraBall(QWidget):
         self.frames_drawn += 1
         self.update()
 
+    def _set_move_cursor(self) -> None:
+        """拖动判定成立：挂应用级「移动」光标（四向箭头 SizeAllCursor）。
+
+        必须用 QApplication.setOverrideCursor 而不是 setCursor：弹簧跟随下
+        球体跑得比鼠标快，光标经常落在球窗口之外，窗口级光标会瞬间失效；
+        override 全局生效、直到显式恢复。重复调用无害（_move_cursor 防抖）。
+        """
+        if self._move_cursor:
+            return
+        self._move_cursor = True
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.SizeAllCursor))
+
+    def _clear_move_cursor(self) -> None:
+        """拖动结束（松手/被打断）：恢复系统原光标。未挂时直接跳过。"""
+        if not self._move_cursor:
+            return
+        self._move_cursor = False
+        QApplication.restoreOverrideCursor()
+
     def _update_drag_target(self, gp: QPointF) -> bool:
         """全局光标位置 → 判定并推进拖动状态。返回 True 表示当前处于拖动中。
 
@@ -2920,6 +2940,7 @@ class AuraBall(QWidget):
             self._dragging = True
             self._snap = None
             self._vel = QPointF(0.0, 0.0)
+            self._set_move_cursor()    # V10.1：拖动成立即挂「移动」光标，松手恢复
             if self._state != "hidden":
                 self._enter_collapsing()   # 边拖边展开会让落点判定抖，先收起
         # 宽限期内：球体原地不动（不跟随），扇形由 _on_poll 继续推进收起
@@ -3434,6 +3455,7 @@ class AuraBall(QWidget):
             dist = math.hypot(g.x() - self._center.x(), g.y() - self._center.y())
             if dist > HOVER_RADIUS:      # 只允许抓球体本身，抓环不移动
                 return
+            self._clear_move_cursor()    # 防御：上次拖动若因异常路径未恢复，这里兜底
             self._wake()                 # 点击球体 → 从休眠唤起（透明度恢复、计时清零）
             self._press = {"grab": QPointF(g),
                            "offset": QPointF(self._center) - g,
@@ -3518,6 +3540,7 @@ class AuraBall(QWidget):
                 self._dragging = False
                 self._follow = False
                 self._hold_collapsed = False
+                self._clear_move_cursor()   # V10.1：双击次击抬手里同样恢复光标
                 return
             dragged = self._dragging
             self._press = None
@@ -3526,6 +3549,7 @@ class AuraBall(QWidget):
             self._warn_on = False
             self._warn_ms = 0.0
             self._hold_collapsed = False   # 松开后按住回收状态复位，可再正常悬停/点击
+            self._clear_move_cursor()      # V10.1：松手即恢复系统光标（吸附动画期间不再跟手）
             if dragged:
                 self._finish_drag()
                 return
