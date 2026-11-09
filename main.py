@@ -30,9 +30,11 @@
 from __future__ import annotations
 
 import ast
+import ctypes
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -674,7 +676,7 @@ SETTINGS_HEADER = (
     "# Aura Pixie 设置（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml，"
     "由设置/动效界面写回）\n"
     "# 分块：functions = 功能扇区列表；aura = 光效（breath 呼吸开关 + 起始/过渡/末尾三色 + "
-    "三段渐变时长 dur_* + 倍率 + 透明度）；autostart = 开机自启动；\n"
+    "三段渐变时长 dur_* + 倍率 + 透明度）；autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
     "#       window = 窗口行为（always_on_top = 保持球体置顶；pos_x/pos_y = 球心记忆位置）。\n"
     "# 扇区等分数 = functions 中 active: true 的条目数；最少 2，最多 9（超出只取前 9）；"
     "扇区顺序 = 条目顺序。\n"
@@ -940,11 +942,117 @@ def read_all_rows(path: str = CONFIG_PATH) -> list[dict]:
              "active": bool(i.get("active"))} for i in items]
 
 
+# ---------------------------------------------------------------- 管理员权限
+# 本程序自 V11 起要求以管理员身份运行：资源监视的 CPU 温度 / CPU 功耗 / 硬盘
+# SMART 温度依赖内核驱动（PawnIO），非管理员下这些传感器静默为空；开机自启也
+# 因此改走「计划任务（最高权限运行）」而非 HKCU Run 键（Run 键无 UAC 通道）。
+#   · 打包形态：Nuitka `--windows-uac-admin` 嵌入 requireAdministrator 清单；
+#   · 源码形态 / 清单缺失：由 _ensure_admin() 运行时检测并用 runas 重启自身；
+#   · `--no-elevate`：跳过提权（自检、调试专用，避免无人值守场景卡 UAC）。
+
+_SW_SHOWNORMAL = 1
+_ELEVATE_FLAG = "--no-elevate"
+_ELEVATED_CHILD = "--elevated-child"
+
+
+def is_admin() -> bool:
+    """当前进程是否已具备管理员权限。"""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001 - 极端环境兜底：判定为非管理员
+        return False
+
+
+def _relaunch_cmdline() -> tuple[str, str, str]:
+    """提权重启用的 (可执行文件, 参数串, 工作目录)。"""
+    args = [a for a in sys.argv[1:] if a not in (_ELEVATE_FLAG, _ELEVATED_CHILD)]
+    args.append(_ELEVATED_CHILD)
+    if _is_packaged():
+        exe = app_executable()
+        return exe, subprocess.list2cmdline(args), os.path.dirname(exe) or BASE_DIR
+    exe = _quiet_interpreter()
+    return exe, subprocess.list2cmdline([os.path.abspath(__file__), *args]), BASE_DIR
+
+
+def relaunch_as_admin() -> bool:
+    """以管理员权限重启自身；成功返回 True（调用方应立即退出）。失败返回 False。"""
+    try:
+        exe, params, cwd = _relaunch_cmdline()
+        h = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, cwd,
+                                                _SW_SHOWNORMAL)
+        # ShellExecuteW 成功返回 >32 的句柄；<=32 为 SE_ERR_*（含用户拒绝 UAC=122/1223）
+        return int(h) > 32
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("relaunch_as_admin", exc)
+        return False
+
+
+def _ensure_admin(argv: list[str]) -> bool:
+    """提权门禁：非管理员时尝试 runas 重启。
+
+    返回 True 表示「本次进程应结束」（已拉起提权实例，或提权失败需终止）；
+    返回 False 表示「继续以当前进程运行」（已是管理员 / 显式 --no-elevate / 自检）。
+    """
+    if _ELEVATE_FLAG in argv or "--selftest" in argv or _ELEVATED_CHILD in argv:
+        return False
+    if is_admin():
+        return False
+    if relaunch_as_admin():
+        return True
+    # UAC 被拒或提权失败：明确告知后退出，不再以非管理员身份带病运行
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Aura Pixie 需要管理员权限运行（资源监视的温度/功耗/硬盘 SMART 读数、"
+            "以及计划任务方式开机自启均依赖提权）。\n\n"
+            "请在 UAC 弹窗中选择「是」；若需以免提权方式运行，请加参数 --no-elevate。",
+            "需要管理员权限", 0x10 | 0x40000)  # MB_ICONERROR | MB_TOPMOST
+    except Exception:  # noqa: BLE001 - 弹窗失败也要退出
+        pass
+    return True
+
+
 # ---------------------------------------------------------------- 开机自启动
-# 写当前用户的注册表启动项（HKCU\...\Run），无需管理员权限；
-# 仅选中「开机自启动」复选框后写入，默认不写入、不自启动。
-_RUN_KEY_NAME = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_RUN_VALUE_NAME = "AuraPixie"
+# V11 起：开机自启改用「任务计划程序」注册（登录时触发 + 最高权限运行），
+# 不再写 HKCU\...\Run 注册表项——原因：程序已要求管理员身份，Run 键没有 UAC
+# 通道，提权程序放 Run 键开机时会被静默拦掉或每次弹 UAC；计划任务 /RL HIGHEST
+# 是微软认可的免 UAC 正规做法（来源项目 LiteMonitor 的 AutoStart.cs 同思路）。
+#
+# 原「注入注册表启动」实现完整注释保留在下方（_registry_* 一组函数），
+# 如需回退：放开注释、并让 autostart_state/_set_autostart 改回调用即可。
+_TASK_NAME = "AuraPixie"
+_RUN_KEY_NAME = r"Software\Microsoft\Windows\CurrentVersion\Run"  # 旧方案（留存）
+_RUN_VALUE_NAME = "AuraPixie"                                     # 旧方案（留存）
+
+# —— 旧方案（注册表 Run 键）核心常量与读写函数：已停用，代码留存备用 ——————
+# def _registry_autostart() -> bool:
+#     """注册表 Run 键中是否真实存在 AuraPixie 项。"""
+#     return _registry_value() is not None
+#
+#
+# def _registry_value() -> str | None:
+#     """读取注册表 Run 键中 AuraPixie 项的当前值；不存在/读取失败返回 None。"""
+#     try:
+#         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_NAME) as key:
+#             val, _ = winreg.QueryValueEx(key, _RUN_VALUE_NAME)
+#             return str(val)
+#     except FileNotFoundError:
+#         return None
+#     except OSError:
+#         return None
+#
+#
+# def _set_registry_autostart(enabled: bool) -> None:
+#     """写/删注册表启动项（HKCU\...\Run），无需管理员权限。"""
+#     access = winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
+#     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY_NAME, 0, access) as key:
+#         if enabled:
+#             winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ, _run_value())
+#         else:
+#             try:
+#                 winreg.DeleteValue(key, _RUN_VALUE_NAME)
+#             except FileNotFoundError:
+#                 pass  # 本来就未写入，无需删除
 
 
 def _is_packaged() -> bool:
@@ -963,7 +1071,7 @@ def _quiet_interpreter() -> str:
 
 
 def _run_value() -> str:
-    """要写入注册表启动项的命令行：
+    """自启动要执行的命令行（注册表 Run 与计划任务 /TR 共用同一口径）：
     打包 exe（onefile/standalone）→ 真实分发 exe 路径；
     源码运行 → pythonw.exe（无控制台窗口，开机自启不弹终端）+ 本脚本。"""
     if _is_packaged():
@@ -971,16 +1079,140 @@ def _run_value() -> str:
     return f'"{_quiet_interpreter()}" "{os.path.abspath(__file__)}"'
 
 
+# ------------------------------------------------------------ 计划任务实现 --
+def _autostart_dryrun() -> bool:
+    """自检隔离开关：AURA_AUTOSTART_DRYRUN=1 时计划任务命令与旧启动项清理全部
+    空跑（返回成功但不执行）。check_breath / smoke_settings 等会走 _on_save 的
+    自检必须置位——否则开发期跑一次自检就可能把用户正式的自启任务改掉/删掉
+    （V7「开机弹终端」的同款事故面，规则同源）。"""
+    return os.environ.get("AURA_AUTOSTART_DRYRUN") == "1"
+
+
+class _DryRunResult:
+    """dry-run 结果对象（returncode 可按场景覆写）。"""
+
+    def __init__(self, returncode: int = 0, stdout: bytes = b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = b""
+
+
+#: dry-run 内存任务库：{TN: /TR 值}，让自检里的建/删/查闭环自洽（不落系统）
+_dry_tasks: dict[str, str] = {}
+
+
+def _schtasks(argv: list[str]) -> subprocess.CompletedProcess:
+    """跑 schtasks.exe，静默（无控制台闪现）。dry-run 时走内存任务库。"""
+    if _autostart_dryrun():
+        a = argv
+        if a and a[0] == "/Create":
+            _dry_tasks[a[a.index("/TN") + 1]] = a[a.index("/TR") + 1].replace('\\"', '"')
+        elif a and a[0] == "/Delete":
+            _dry_tasks.pop(a[a.index("/TN") + 1], None)
+        elif a and a[0] == "/Query":
+            tn = a[a.index("/TN") + 1]
+            if tn not in _dry_tasks:
+                return _DryRunResult(1)       # 非零 = 任务不存在
+            tr = _dry_tasks[tn]
+            cmd, _, rest = tr.partition(" ")
+
+            def esc(s: str) -> str:
+                return (s.replace("&", "&amp;").replace("<", "&lt;")
+                         .replace(">", "&gt;").replace('"', "&quot;"))
+
+            xml = (f"<Task><Actions><Exec><Command>{esc(cmd)}</Command>"
+                   f"<Arguments>{esc(rest)}</Arguments></Exec></Actions></Task>")
+            return _DryRunResult(0, xml.encode("utf-8"))
+        return _DryRunResult()
+    return subprocess.run([_schtasks_exe(), *argv], capture_output=True,
+                          creationflags=CREATE_NO_WINDOW, timeout=15)
+
+
+def _schtasks_exe() -> str:
+    system32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                            "System32", "schtasks.exe")
+    return system32 if os.path.isfile(system32) else "schtasks.exe"
+
+
+def _task_query_xml() -> str | None:
+    """查询任务详情（XML 原文）；任务不存在/查询失败返回 None。"""
+    try:
+        r = _schtasks(["/Query", "/TN", _TASK_NAME, "/XML"])
+        if r.returncode == 0:
+            return r.stdout.decode("utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log_crash("task_query", exc)
+    return None
+
+
 def autostart_enabled() -> bool:
-    """当前是否真实自启动（以注册表 Run 键实况为准）。"""
-    return _registry_autostart()
+    """当前是否真实开机自启（以计划任务实况为准）。"""
+    return _task_exists()
+
+
+def _task_exists() -> bool:
+    return _task_query_xml() is not None
+
+
+def _task_action() -> str | None:
+    """计划任务当前登记的命令行（Primitives/Command + Arguments 拼接）。"""
+    xml = _task_query_xml()
+    if not xml:
+        return None
+    cmd = re.search(r"<Command>(.*?)</Command>", xml, re.S)
+    arg = re.search(r"<Arguments>(.*?)</Arguments>", xml, re.S)
+    if not cmd:
+        return None
+    parts = [_xml_unescape(cmd.group(1))]
+    if arg and arg.group(1).strip():
+        parts.append(_xml_unescape(arg.group(1)))
+    return " ".join(p for p in parts if p) or None
+
+
+def _xml_unescape(s: str) -> str:
+    return (s.replace("&lt;", "<").replace("&gt;", ">")
+             .replace("&quot;", '"').replace("&apos;", "'")
+             .replace("&amp;", "&"))
+
+
+def _task_tr_value() -> str:
+    """/TR 参数值：schtasks 要求内层引号转义为 \\"，否则带空格路径会被截断。"""
+    return _run_value().replace('"', '\\"')
+
+
+def _task_create_argv() -> list[str]:
+    """创建/覆盖计划任务的参数：登录时触发 + 最高权限。
+
+    只用 /TR 传整条命令行（schtasks 无 /ARG 参数）；由 Windows 自行切分
+    Command 与 Arguments，回填后用 _norm_cmd() 归一化再比对。
+    """
+    return ["/Create", "/TN", _TASK_NAME, "/TR", _task_tr_value(),
+            "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]
+
+
+def _norm_cmd(cmd: str | None) -> str | None:
+    """命令行归一化：去掉包裹引号、反斜杠统一、折叠空白。
+
+    用于「期望命令」与「任务实际命令」比对——schtasks 回读时 Command 不带引号、
+    Arguments 带引号，不归一化会导致每次启动都误判为漂移而重建任务。
+    """
+    if not cmd:
+        return None
+    try:
+        toks = shlex.split(cmd, posix=False)
+    except ValueError:
+        toks = cmd.split()
+    out = [t.strip('"').replace("\\", "/") for t in toks]
+    return " ".join(out) if out else None
 
 
 def autostart_state() -> dict:
-    """开机自启动状态（含 setting.yaml 的 autostart 记录 + 注册表实况）。
+    """开机自启动状态（setting.yaml 的期望 + 计划任务实况）。
 
     兼容旧格式：autostart 块在旧版本是裸布尔（false / true），新版本为
-    {enabled: bool}，统一按注册表实况判定。
+    {enabled: bool}，统一按计划任务实况判定。
+    registry/registry_value 两个键为旧注册表方案遗留，保留返回 None 以兼容
+    既有自检/调用方。
     """
     data = read_setting()
     astart = data.get("autostart")
@@ -990,78 +1222,129 @@ def autostart_state() -> dict:
         saved = bool(astart) if astart is not None else False
     return {
         "enabled": saved,
-        "registry": _registry_autostart(),
-        "registry_value": _registry_value(),
+        "task": _task_exists(),
+        "task_action": _task_action(),
+        "registry": None,        # 旧注册表方案已停用
+        "registry_value": None,  # 旧注册表方案已停用
     }
 
 
-def _registry_autostart() -> bool:
-    """注册表 Run 键中是否真实存在 AuraPixie 项。"""
-    return _registry_value() is not None
-
-
-def _registry_value() -> str | None:
-    """读取注册表 Run 键中 AuraPixie 项的当前值；不存在/读取失败返回 None。"""
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_NAME) as key:
-            val, _ = winreg.QueryValueEx(key, _RUN_VALUE_NAME)
-            return str(val)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-
-
 def autostart_self_heal() -> None:
-    """开机自启动自我保护：每次程序运行检查一次「配置期望」与「注册表实况」是否一致。
+    """开机自启自我保护：每次程序运行检查一次「配置期望」与「计划任务实况」。
 
     只做修复、绝不误删：
-      · 配置为启用（enabled: true）→ 注册表缺失或被改写（清理/安全软件误删、
-        exe 挪位后旧路径失效）→ 重建/修正为当前程序的正确命令行；
-      · 配置为未启用 → 不动注册表（尊重用户在该处的其他手动操作）。
+      · 配置启用 → 任务缺失或命令行被改写（exe 挪位/清理软件误删）→ 重建；
+      · 配置未启用 → 不动任务（尊重用户在任务计划程序里的其他手动操作）。
     全部异常兜底写 crash.log，不打断启动。
 
-    重要：仅「打包形态」（exe）运行参与注册表修正。源码调试形态（python main.py）
-    绝不改写注册表——否则每次开发运行都会把用户正式的自启动项改成开发命令
-    （python.exe 弹终端框），正是 2026-10-28 开机弹终端的根因。
+    仅「打包形态」（exe）参与自愈。源码调试形态绝不改写正式自启任务——
+    否则每次开发运行都会把用户的自启任务改成开发命令（2026-10-28 开机弹终端
+    的根因，规则沿用）。提权形态额外要求：建 /RL HIGHEST 任务本身需要管理员，
+    非管理员（--no-elevate 调试）时静默跳过。
     """
-    if not _is_packaged():
+    if not _is_packaged() or not is_admin():
         return
     try:
         state = autostart_state()
         if not state["enabled"]:
             return
-        expected = _run_value()
-        current = state["registry_value"]
+        expected = _norm_cmd(_run_value())
+        current = _norm_cmd(state["task_action"])
         if current == expected:
             return
-        access = winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
-        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY_NAME, 0, access) as key:
-            winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ, expected)
-        print(f"[自启动] 已自动修正开机自启动项（{current or '缺失'} → {expected}）",
+        _create_task()
+        print(f"[自启动] 已自动修正开机自启计划任务（{current or '缺失'} → {expected}）",
               file=sys.stderr)
+        # 任务刚建立 = 新方案已接管，此时清一次旧注册表启动项最稳妥
+        # （幂等，legacy_run_cleaned 标记保证只动一次）——否则旧 Run 键 +
+        # 新计划任务双份自启，开发目录 pythonw 版会跟正式 exe 一起开机抢跑。
+        _migrate_legacy_registry_entry()
     except Exception as exc:  # noqa: BLE001
         _log_crash("autostart_self_heal", exc)
 
 
 def set_autostart(enabled: bool) -> None:
-    """开启则写入注册表启动项并在 setting.yaml 的 autostart 块记录；关闭则删除两处。"""
-    access = winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY_NAME, 0, access) as key:
-        if enabled:
-            winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ, _run_value())
-        else:
-            try:
-                winreg.DeleteValue(key, _RUN_VALUE_NAME)
-            except FileNotFoundError:
-                pass  # 本来就未写入，无需删除
-    # 同步记录到 setting.yaml（保留其他配置块）
+    """开启则创建计划任务（登录触发+最高权限）并在 setting.yaml 记录；
+    关闭则删除任务并清记录。注册表 Run 键的旧写法见上方注释留存。"""
+    _migrate_legacy_registry_entry()
+    if enabled:
+        _create_task()
+    else:
+        _delete_task()
     data = read_setting()
-    data["autostart"] = {"enabled": bool(enabled)}
+    astart = data.get("autostart") if isinstance(data.get("autostart"), dict) else {}
+    astart = dict(astart or {})
+    astart["enabled"] = bool(enabled)
+    data["autostart"] = astart
     try:
         write_setting(data)
     except OSError as exc:
         _log_crash("autostart_setting_save", exc)
+
+
+def _create_task() -> bool:
+    """创建/覆盖计划任务。成功 True；权限不足或 schtasks 失败 False（不抛）。"""
+    try:
+        r = _schtasks(_task_create_argv())
+        if r.returncode != 0:
+            _log_crash("task_create", RuntimeError(
+                f"schtasks rc={r.returncode}: "
+                f"{r.stderr.decode('gbk', errors='replace').strip()}"))
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log_crash("task_create", exc)
+        return False
+
+
+def _delete_task() -> bool:
+    try:
+        r = _schtasks(["/Delete", "/TN", _TASK_NAME, "/F"])
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log_crash("task_delete", exc)
+        return False
+
+
+def _migrate_legacy_registry_entry() -> None:
+    """一次性清理：删除旧版本写入的 HKCU Run 键自启项（避免与计划任务双份自启）。
+
+    注册表写入代码已停用（见上方留存注释）。用 setting.yaml 的
+    autostart.legacy_run_cleaned 标记保证只清理一次——否则每次保存设置都会
+    去动注册表，可能误删用户在启动项管理器里自行添加的同名项。
+    删除键值属本程序自有启动项的清理，失败静默。
+    """
+    if _autostart_dryrun():
+        return  # 自检隔离：不触碰真实注册表
+    try:
+        data = read_setting()
+        astart = data.get("autostart")
+        if isinstance(astart, dict) and astart.get("legacy_run_cleaned"):
+            return
+    except OSError:
+        pass
+    removed = False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_NAME,
+                            0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as key:
+            try:
+                winreg.DeleteValue(key, _RUN_VALUE_NAME)
+                removed = True
+            except FileNotFoundError:
+                pass  # 本来就没有，视为已清理
+    except OSError:
+        return  # 键打不开（无权限/不存在），下次再试
+    try:
+        data = read_setting()
+        astart = dict(data.get("autostart") or {}) if isinstance(
+            data.get("autostart"), dict) else {}
+        astart["legacy_run_cleaned"] = True
+        data["autostart"] = astart
+        write_setting(data)
+        if removed:
+            print("[自启动] 已清理旧版注册表启动项（改用计划任务）", file=sys.stderr)
+    except OSError as exc:
+        _log_crash("autostart_legacy_clean", exc)
 
 
 # ---------------------------------------------------------------- 窗口置顶
@@ -2012,7 +2295,8 @@ class SettingsDialog(QDialog):
         self.chk_topmost.setChecked(topmost_enabled())
         bar.addWidget(self.chk_topmost)
         self.chk_autostart = QCheckBox("开机自启动", self)
-        self.chk_autostart.setToolTip("勾选后开机自动运行本程序")
+        self.chk_autostart.setToolTip("勾选后注册「任务计划程序」项实现开机自启"
+                                      "（登录时触发、以管理员权限运行）")
         self.chk_autostart.setChecked(autostart_enabled())
         bar.addWidget(self.chk_autostart)
         self.bar = bar   # 布局引用：自检断言「置顶复选框位于开机自启动上方」用
@@ -2185,12 +2469,23 @@ class SettingsDialog(QDialog):
                             f"「{row['name']}」的{label2}未通过校验：\n\n{err2}")
                         return
         # 校验全部通过后，才把复选框状态落盘。
-        # 开机自启动：写入/删除注册表启动项；失败提示但不打断保存
+        # 开机自启动：创建/删除计划任务（登录触发 + 最高权限）。
+        # 与置顶同一条铁律：必须以「实况」为准回报结果——schtasks 失败（权限不足、
+        # 任务计划服务异常）时 set_autostart 内部只记 crash.log 不抛异常，若此处
+        # 直接当成功返回，就会出现「配置说开、实际没开」的错位。
+        want = self.chk_autostart.isChecked()
         try:
-            set_autostart(self.chk_autostart.isChecked())
+            set_autostart(want)
         except OSError as exc:
             _log_crash("autostart", exc)
             QMessageBox.warning(self, "设置", f"开机自启动设置失败：{exc}")
+        else:
+            if autostart_enabled() != want:
+                QMessageBox.warning(
+                    self, "设置",
+                    f"开机自启动{'开启' if want else '关闭'}失败：计划任务未按预期"
+                    f"{'创建' if want else '删除'}。\n"
+                    "请确认本程序以管理员身份运行（详见任务计划程序中的 AuraPixie 项）。")
         # 保持球体置顶：写 setting.yaml 的 window.always_on_top
         # （运行时生效在设置窗 Accepted 后的 _on_settings_closed 统一处理）
         try:
@@ -3985,6 +4280,13 @@ def acquire_single_instance(shared: QSharedMemory) -> bool:
 def main(argv: list[str]) -> int:
     if "--selftest" in argv:
         return _selftest()
+
+    # 管理员门禁：非管理员 → runas 重启自身后本进程退出；用户拒绝 UAC → 提示后退出。
+    # 放在清理/单实例之前，避免以半权限状态写注册表或抢锁。
+    # 跳过场景：--selftest（上方已返回）、--no-elevate（自检/调试）、
+    # --elevated-child（提权后的子实例）、清单已提权（打包 --windows-uac-admin）。
+    if _ensure_admin(argv):
+        return 0
 
     cleanup_runner_dir()
 
