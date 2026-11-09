@@ -420,14 +420,15 @@ def main() -> int:
     check("点击语法错误扇区 → 红色失败闪光、不崩溃",
           b8.flash is not None and not b8.flash["ok"], "", failures)
 
-    # ---------- 9.5 双击拦截（删除双击功能，只保留单击） ----------
-    print("\n双击拦截（双击不执行，单击延迟确认后执行）")
+    # ---------- 9.5 单击/双击分流（V10：单击展次级、双击执行主指令） ----------
+    print("\n单击/双击分流（V10 新语义）")
     b9 = fresh_ball()
-    b9._sectors = [{"name": "测试", "code": "print(1)", "placeholder": False},
-                   {"name": "空位", "code": "", "placeholder": True}]
+    marked = ("print(1)\n【【【子1】】】\nprint(2)\n【【【子1】】】\n"
+              "【【【子2】】】\nprint(3)\n【【【子2】】】")
+    b9._sectors = [{"name": "无标记", "code": "print(1)", "placeholder": False},
+                   {"name": "有标记", "code": marked, "placeholder": False}]
     b9._state, b9._progress = "open", 1.0  # noqa: SLF001
     half = size / 2.0
-    b9._highlight = 0  # noqa: SLF001
 
     def send_mouse(b, etype):   # 全局坐标=球心处：按下/抬起都落在球体内
         loc = QPointF(half, half)
@@ -436,29 +437,98 @@ def main() -> int:
             b, QMouseEvent(etype, loc, glo, Qt.MouseButton.LeftButton,
                            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
 
-    # —— 完整双击序列：Press → Release → DblClick → Release ——
+    # —— 无标记扇区：单击立即执行（零延迟、不登记） ——
+    b9._highlight = 0  # noqa: SLF001
     send_mouse(b9, QEvent.Type.MouseButtonPress)
-    check("双击首击按下（球内合法）", b9._press is not None, "", failures)
+    check("按下（球内合法）", b9._press is not None, "", failures)
     send_mouse(b9, QEvent.Type.MouseButtonRelease)
-    check("双击首击抬起只登记、不立即执行",
-          b9._click_pending == 0 and b9.flash is None and b9.state == "open", "", failures)
-    send_mouse(b9, QEvent.Type.MouseButtonDblClick)
-    check("双击判定到达 → 取消待确认、双击零效果",
-          b9._click_pending is None and b9._dbl_click_seen and b9.flash is None, "", failures)
-    send_mouse(b9, QEvent.Type.MouseButtonRelease)
-    check("双击第二击抬起整段吞掉（无执行、标记复位）",
-          b9._dbl_click_seen is False and b9.flash is None
-          and b9._click_pending is None and b9.state == "open", "", failures)
-
-    # —— 单独单击序列：Press → Release → 窗口结束（提交） ——
-    send_mouse(b9, QEvent.Type.MouseButtonPress)
-    send_mouse(b9, QEvent.Type.MouseButtonRelease)
-    check("单击抬起登记待确认（未立即执行）",
-          b9._click_pending == 0 and b9.flash is None and b9.state == "open", "", failures)
-    b9._commit_click()  # noqa: SLF001  # 等价于单击确认定时器到点后的回调
-    check("双击窗口结束 → 确认单击执行（闪光+收起）",
-          b9._click_pending is None and b9.flash is not None
+    check("无标记扇区单击 → 立即执行（无待登记、闪光成功、收起）",
+          b9._pending_sub_sector is None and b9.flash is not None
           and b9.flash["ok"] and b9.state == "collapsing", "", failures)
+
+    # —— 有标记扇区：单击只登记待展开，不立即收起 ——
+    b9._click_timer.stop()
+    b9._pending_sub_sector = None
+    b9._state, b9._progress = "open", 1.0  # noqa: SLF001
+    b9._flash = None
+    b9._highlight = 1  # noqa: SLF001
+    send_mouse(b9, QEvent.Type.MouseButtonPress)
+    send_mouse(b9, QEvent.Type.MouseButtonRelease)
+    check("有标记扇区单击抬起 → 登记待展开、不立即执行",
+          b9._pending_sub_sector == 1 and b9.flash is None
+          and b9.state == "open", "", failures)
+
+    # —— 双击序列：登记后 DblClick 到达 → 取消展开、改执行主指令 ——
+    b9._click_timer.stop()
+    b9._pending_sub_sector = None
+    b9._state, b9._progress = "open", 1.0  # noqa: SLF001
+    b9._highlight = 1  # noqa: SLF001
+    send_mouse(b9, QEvent.Type.MouseButtonPress)
+    send_mouse(b9, QEvent.Type.MouseButtonRelease)
+    check("双击首击抬起只登记（等价单击阶段）",
+          b9._pending_sub_sector == 1 and b9.flash is None, "", failures)
+    send_mouse(b9, QEvent.Type.MouseButtonDblClick)
+    check("双击判定到达 → 取消待展开、立即执行主指令",
+          b9._pending_sub_sector is None and b9._dbl_click_seen
+          and b9.flash is not None and b9.flash["ok"]
+          and b9.state == "collapsing", "", failures)
+    send_mouse(b9, QEvent.Type.MouseButtonRelease)
+    check("双击第二击抬起整段吞掉（无二次执行、标记复位）",
+          b9._dbl_click_seen is False and b9.state == "collapsing", "", failures)
+
+    # —— 有标记扇区单击 → 确认窗到期 → 收起+登记次级项待展开 ——
+    b9._state, b9._progress = "open", 1.0  # noqa: SLF001
+    b9._flash = None
+    b9._sub_launching = False
+    b9._sub_pending_items = None
+    b9._highlight = 1  # noqa: SLF001
+    send_mouse(b9, QEvent.Type.MouseButtonPress)
+    send_mouse(b9, QEvent.Type.MouseButtonRelease)
+    check("再次单击登记待展开", b9._pending_sub_sector == 1, "", failures)
+    b9._commit_sub_expand()  # noqa: SLF001  # 等价于确认窗到期回调
+    check("确认窗到期 → 收起主环并登记次级展开（2 项）",
+          b9._pending_sub_sector is None and b9._sub_launching
+          and b9.state == "collapsing"
+          and b9._sub_pending_items is not None
+          and len(b9._sub_pending_items) == 2, "", failures)
+    # 收起完成后 _on_hidden 不恢复主列表（交给 _open_sub_ring）
+    for _ in range(24):
+        b9._evaluate(20.0, QPointF(size + 300, size))  # noqa: SLF001
+    check("收起完成仍在等待次级展开（主列表未回挂）",
+          b9._sub_launching and b9.state == "hidden", "", failures)
+    b9._open_sub_ring()  # noqa: SLF001  # 等价于 300ms 延迟定时器到期
+    check("延迟到点 → 次级环展开（2 扇区、expanding）",
+          b9._sub_sectors is not None and len(b9._sectors) == 2
+          and b9.state == "expanding" and not b9._sub_launching, "", failures)
+
+    # —— 次级环不递归：次级扇区再单击直接执行（_is_main_ring_with_marks=False） ——
+    b9._highlight = 0  # noqa: SLF001
+    b9._press = {"grab": QPointF(b9._center), "offset": QPointF(0, 0), "t0": 0.0}
+    b9._state, b9._progress = "open", 1.0  # noqa: SLF001
+    b9._arm_click(0)  # noqa: SLF001  # 直接走单击分流
+    check("次级环扇区单击 → 立即执行、不登记不展开",
+          b9._pending_sub_sector is None and b9.flash is not None
+          and b9.flash["ok"], "", failures)
+    check("次级环不递归判定（_sub_sectors 非空 → 非主环）",
+          not b9._is_main_ring_with_marks(0), "", failures)
+
+    # —— 休眠打断待展开登记（V10 防回归：确认窗未到期进休眠不得冒出次级环）——
+    b10 = fresh_ball()
+    b10._sectors = [{"name": "有标记", "code": marked, "placeholder": False},
+                    {"name": "无标记", "code": "print(1)", "placeholder": False}]
+    b10._state, b10._progress = "open", 1.0  # noqa: SLF001
+    b10._highlight = 0  # noqa: SLF001
+    b10._arm_click(0)  # noqa: SLF001  # 单击登记待展开
+    check("休眠打断前置：已登记待展开", b10._pending_sub_sector == 0, "", failures)
+    b10._enter_sleep()
+    check("进入休眠 → 待展开登记与定时器一并取消",
+          b10._pending_sub_sector is None and not b10._click_timer.isActive()
+          and not b10._sub_launching, "", failures)
+    b10._open_sub_ring()  # 手动触发残留回调（防御性验证）→ 不应展开
+    check("休眠后误触回调不展开次级环",
+          b10._sub_sectors is None, "", failures)
+    b9.deleteLater()
+    b10.deleteLater()
 
     # ---------- 10 项目名宽度规则 ----------
     print("\n项目名宽度规则（6 汉字 = 12 字母 = 12 单位）")
@@ -1098,49 +1168,118 @@ def main() -> int:
           and M.CONFIG["color_end"] == "#FFFFFF", "", failures)
     # 对话框构建 + 修改后应用
     dlg_aura = M.AuraSettingsDialog()
-    check("光效对话框结构", len(dlg_aura.findChildren(QDoubleSpinBox)) == 1
-          and dlg_aura.edt_mid is not None, "", failures)
+    check("光效对话框结构（呼吸开关+三色框+三时长框+倍率）",
+          len(dlg_aura.findChildren(QDoubleSpinBox)) == 1
+          and hasattr(dlg_aura, "chk_breath") and dlg_aura.chk_breath.isChecked()
+          and dlg_aura.edt_start is not None and dlg_aura.edt_mid is not None
+          and dlg_aura.edt_end is not None and len(dlg_aura.edit_dur) == 3,
+          "", failures)
     # 倍率钳制：0.1~3 之外取最近边界
     for raw, want in ((5.0, 3.0), (0.01, 0.1), (1.0, 1.0), (2.5, 2.5), (-9.0, 0.1)):
         got = M._clamp_scale(raw)
         check(f"倍率钳制 {raw} → {want}", got == want, f"（实得 {got}）", failures)
-    # 动画时长关系：相位推进速率 = elapsed × scale（即周期 = cycle_ms / scale）
-    # 复现主程序 _on_tick 的相位公式做数值校验，不依赖真实时钟推进。
-    def phase_at(elapsed, scale):
-        c = M.CONFIG["cycle_ms"]
-        return (elapsed * scale % c) / c
+    # 渐变时长钳制：float→向下取整→钳[1,30]，非法回退 5
+    for raw, want in ((35, 30), (0, 1), (2.9, 2), ("7", 7), ("2.5", 2),
+                      ("abc", 5), ("", 5), (None, 5), (-3, 1), (15, 15)):
+        got = M._clamp_dur(raw)
+        check(f"时长钳制 {raw!r} → {want}", got == want, f"（实得 {got}）", failures)
+    # 相位推进：周期 = 各段时长之和（V10 废弃 cycle_ms），倍率为全局速度
+    def phase_at(elapsed, scale, cycle):
+        return (elapsed * scale % cycle) / cycle
+    cyc2 = (M._clamp_dur(5) + M._clamp_dur(5)) * 1000          # 两色态 5+5=10s
     check("同 elapsed 下 2x 相位是 1x 的两倍（未整圈）",
-          abs(phase_at(5000.0, 2.0) - 2.0 * phase_at(5000.0, 1.0)) < 1e-9, "", failures)
+          abs(phase_at(2000.0, 2.0, cyc2) - 2.0 * phase_at(2000.0, 1.0, cyc2)) < 1e-9,
+          "", failures)
     check("0.5x 达到 25% 相位耗时 = 1x 的两倍（周期 /0.5）",
-          abs(phase_at(10000.0, 0.5) - 0.25) < 1e-9
-          and abs(phase_at(5000.0, 1.0) - 0.25) < 1e-9, "", failures)
-    # 中间色填非法值 → 回退原值
+          abs(phase_at(5000.0, 0.5, cyc2) - 0.25) < 1e-9
+          and abs(phase_at(2500.0, 1.0, cyc2) - 0.25) < 1e-9, "", failures)
+    check("cycle_ms 已废弃（CONFIG 不再含该键）", "cycle_ms" not in M.CONFIG, "", failures)
+    check("周期计算=时长之和×1000（两色态 5+5 → 10000ms）",
+          M.breath_cycle_ms() == 10000, f"（实得 {M.breath_cycle_ms()}）", failures)
+    # 非法色值回退原值（三色各自独立）
     old_mid = dlg_aura._fallback["color_mid"]  # noqa: SLF001
     dlg_aura.edt_mid.setText("#ZZZZZZ")
     s = dlg_aura.settings()
     check("非法中间色回退原色", s["color_mid"] == old_mid, f"（实得 {s['color_mid']}）", failures)
-    # 合法应用：改中间色与倍率并写回运行期 CONFIG（只应用不落盘，避免污染真实 aura.yaml）
+    # 合法应用：改三色+时长+倍率并写回运行期 CONFIG（只应用不落盘）
+    dlg_aura.edt_start.setText("#112233")
     dlg_aura.edt_mid.setText("#00FF88")
+    dlg_aura.edt_end.setText("#FFEEDD")
+    dlg_aura.edit_dur[0].setText("7")
+    dlg_aura.edit_dur[1].setText("35")     # 超限 → 30
+    dlg_aura.edit_dur[2].setText("2.9")    # 小数 → 向下取整 2
     dlg_aura.spin_scale.setValue(2.0)
     cfg_new = dlg_aura.settings()
     M.apply_aura_to_config(cfg_new)
-    check("光效应用后 CONFIG 更新", M.CONFIG["color_mid"] == "#00FF88"
-          and M.CONFIG["aura_scale"] == 2.0,
-          f"（mid={M.CONFIG['color_mid']}, scale={M.CONFIG['aura_scale']}）", failures)
-    check("光效应用后三段一致",
-          M.CONFIG["color_start"] == cfg_new["color_start"]
-          and M.CONFIG["color_end"] == cfg_new["color_end"], "", failures)
-    # 保存格式验证（写临时文件，不碰项目真实 aura.yaml）
+    check("光效应用后 CONFIG 更新（三色+时长钳制+倍率）",
+          M.CONFIG["color_start"] == "#112233" and M.CONFIG["color_mid"] == "#00FF88"
+          and M.CONFIG["color_end"] == "#FFEEDD" and M.CONFIG["aura_scale"] == 2.0
+          and M.CONFIG["dur_start_mid"] == 7 and M.CONFIG["dur_mid_end"] == 30
+          and M.CONFIG["dur_end_start"] == 2,
+          f"（cfg={ {k: M.CONFIG[k] for k in ('color_start', 'dur_start_mid', 'dur_mid_end', 'dur_end_start')} }）",
+          failures)
+    # 三色态生效：周期 = (7+30+2)×1000
+    check("三色态周期=三段之和（7+30+2=39s）",
+          M.breath_cycle_ms() == 39000, f"（实得 {M.breath_cycle_ms()}）", failures)
+    # 两色态：起末相同 → 忽略 d3（周期 = d1+d2）
+    M.apply_aura_to_config({**cfg_new, "color_end": "#112233"})
+    check("两色态（起=末）周期=d1+d2（7+30=37s）",
+          M.breath_cycle_ms() == 37000, f"（实得 {M.breath_cycle_ms()}）", failures)
+    # 呼吸关闭：时长表返回 None、周期 0
+    M.apply_aura_to_config({**cfg_new, "color_end": "#FFEEDD", "breath": False})
+    check("呼吸关闭 → 分段表 None、周期 0",
+          M.breath_durations_ms() is None and M.breath_cycle_ms() == 0, "", failures)
+    c0 = M.center_color_at(0.0)
+    c5 = M.center_color_at(0.5)
+    d0, r0, _ = M.shape_at(0.0)
+    d5, r5, _ = M.shape_at(0.5)
+    check("呼吸关闭 → 任意相位恒起始色",
+          c0.name() == c5.name() == "#112233", f"（{c0.name()} {c5.name()}）", failures)
+    check("呼吸关闭 → 任意相位恒基准直径（大小全停）",
+          d0 == d5 == M.CONFIG["size_base"], f"（d0={d0} d5={d5}）", failures)
+    # 两色态采样：起→中(d1) 中→起(d2)，段比例按 7:30 切分
+    M.apply_aura_to_config({**cfg_new, "color_end": "#112233", "breath": True})
+    seg = M.breath_durations_ms()
+    check("两色态分段=(d1,d2) 且忽略 d3", seg == (7000, 30000), f"（实得 {seg}）", failures)
+    t_edge = 7000 / 37000
+    _d, _r, c_before = M.shape_at(t_edge - 1e-9)
+    _d, _r, c_after = M.shape_at(t_edge + 1e-9)
+    check("两色态 d1 终点色=过渡色（两侧一致，分段连续）",
+          c_before.name().upper() == c_after.name().upper() == "#00FF88",
+          f"（{c_before.name()} {c_after.name()}）", failures)
+    # 三色态采样：起→中→末→起 三段边界连续
+    M.apply_aura_to_config({**cfg_new, "breath": True})   # 起112233/中00FF88/末FFEEDD
+    seg = M.breath_durations_ms()
+    check("三色态分段=(d1,d2,d3)", seg == (7000, 30000, 2000), f"（实得 {seg}）", failures)
+    tot = sum(seg)
+    b1, b2 = 7000 / tot, (7000 + 30000) / tot
+    _d, _r, cb = M.shape_at(b1 - 1e-9)
+    _d, _r, ca = M.shape_at(b1 + 1e-9)
+    check("三色态边界1两侧=过渡色", cb.name().upper() == ca.name().upper() == "#00FF88",
+          f"（{cb.name()} {ca.name()}）", failures)
+    _d, _r, cb = M.shape_at(b2 - 1e-9)
+    _d, _r, ca = M.shape_at(b2 + 1e-9)
+    check("三色态边界2两侧=末尾色", cb.name().upper() == ca.name().upper() == "#FFEEDD",
+          f"（{cb.name()} {ca.name()}）", failures)
+    _d, _r, cc = M.shape_at(1.0 - 1e-6)
+    check("三色态周期末回到起始色", cc.name().upper() == "#112233", f"（{cc.name()}）", failures)
+    # 保存格式验证（写临时文件，不碰项目真实 setting.yaml）
     aura_tmp = os.path.join(tempfile.mkdtemp(prefix="aura_cfg_"), "aura_test.yaml")
-    back = {"color_start": "#FFFFFF", "color_mid": "#00FF88", "color_end": "#FFFFFF"}
+    back = {"breath": True, "color_start": "#112233", "color_mid": "#00FF88",
+            "color_end": "#FFEEDD", "dur_start_mid": 7, "dur_mid_end": 5,
+            "dur_end_start": 5}
     with open(aura_tmp, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(back, fh, allow_unicode=True)
-    loaded = yaml.safe_load(open(aura_tmp, encoding="utf-8"))
-    check("光效保存写盘格式正确", loaded["color_mid"] == "#00FF88", f"（{loaded}）", failures)
+        yaml.safe_dump({"aura": back}, fh, allow_unicode=True)
+    loaded = yaml.safe_load(open(aura_tmp, encoding="utf-8"))["aura"]
+    check("光效保存写盘格式正确（三色+时长落盘）",
+          loaded["color_mid"] == "#00FF88" and loaded["color_start"] == "#112233"
+          and loaded["dur_start_mid"] == 7, f"（{loaded}）", failures)
     os.remove(aura_tmp)
-    # 恢复默认（避免污染后续会话的 CONFIG；测试未写磁盘）
-    M.apply_aura_to_config({"color_start": "#FFFFFF", "color_mid": "#283FFE",
-                            "color_end": "#FFFFFF", "aura_scale": 1.0})
+    # 恢复默认（避免污染后续断言的 CONFIG；测试未写磁盘）
+    M.apply_aura_to_config({"breath": True, "color_start": "#FFFFFF",
+                            "color_mid": "#283FFE", "color_end": "#FFFFFF",
+                            "dur_start_mid": 5, "dur_mid_end": 5,
+                            "dur_end_start": 5, "aura_scale": 1.0})
     dlg_aura.deleteLater()
 
     # ---------- 18b 透明度设置（总体 10~100 / 休眠 1~20） ----------
@@ -1156,10 +1295,28 @@ def main() -> int:
         check(f"休眠透明度联动 睡{sl}/总{op} → {want}", got == want, f"（实得 {got}）", failures)
 
     dlg_aura2 = M.AuraSettingsDialog()
-    check("动效窗高度 245、含两个透明度输入",
-          dlg_aura2.height() == 245
+    check("动效窗高度随内容自适应（无固定 245 高度、含透明度两输入）",
+          not dlg_aura2.minimumHeight() == dlg_aura2.maximumHeight()
+          and dlg_aura2.height() > 245
           and hasattr(dlg_aura2, "spin_opacity") and hasattr(dlg_aura2, "spin_sleep_op"),
           f"（height={dlg_aura2.height()}）", failures)
+    # V10 防回归：源码不得再出现固定高度 resize(220, 245)
+    import inspect as _inspect_aura
+    _src_aura = _inspect_aura.getsource(M.AuraSettingsDialog.__init__)
+    check("动效窗固定高度已移除（源码无 resize(220, 245)）",
+          "resize(220, 245)" not in _src_aura, "", failures)
+    # 呼吸关联动置灰：取消勾选 → 三色框/时长框/倍率禁用；恢复勾选 → 重新可用
+    dlg_aura2.chk_breath.setChecked(False)
+    check("呼吸关闭 → 颜色/时长/倍率置灰",
+          not dlg_aura2.edt_start.isEnabled() and not dlg_aura2.edt_mid.isEnabled()
+          and not dlg_aura2.edt_end.isEnabled()
+          and all(not e.isEnabled() for e in dlg_aura2.edit_dur)
+          and not dlg_aura2.spin_scale.isEnabled()
+          and dlg_aura2.spin_idle.isEnabled(), "", failures)
+    dlg_aura2.chk_breath.setChecked(True)
+    check("呼吸恢复 → 输入重新可用",
+          dlg_aura2.edt_start.isEnabled() and all(e.isEnabled() for e in dlg_aura2.edit_dur)
+          and dlg_aura2.spin_scale.isEnabled(), "", failures)
     check("总体透明度范围 10~100",
           dlg_aura2.spin_opacity.minimum() == 10 and dlg_aura2.spin_opacity.maximum() == 100,
           "", failures)
@@ -1620,9 +1777,19 @@ py: 1 +
     check("状态机：_sub_timer 字段存在",
           hasattr(ball_test, "_sub_timer"),
           "（缺少 _sub_timer）", failures)
-    check("状态机：_ctx_consumed 字段存在",
-          hasattr(ball_test, "_ctx_consumed"),
-          "（缺少 _ctx_consumed）", failures)
+    check("状态机：_pending_sub_sector 字段存在（V10 单击待展开）",
+          hasattr(ball_test, "_pending_sub_sector")
+          and ball_test._pending_sub_sector is None,  # noqa: SLF001
+          "（缺少 _pending_sub_sector）", failures)
+    check("状态机：_ctx_consumed 已移除（V10 右键不再消费）",
+          not hasattr(ball_test, "_ctx_consumed"), "（字段仍存在）", failures)
+    import inspect as _inspect_v10
+    _src_ball = _inspect_v10.getsource(M.AuraBall)
+    check("V10 防回归：_on_right_press 已删除（源码无该函数）",
+          "_on_right_press" not in _src_ball, "（源码仍含右键展开处理器）", failures)
+    check("V10 防回归：单击确认窗挂 _commit_sub_expand（非旧 _commit_click）",
+          "_commit_sub_expand" in _src_ball and "_commit_click" not in _src_ball,
+          "", failures)
     ball_test.deleteLater()
 
     # 7. 子功能块数量校验（V9 追加：2~9）
