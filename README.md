@@ -45,7 +45,9 @@ Aura Pixie 是一个驻留在桌面任意位置的呼吸光效圆球小助手：
 
 * 单实例 + 定位：全局仅一个实例；二次启动弹「本球在此」，可一键「在哪儿？」让运行中的球体红框闪烁定位
 
-* 开机自启（可选）：默认不勾选，勾选则写注册表
+* 开机自启（可选）：默认不勾选，勾选则注册「任务计划程序」项（登录触发 + 最高权限）；旧版写注册表 Run 键的方式已停用
+
+* 管理员运行：V11 起程序要求以管理员身份运行（资源监视 CPU 温度/功耗/硬盘 SMART 依赖内核驱动，自启计划任务 /RL HIGHEST 也需提权）；启动自动 UAC 提权，拒绝则提示后退出，调试可用 `--no-elevate` 免提权运行
 
 * 位置记忆：球体移动停止 10 秒自动落盘，程序被强杀/断电位置也不丢；无记录默认屏幕右侧中间贴边
 
@@ -160,7 +162,8 @@ aura:                               # 光效
   opacity: 100                      # 总体透明度 10~100%
   sleep_opacity: 10                 # 休眠透明度 1~20%（>总体则存 10）
 autostart:
-  enabled: false                    # 开机自启动（写 HKCU Run）
+  enabled: false                    # 开机自启动（计划任务：登录触发+最高权限）
+  legacy_run_cleaned: true          # 旧版 HKCU Run 启动项已一次性清理（内部标记）
 window:
   always_on_top: false              # 保持置顶
   pos_x: null                       # 球心记忆位置（移动停止 10s 自动落盘）
@@ -187,12 +190,13 @@ window:
 
 ```
 D:\Temp\02_Aura_Pixie\.venv\Scripts\activate
-python main.py                        # 运行桌面圆球
-python main.py --selftest             # 主程序内置自检
-python tools\check_breath.py          # 全量离屏自检（319 项，应全 PASS）
-python tools\check_autostart.py       # 自启动回归测试（10 项，隔离注册表与配置）
+python main.py                        # 运行桌面圆球（V11 起会先申请 UAC 提权）
+python main.py --no-elevate           # 免提权运行（开发/调试专用，温度类指标不可用）
+python main.py --selftest             # 主程序内置自检（不弹提权）
+python tools\check_breath.py          # 全量离屏自检（319 项，应全 PASS；自启全程空跑）
+python tools\check_autostart.py       # 自启动回归测试（32 项，隔离任务库/注册表/配置，零系统副作用）
 python tools\check_user_config.py     # 用户配置模仿测试（只读校验真实配置，零执行）
-python tools\smoke_settings.py        # 设置保存冒烟（隔离 LOCALAPPDATA）
+python tools\smoke_settings.py        # 设置保存冒烟（隔离 LOCALAPPDATA，自启空跑）
 ```
 
 全量离屏自检覆盖：尺寸/光晕/颜色、帧率、悬停状态机、扇形等分与命中、代码格式标准化、执行链路、设置保存、拖拽排序、项目名规则、置顶开关、休眠顺色、透明度、位置记忆（10s 落盘）、配置迁移、导入导出、单实例定位闪烁、指令多行编辑、指令高级编辑窗、右键定位防回归、成对标记解析、子功能块数量 2\~9 边界、行内编辑首行修复、V10 单击/双击分流与次级展开确认窗、呼吸三态渲染（全停/两色/三色）、渐变时长钳制、V10.1 拖动移动光标成对挂恢复等 319 项断言。
@@ -203,23 +207,39 @@ python tools\smoke_settings.py        # 设置保存冒烟（隔离 LOCALAPPDATA
 $env:PATH = "D:\Temp\02_Aura_Pixie\msys2\msys64\mingw64\bin;" + $env:PATH
 & ".venv\Scripts\python.exe" -m nuitka --onefile --standalone --mingw64 `
   --enable-plugin=pyside6 --windows-console-mode=disable `
+  --windows-uac-admin `
   --windows-icon-from-ico=icon2.ico --output-dir=build `
   --output-filename=AuraPixie.exe --assume-yes-for-downloads main.py
 ```
+
+> `--windows-uac-admin` 给 exe 嵌入 requireAdministrator 清单——双击直接弹 UAC 提权运行；
+> 即使漏配，程序内 `_ensure_admin()` 运行时门禁也会 runas 重启兜底（双保险）。
 
 ### 项目结构
 
 ```
 main.py                       # 主程序（全功能单文件）
+monitor_hub.py                # 资源监视接口层（侧车+psutil 双源，UI 待接入）
+collector\                    # C# 采集侧车工程（LibreHardwareMonitorLib 0.9.6）
 icon_res.py / icon2.png / icon2.ico   # 内嵌图标（base64）
 tools\check_breath.py         # 全量离屏自检（319 项断言）
-tools\check_autostart.py      # 自启动修复回归（10 项，隔离环境）
+tools\check_autostart.py      # 自启动（计划任务）回归（32 项，隔离环境）
+tools\check_monitor.py        # 资源监视接口自检（53 项）
 tools\check_user_config.py    # 用户配置模仿测试（只读校验真实配置，零执行）
 tools\smoke_settings.py       # 设置保存冒烟
 tools\render_preview.py / gen_icon_res.py   # 预览图 / 图标资源生成
 ```
 
 ## 更新日志
+
+### V11（2026-11-10）· 管理员运行 + 自启改计划任务
+
+* 程序改为要求**管理员身份运行**：入口新增提权门禁 `_ensure_admin()`——非管理员时 `ShellExecuteW("runas")` 重启自身；用户拒绝 UAC 弹窗提示后退出；开发调试可用 `--no-elevate` 免提权运行（温度类指标不可用）；打包命令相应增加 `--windows-uac-admin` 清单参数
+* 开机自启由「注册表 HKCU Run 键」改为「**任务计划程序**」：登录触发（/SC ONLOGON）+ 最高权限（/RL HIGHEST）+ 强制覆盖（/F）。原因：Run 键没有 UAC 通道，提权程序放 Run 键开机时会被拦或每次弹 UAC
+* 首次开启自启时一次性清理旧注册表启动项（`autostart.legacy_run_cleaned` 标记保证幂等），避免双份自启；原「注入注册表启动」代码按要求**注释留存**于 main.py，可随时回退
+* 启动自愈同步改造：打包 + 管理员形态下，比对「配置期望 ↔ 计划任务实况」，命令漂移（如 exe 挪位）自动重建
+* 设置窗保存自启开关后**校验任务实况回报结果**（沿用 V9.3 置顶「写盘后对表」铁律），schtasks 失败不再静默假成功
+* 自检体系：`tools/check_autostart.py` 重写为计划任务方案回归（32 项，假任务库 + 假注册表，零系统副作用）；`AURA_AUTOSTART_DRYRUN=1` 空跑开关接入 check_breath / smoke_settings，杜绝开发期自检误改用户真实计划任务
 
 ### V10.1（2026-11-09）· 拖动移动光标
 
@@ -326,7 +346,10 @@ Q：配置在哪里？换电脑怎么迁移？
 A：配置位于 `%LOCALAPPDATA%\Aura_Pixie\setting.yaml`。设置窗「导入/导出配置」→ 导出可备份到任意文件夹（`setting.yaml.bak`），新机器上「导入」即可迁移；或直接复制该 yaml 文件。
 
 Q：怎么开机自启动？
-A：设置窗勾选「开机自启动」即可（写 HKCU Run 键，启动自检自动重建）。
+A：设置窗勾选「开机自启动」即可（V11 起注册「任务计划程序」项：登录触发 + 管理员权限，启动自愈自动重建；旧版写 HKCU Run 键的方式已停用）。
+
+Q：为什么每次启动都弹 UAC？
+A：V11 起程序需要管理员身份（资源监视的 CPU 温度/硬盘 SMART 依赖内核驱动，自启计划任务也要最高权限）。不想被打扰的场合可用 `--no-elevate` 免提权运行，代价是温度/功耗/硬盘温度类读数不可用。
 
 Q：球体不见了？
 A：程序单实例运行，再启动一次会弹「本球在此」→ 点「在哪儿？」即可让运行中的球体红框闪烁定位。
@@ -346,6 +369,8 @@ A：程序单实例运行，再启动一次会弹「本球在此」→ 点「在
 | 进程执行   | subprocess.Popen fire-and-forget，`CREATE_NO_WINDOW` 全静默                 |
 | 次级扇形   | 成对特殊标记解析（正则 + 栈式配对）+ 状态机复用，单击确认窗到期 → 收起 300ms 后整环替换展开                      |
 | 单实例    | QSharedMemory 命名锁                                                       |
+| 权限（V11） | 打包清单 `--windows-uac-admin` + 运行时 `IsUserAnAdmin`/`runas` 双保险；`--no-elevate` 逃生口 |
+| 开机自启（V11） | 任务计划程序 schtasks：`/SC ONLOGON /RL HIGHEST /F`（替代旧注册表 Run 键，代码注释留存）    |
 | 打包     | Nuitka 4.3.1 `--onefile --standalone --mingw64 --enable-plugin=pyside6` |
 
 ## License
