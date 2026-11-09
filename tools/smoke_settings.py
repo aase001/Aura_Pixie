@@ -21,6 +21,8 @@ import tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # —— 配置隔离：冒烟期间指向临时 LOCALAPPDATA，绝不触碰真实配置 ——
 os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="aura_smoke_la_")
+# —— 自启隔离：保存路径涉及计划任务，全部空跑，不真实改动系统 ——
+os.environ["AURA_AUTOSTART_DRYRUN"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QTimer  # noqa: E402

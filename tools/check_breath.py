@@ -29,6 +29,9 @@ import tempfile
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# —— 自启隔离：自检会走 _on_save 保存路径，计划任务/旧启动项清理全部空跑，
+#    绝不真实创建或删改用户机器上的 AuraPixie 任务计划项 ——
+os.environ["AURA_AUTOSTART_DRYRUN"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml  # noqa: E402
