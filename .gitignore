@@ -11,6 +11,7 @@ dist/
 
 # —— 资源监视侧车构建产物（dotnet 输出，二进制不入库）——
 collector/bin/
+collector/obj/
 collector/pub/
 
 # —— MinGW 工具链（1.1G，位于项目内 msys2/，不入库）——
