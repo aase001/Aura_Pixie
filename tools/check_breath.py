@@ -38,7 +38,8 @@ import yaml  # noqa: E402
 from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import (QDropEvent, QFontDatabase, QImage, QMouseEvent,  # noqa: E402
                            QPainter, QTransform)
-from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QPushButton  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QPushButton,  # noqa: E402
+                               QSlider, QSpinBox)
 
 # —— 配置隔离：测试期间把 LOCALAPPDATA 指到临时目录，绝不触碰真实配置 ——
 _ISOLATED_LOCALAPPDATA = tempfile.mkdtemp(prefix="aura_localappdata_")
@@ -1100,10 +1101,10 @@ def main() -> int:
     texts = [b.text() for b in dlg_tmp.findChildren(QPushButton)]
     has_save = any(t == "保存" for t in texts)
     has_help = any(t == "帮助" for t in texts)
-    has_theme = any(t == "动效" for t in texts)
+    has_theme = any(t == "外观" for t in texts)
     has_add = any(t == "+1" for t in texts)
     has_del = any(t == "-1" for t in texts)
-    check("设置框含 保存/帮助/动效/+1/-1 按钮",
+    check("设置框含 保存/帮助/外观/+1/-1 按钮",
           has_save and has_help and has_theme and has_add and has_del,
           f"（按钮：{sorted(texts)}）", failures)
     # 设置窗与帮助同级：帮助是非模态 show（不再用 exec 阻塞设置窗）
@@ -1194,8 +1195,8 @@ def main() -> int:
     check("回收后解冻呼吸", bf._breath_frozen is False and bf.state == "hidden",
           f"（frozen={bf._breath_frozen}, state={bf.state}）", failures)
 
-    # ---------- 18 Aura 光效设置 ----------
-    print("\nAura 光效设置")
+    # ---------- 18 外观设置（V12：原「动效设置」改名 + 四项改滑块） ----------
+    print("\n外观设置")
     cases = [("#ff0000", "#FF0000"), ("ff0000", "#FF0000"), ("f00", "#FF0000"),
              ("GGGGGG", "#FFFFFF"), ("#123456", "#123456"), ("", "#FFFFFF")]
     for text, want in cases:
@@ -1205,14 +1206,49 @@ def main() -> int:
           M.CONFIG["color_start"] == "#FFFFFF" and M.CONFIG["color_mid"] == "#283FFE"
           and M.CONFIG["color_end"] == "#FFFFFF", "", failures)
     # 对话框构建 + 修改后应用
-    dlg_aura = M.AuraSettingsDialog()
-    check("光效对话框结构（呼吸开关+三色框+三时长框+倍率）",
-          len(dlg_aura.findChildren(QDoubleSpinBox)) == 1
+    dlg_aura = M.AppearanceSettingsDialog()
+    check("外观对话框结构（呼吸开关+三色框+三时长框+四项滑块）",
+          len(dlg_aura.findChildren(QSlider)) == 4
           and hasattr(dlg_aura, "chk_breath") and dlg_aura.chk_breath.isChecked()
           and dlg_aura.edt_start is not None and dlg_aura.edt_mid is not None
           and dlg_aura.edt_end is not None and len(dlg_aura.edit_dur) == 3,
+          f"（滑块数={len(dlg_aura.findChildren(QSlider))}）", failures)
+    check("外观窗数字输入框已全部移除（V12 改滑块）",
+          not dlg_aura.findChildren(QSpinBox)
+          and not dlg_aura.findChildren(QDoubleSpinBox), "", failures)
+    # ── 滑块量程：值=档位序号，真实值由 tier_to_value 换算，拖动必落整阶 ──
+    for name, spec, want_last in (
+            ("倍率", M._SCALE_SPEC, 3.0), ("休眠倒计时", M._IDLE_SPEC, 600),
+            ("总体透明度", M._OPACITY_SPEC, 100), ("休眠透明度", M._SLEEP_OP_SPEC, 20)):
+        tiers, lo, step = spec
+        check(f"{name}量程 起点{lo}/每阶{step}/末档{want_last}",
+              M.tier_to_value(1, spec) == lo
+              and M.tier_to_value(tiers, spec) == want_last
+              and M.tier_to_value(tiers + 1, spec) == want_last   # 越界夹住
+              and M.tier_to_value(0, spec) == lo,
+              f"（spec={spec}）", failures)
+        # 逐档全扫：每一档都必须是整阶值，且往返换算自洽
+        vals = [M.tier_to_value(t, spec) for t in range(1, tiers + 1)]
+        check(f"{name}逐档等差且往返自洽（{tiers} 档）",
+              all(round(vals[i + 1] - vals[i], 6) == round(step, 6)
+                  for i in range(tiers - 1))
+              and all(M.value_to_tier(v, spec) == t + 1
+                      for t, v in enumerate(vals)), "", failures)
+    # 非整阶值就近吸附（44 距 30 更近 → 首档；46 距 60 更近 → 第 2 档）
+    # 注：45 正好是两档中点，round(0.5) 走银行家舍入得 0，不作为断言样本。
+    check("老配置非整阶值就近吸附到整阶",
+          M.value_to_tier(44, M._IDLE_SPEC) == 1
+          and M.value_to_tier(46, M._IDLE_SPEC) == 2
+          and M.value_to_tier(60, M._IDLE_SPEC) == 2
+          and M.value_to_tier(15, M._IDLE_SPEC) == 1
+          and M.value_to_tier(10, M._IDLE_SPEC) == 1        # 低于新起点 → 首档
+          and M.value_to_tier(1, M._SLEEP_OP_SPEC) == 1     # 低于新起点 5 → 首档
+          and M.value_to_tier(25, M._SLEEP_OP_SPEC) == 4,   # 超上限 → 末档
           "", failures)
-    # 倍率钳制：0.1~3 之外取最近边界
+    check("档位换算非法输入回第 1 档",
+          M.value_to_tier("x", M._IDLE_SPEC) == 1 and M.value_to_tier(None, M._IDLE_SPEC) == 1,
+          "", failures)
+    # 倍率钳制（配置读盘兜底仍在用，故函数保留）：0.1~3 之外取最近边界
     for raw, want in ((5.0, 3.0), (0.01, 0.1), (1.0, 1.0), (2.5, 2.5), (-9.0, 0.1)):
         got = M._clamp_scale(raw)
         check(f"倍率钳制 {raw} → {want}", got == want, f"（实得 {got}）", failures)
@@ -1246,10 +1282,10 @@ def main() -> int:
     dlg_aura.edit_dur[0].setText("7")
     dlg_aura.edit_dur[1].setText("35")     # 超限 → 30
     dlg_aura.edit_dur[2].setText("2.9")    # 小数 → 向下取整 2
-    dlg_aura.spin_scale.setValue(2.0)
+    dlg_aura.sld_scale.setValue(M.value_to_tier(2.0, M._SCALE_SPEC))   # 2.0x → 第 20 档
     cfg_new = dlg_aura.settings()
-    M.apply_aura_to_config(cfg_new)
-    check("光效应用后 CONFIG 更新（三色+时长钳制+倍率）",
+    M.apply_appearance_to_config(cfg_new)
+    check("外观应用后 CONFIG 更新（三色+时长钳制+倍率档位换算）",
           M.CONFIG["color_start"] == "#112233" and M.CONFIG["color_mid"] == "#00FF88"
           and M.CONFIG["color_end"] == "#FFEEDD" and M.CONFIG["aura_scale"] == 2.0
           and M.CONFIG["dur_start_mid"] == 7 and M.CONFIG["dur_mid_end"] == 30
@@ -1260,11 +1296,11 @@ def main() -> int:
     check("三色态周期=三段之和（7+30+2=39s）",
           M.breath_cycle_ms() == 39000, f"（实得 {M.breath_cycle_ms()}）", failures)
     # 两色态：起末相同 → 忽略 d3（周期 = d1+d2）
-    M.apply_aura_to_config({**cfg_new, "color_end": "#112233"})
+    M.apply_appearance_to_config({**cfg_new, "color_end": "#112233"})
     check("两色态（起=末）周期=d1+d2（7+30=37s）",
           M.breath_cycle_ms() == 37000, f"（实得 {M.breath_cycle_ms()}）", failures)
     # 呼吸关闭：时长表返回 None、周期 0
-    M.apply_aura_to_config({**cfg_new, "color_end": "#FFEEDD", "breath": False})
+    M.apply_appearance_to_config({**cfg_new, "color_end": "#FFEEDD", "breath": False})
     check("呼吸关闭 → 分段表 None、周期 0",
           M.breath_durations_ms() is None and M.breath_cycle_ms() == 0, "", failures)
     c0 = M.center_color_at(0.0)
@@ -1276,7 +1312,7 @@ def main() -> int:
     check("呼吸关闭 → 任意相位恒基准直径（大小全停）",
           d0 == d5 == M.CONFIG["size_base"], f"（d0={d0} d5={d5}）", failures)
     # 两色态采样：起→中(d1) 中→起(d2)，段比例按 7:30 切分
-    M.apply_aura_to_config({**cfg_new, "color_end": "#112233", "breath": True})
+    M.apply_appearance_to_config({**cfg_new, "color_end": "#112233", "breath": True})
     seg = M.breath_durations_ms()
     check("两色态分段=(d1,d2) 且忽略 d3", seg == (7000, 30000), f"（实得 {seg}）", failures)
     t_edge = 7000 / 37000
@@ -1286,7 +1322,7 @@ def main() -> int:
           c_before.name().upper() == c_after.name().upper() == "#00FF88",
           f"（{c_before.name()} {c_after.name()}）", failures)
     # 三色态采样：起→中→末→起 三段边界连续
-    M.apply_aura_to_config({**cfg_new, "breath": True})   # 起112233/中00FF88/末FFEEDD
+    M.apply_appearance_to_config({**cfg_new, "breath": True})   # 起112233/中00FF88/末FFEEDD
     seg = M.breath_durations_ms()
     check("三色态分段=(d1,d2,d3)", seg == (7000, 30000, 2000), f"（实得 {seg}）", failures)
     tot = sum(seg)
@@ -1302,19 +1338,32 @@ def main() -> int:
     _d, _r, cc = M.shape_at(1.0 - 1e-6)
     check("三色态周期末回到起始色", cc.name().upper() == "#112233", f"（{cc.name()}）", failures)
     # 保存格式验证（写临时文件，不碰项目真实 setting.yaml）
-    aura_tmp = os.path.join(tempfile.mkdtemp(prefix="aura_cfg_"), "aura_test.yaml")
+    aura_tmp = os.path.join(tempfile.mkdtemp(prefix="aura_cfg_"), "appearance_test.yaml")
     back = {"breath": True, "color_start": "#112233", "color_mid": "#00FF88",
             "color_end": "#FFEEDD", "dur_start_mid": 7, "dur_mid_end": 5,
             "dur_end_start": 5}
     with open(aura_tmp, "w", encoding="utf-8") as fh:
-        yaml.safe_dump({"aura": back}, fh, allow_unicode=True)
-    loaded = yaml.safe_load(open(aura_tmp, encoding="utf-8"))["aura"]
-    check("光效保存写盘格式正确（三色+时长落盘）",
+        yaml.safe_dump({"appearance": back}, fh, allow_unicode=True)
+    loaded = yaml.safe_load(open(aura_tmp, encoding="utf-8"))["appearance"]
+    check("外观保存写盘格式正确（三色+时长落盘，块名 appearance）",
           loaded["color_mid"] == "#00FF88" and loaded["color_start"] == "#112233"
           and loaded["dur_start_mid"] == 7, f"（{loaded}）", failures)
+    # V12 改名兼容：块名提取层须认新名、也要认历史旧名，且两块并存时新名优先
+    check("块名兼容提取：新名 appearance 命中",
+          M._extract_appearance_block({"appearance": {"opacity": 50}}) == {"opacity": 50},
+          "", failures)
+    check("块名兼容提取：旧名 aura 回退命中（老配置不丢设置）",
+          M._extract_appearance_block({"aura": {"opacity": 30}}) == {"opacity": 30},
+          "", failures)
+    check("块名兼容提取：两块并存以新名为准",
+          M._extract_appearance_block({"appearance": {"opacity": 90},
+                                       "aura": {"opacity": 10}}) == {"opacity": 90},
+          "", failures)
+    check("块名兼容提取：都没有 → None（回退默认）",
+          M._extract_appearance_block({"functions": []}) is None, "", failures)
     os.remove(aura_tmp)
     # 恢复默认（避免污染后续断言的 CONFIG；测试未写磁盘）
-    M.apply_aura_to_config({"breath": True, "color_start": "#FFFFFF",
+    M.apply_appearance_to_config({"breath": True, "color_start": "#FFFFFF",
                             "color_mid": "#283FFE", "color_end": "#FFFFFF",
                             "dur_start_mid": 5, "dur_mid_end": 5,
                             "dur_end_start": 5, "aura_scale": 1.0})
@@ -1332,89 +1381,129 @@ def main() -> int:
         got = M.resolve_sleep_opacity(sl, op)
         check(f"休眠透明度联动 睡{sl}/总{op} → {want}", got == want, f"（实得 {got}）", failures)
 
-    dlg_aura2 = M.AuraSettingsDialog()
-    check("动效窗高度随内容自适应（无固定 245 高度、含透明度两输入）",
+    dlg_aura2 = M.AppearanceSettingsDialog()
+    check("外观窗高度随内容自适应（无固定 245 高度、含两透明度滑块）",
           not dlg_aura2.minimumHeight() == dlg_aura2.maximumHeight()
           and dlg_aura2.height() > 245
-          and hasattr(dlg_aura2, "spin_opacity") and hasattr(dlg_aura2, "spin_sleep_op"),
+          and hasattr(dlg_aura2, "sld_opacity") and hasattr(dlg_aura2, "sld_sleep_op"),
           f"（height={dlg_aura2.height()}）", failures)
     # V10 防回归：源码不得再出现固定高度 resize(220, 245)
     import inspect as _inspect_aura
-    _src_aura = _inspect_aura.getsource(M.AuraSettingsDialog.__init__)
-    check("动效窗固定高度已移除（源码无 resize(220, 245)）",
+    _src_aura = _inspect_aura.getsource(M.AppearanceSettingsDialog.__init__)
+    check("外观窗固定高度已移除（源码无 resize(220, 245)）",
           "resize(220, 245)" not in _src_aura, "", failures)
 
-    # ── V11 防跑偏：动效窗尺寸必须在类内自定，定位才准 ────────────────
-    # 背景：动效窗高度随内容增长，而 QDialog 弹出前 width()/height() 仍是
+    # ── V11 防跑偏：外观窗尺寸必须在类内自定，定位才准 ────────────────
+    # 背景：外观窗高度随内容增长，而 QDialog 弹出前 width()/height() 仍是
     # Qt 默认 640x480。_place_sub_dialog 靠这两个值选侧/贴边/底部对齐，
     # 拿到默认值就会整体偏移。修复方式是把 adjustSize() 放在
-    # AuraSettingsDialog.__init__ 末尾——「谁定义内容、谁保证尺寸正确」，
-    # 于是日后增删动效项只需改那个类，不会在调用处漏掉尺寸准备。
+    # AppearanceSettingsDialog.__init__ 末尾——「谁定义内容、谁保证尺寸正确」，
+    # 于是日后增删外观项只需改那个类，不会在调用处漏掉尺寸准备。
     # 下面四条断言分别看守「尺寸内聚」「调用处不越俎」「真实一致」
     # 「内容增减后仍成立」，任何一条被破坏都说明定位又开始跑偏。
-    check("动效窗构造末尾自算尺寸（__init__ 含 self.adjustSize()）",
+    check("外观窗构造末尾自算尺寸（__init__ 含 self.adjustSize()）",
           "self.adjustSize()" in _src_aura, "", failures)
-    _src_open = _inspect_aura.getsource(M.SettingsDialog._open_aura_settings)
-    check("动效窗打开处不做尺寸准备（尺寸内聚在类里，不靠调用方补）",
+    _src_open = _inspect_aura.getsource(M.SettingsDialog._open_appearance_settings)
+    check("外观窗打开处不做尺寸准备（尺寸内聚在类里，不靠调用方补）",
           ".adjustSize(" not in _src_open, "", failures)
-    check("动效窗定位前尺寸已到位（构造即真实尺寸，非 Qt 默认 640x480）",
+    check("外观窗定位前尺寸已到位（构造即真实尺寸，非 Qt 默认 640x480）",
           (dlg_aura2.width(), dlg_aura2.height()) != (640, 480),
           f"（{dlg_aura2.width()}x{dlg_aura2.height()}）", failures)
-    _dlg_show = M.AuraSettingsDialog()
+    _dlg_show = M.AppearanceSettingsDialog()
     _dlg_show.show()
     QApplication.processEvents()
-    check("动效窗弹出后尺寸不变（定位用的尺寸与实际渲染尺寸一致）",
+    check("外观窗弹出后尺寸不变（定位用的尺寸与实际渲染尺寸一致）",
           (_dlg_show.width(), _dlg_show.height())
           == (dlg_aura2.width(), dlg_aura2.height()),
           f"（弹出 {dlg_aura2.width()}x{dlg_aura2.height()} vs "
           f"{_dlg_show.width()}x{_dlg_show.height()}）", failures)
     _dlg_show.close()
 
-    # 内容增减模拟：动效项变多时（本窗日后扩充内容的主路径）尺寸须跟着变，
+    # 内容增减模拟：外观项变多时（本窗日后扩充内容的主路径）尺寸须跟着变，
     # 且仍在构造时就定准——否则新增一项就会重现位置偏移。
-    _extra = M.AuraSettingsDialog()
+    _extra = M.AppearanceSettingsDialog()
     _n0 = (_extra.width(), _extra.height())
     for _i in range(6):
         _extra.layout().itemAt(0).layout().addWidget(
             M.QLabel(f"占位新增项 {_i}", _extra))
     _extra.show()
     QApplication.processEvents()
-    check("动效窗扩充内容后尺寸随布局重算（增高且弹出尺寸与定位尺寸一致）",
+    check("外观窗扩充内容后尺寸随布局重算（增高且弹出尺寸与定位尺寸一致）",
           _extra.height() > _n0[1],
           f"（{_n0} → {_extra.width()}x{_extra.height()}）", failures)
     _extra.close()
-    # 呼吸关联动置灰：取消勾选 → 三色框/时长框/倍率禁用；恢复勾选 → 重新可用
+    # 呼吸关联动置灰：取消勾选 → 三色框/时长框/倍率滑块禁用；恢复勾选 → 重新可用
     dlg_aura2.chk_breath.setChecked(False)
-    check("呼吸关闭 → 颜色/时长/倍率置灰",
+    check("呼吸关闭 → 颜色/时长/倍率滑块置灰（休眠与透明度不受影响）",
           not dlg_aura2.edt_start.isEnabled() and not dlg_aura2.edt_mid.isEnabled()
           and not dlg_aura2.edt_end.isEnabled()
           and all(not e.isEnabled() for e in dlg_aura2.edit_dur)
-          and not dlg_aura2.spin_scale.isEnabled()
-          and dlg_aura2.spin_idle.isEnabled(), "", failures)
+          and not dlg_aura2.sld_scale.isEnabled()
+          and dlg_aura2.sld_idle.isEnabled()
+          and dlg_aura2.sld_opacity.isEnabled(), "", failures)
     dlg_aura2.chk_breath.setChecked(True)
-    check("呼吸恢复 → 输入重新可用",
+    check("呼吸恢复 → 控件重新可用",
           dlg_aura2.edt_start.isEnabled() and all(e.isEnabled() for e in dlg_aura2.edit_dur)
-          and dlg_aura2.spin_scale.isEnabled(), "", failures)
-    check("总体透明度范围 10~100",
-          dlg_aura2.spin_opacity.minimum() == 10 and dlg_aura2.spin_opacity.maximum() == 100,
-          "", failures)
-    check("休眠透明度范围 1~20",
-          dlg_aura2.spin_sleep_op.minimum() == 1 and dlg_aura2.spin_sleep_op.maximum() == 20,
-          "", failures)
+          and dlg_aura2.sld_scale.isEnabled(), "", failures)
+    # 量程改档位制：范围断言看档数，真实值看 tier_to_value
+    check("总体透明度滑块 10 档（10%~100%，每阶 10%）",
+          dlg_aura2.sld_opacity.minimum() == 1
+          and dlg_aura2.sld_opacity.maximum() == 10
+          and M.tier_to_value(1, M._OPACITY_SPEC) == 10
+          and M.tier_to_value(10, M._OPACITY_SPEC) == 100, "", failures)
+    check("休眠透明度滑块 4 档（5%~20%，每阶 5%）",
+          dlg_aura2.sld_sleep_op.minimum() == 1
+          and dlg_aura2.sld_sleep_op.maximum() == 4
+          and M.tier_to_value(1, M._SLEEP_OP_SPEC) == 5
+          and M.tier_to_value(4, M._SLEEP_OP_SPEC) == 20, "", failures)
     # 休眠透明度 ≤ 总体透明度 → 保留；> 总体透明度 → 归一为 10
-    dlg_aura2.spin_opacity.setValue(50)
-    dlg_aura2.spin_sleep_op.setValue(15)
+    dlg_aura2.sld_opacity.setValue(5)      # 50%
+    dlg_aura2.sld_sleep_op.setValue(3)     # 15%
     s2 = dlg_aura2.settings()
-    check("休眠≤总体 → settings 保留 15", s2["sleep_opacity"] == 15 and s2["opacity"] == 50,
-          f"（{s2}）", failures)
-    dlg_aura2.spin_opacity.setValue(8)
-    dlg_aura2.spin_sleep_op.setValue(15)
+    check("休眠 15% ≤ 总体 50% → settings 保留 15",
+          s2["sleep_opacity"] == 15 and s2["opacity"] == 50, f"（{s2}）", failures)
+    dlg_aura2.sld_opacity.setValue(1)      # 10%（新起点=最低档）
+    dlg_aura2.sld_sleep_op.setValue(3)     # 15%
     s2b = dlg_aura2.settings()
-    check("休眠>总体 → settings 归一为 10", s2b["sleep_opacity"] == 10 and s2b["opacity"] == 10,
-          f"（{s2b}）", failures)
+    check("休眠 15% > 总体 10% → settings 归一为 10",
+          s2b["sleep_opacity"] == 10 and s2b["opacity"] == 10, f"（{s2b}）", failures)
+    # 滑块逐档必须落在整阶（拖动不可能产出 47 秒这类值）
+    _off = []
+    for t in range(1, 21):
+        dlg_aura2.sld_idle.setValue(t)
+        v = M.tier_to_value(dlg_aura2.sld_idle.value(), M._IDLE_SPEC)
+        if v % 30 or not (30 <= v <= 600):
+            _off.append((t, v))
+    check("休眠滑块逐档均为 30 的整数倍且落在 30~600（30 秒起）",
+          not _off, f"（越阶档：{_off[:3]}）", failures)
+    _off2 = []
+    for t in range(1, 31):
+        dlg_aura2.sld_scale.setValue(t)
+        v = M.tier_to_value(dlg_aura2.sld_scale.value(), M._SCALE_SPEC)
+        if abs(round(v * 10) - v * 10) > 1e-9 or not (0.1 <= v <= 3.0):
+            _off2.append((t, v))
+    check("倍率滑块逐档均为 0.1 的整数倍且落在 0.1~3.0",
+          not _off2, f"（越阶档：{_off2[:3]}）", failures)
+    # settings() 与滑块档位一致（不经钳制函数，证明 UI 侧无需再钳）
+    dlg_aura2.sld_scale.setValue(20)     # 2.0x
+    dlg_aura2.sld_idle.setValue(4)       # 120 秒
+    s3 = dlg_aura2.settings()
+    check("settings 直取档位换算值（倍率 2.0x / 休眠 120 秒）",
+          s3["aura_scale"] == 2.0 and s3["idle_sec"] == 120, f"（{s3}）", failures)
+    # 数值标签随拖动实时更新
+    _lbl_before = dlg_aura2.lbl_idle.text()
+    dlg_aura2.sld_idle.setValue(10)      # 300 秒
+    check("数值标签随滑块实时更新",
+          _lbl_before != dlg_aura2.lbl_idle.text()
+          and dlg_aura2.lbl_idle.text() == "300 秒",
+          f"（{_lbl_before} → {dlg_aura2.lbl_idle.text()}）", failures)
+    check("倍率标签保留一位小数并带 x 后缀",
+          dlg_aura2.lbl_scale.text() == "2.0x",
+          f"（实得 {dlg_aura2.lbl_scale.text()}）", failures)
+    # 老配置非整阶值打开窗口 → 吸附整阶后回写，不会原样吐回
     dlg_aura2.deleteLater()
     # 运行期 CONFIG 应用透明度
-    M.apply_aura_to_config({"color_mid": "#FFFFFF", "aura_scale": 1.0, "idle_sec": 60,
+    M.apply_appearance_to_config({"color_mid": "#FFFFFF", "aura_scale": 1.0, "idle_sec": 60,
                             "opacity": 40, "sleep_opacity": 5})
     check("CONFIG 透明度应用", M.CONFIG["opacity"] == 40 and M.CONFIG["sleep_opacity"] == 5,
           f"（op={M.CONFIG['opacity']}, sl={M.CONFIG['sleep_opacity']}）", failures)
@@ -1426,7 +1515,7 @@ def main() -> int:
     _a40 = (_img40.pixel(_m40, _p40) >> 24) & 0xFF if _p40 < _img40.height() else 0
     check("opacity=40 时球体 alpha 缩放（≈102）",
           60 <= _a40 <= 145, f"（核心 alpha={_a40}）", failures)
-    M.apply_aura_to_config({"color_mid": "#FFFFFF", "aura_scale": 1.0, "idle_sec": 60,
+    M.apply_appearance_to_config({"color_mid": "#FFFFFF", "aura_scale": 1.0, "idle_sec": 60,
                             "opacity": 100, "sleep_opacity": 10})
     check("恢复透明度 100%",
           M.CONFIG["opacity"] == 100 and M.CONFIG["sleep_opacity"] == 10, "", failures)
@@ -1474,11 +1563,12 @@ def main() -> int:
     with open(os.path.join(root_src, "aura.yaml"), "w", encoding="utf-8") as fh:
         yaml.safe_dump({"aura": {"color_mid": "#FF0000"}}, fh, allow_unicode=True)
     out_cfg = M.ensure_settings(main_cfg, base=root_src)
-    check("旧 version yaml 视同普通 yaml：全部迁移合并",
+    check("旧 yaml 迁移合并：旧 aura 块内容升级为 appearance 块、旧块不残留",
           isinstance(out_cfg.get("functions"), list)
           and out_cfg["functions"][0].get("name") == "甲"
-          and out_cfg.get("aura", {}).get("color_mid") == "#FF0000",
-          f"（functions={out_cfg.get('functions')}, aura={out_cfg.get('aura')}）", failures)
+          and out_cfg.get("appearance", {}).get("color_mid") == "#FF0000"
+          and "aura" not in out_cfg,
+          f"（appearance={out_cfg.get('appearance')}）", failures)
     root_left = sorted(os.listdir(root_src))
     check("迁移后根源改名 *.yaml.bak_done（不再被扫）",
           root_left == ["aura.yaml.bak_done", "functions.yaml.bak_done"],
@@ -1494,8 +1584,9 @@ def main() -> int:
     # 根目录无合法 yaml → 写出厂默认
     empty_main = os.path.join(mig_dir, "empty", "setting.yaml")
     out3 = M.ensure_settings(empty_main, base=os.path.join(mig_dir, "empty_root"))
-    check("根目录无合法 yaml → 写默认",
-          out3.get("functions") == [] and out3.get("aura", {}).get("color_mid") == "#FFFFFF",
+    check("根目录无合法 yaml → 写默认（含 appearance 块）",
+          out3.get("functions") == []
+          and out3.get("appearance", {}).get("color_mid") == "#FFFFFF",
           f"（out={out3}）", failures)
     shutil.rmtree(mig_dir, ignore_errors=True)
 
@@ -1503,7 +1594,8 @@ def main() -> int:
     print("\n置顶开关与配置块")
     top_tmp = os.path.join(tempfile.mkdtemp(prefix="aura_top_"), "s.yaml")
     M.write_setting({"functions": [],
-                     "aura": {"color_mid": "#FFFFFF", "aura_scale": 1.0, "idle_sec": 60},
+                     "appearance": {"color_mid": "#FFFFFF", "aura_scale": 1.0,
+                                    "idle_sec": 60},
                      "autostart": {"enabled": False}}, top_tmp)
     check("缺省 window 块 → 置顶为 False", M.topmost_enabled(top_tmp) is False,
           f"（实得 {M.topmost_enabled(top_tmp)}）", failures)
@@ -1517,7 +1609,7 @@ def main() -> int:
     check("set_topmost(false) 写回", D_t["window"]["always_on_top"] is False
           and M.topmost_enabled(top_tmp) is False, f"（window={D_t['window']}）", failures)
     check("置顶写入不动其他块",
-          "aura" in D_t and "autostart" in D_t and "functions" in D_t, "", failures)
+          "appearance" in D_t and "autostart" in D_t and "functions" in D_t, "", failures)
     check("配置注释头含 window 块说明",
           "always_on_top" in M.SETTINGS_HEADER and "保持球体置顶" in M.SETTINGS_HEADER,
           "", failures)

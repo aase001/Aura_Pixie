@@ -66,7 +66,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -77,7 +76,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileDialog,
     QScrollArea,
-    QSpinBox,
+    QSlider,
     QStyledItemDelegate,
     QTableWidgetItem,
     QTableWidget,
@@ -89,7 +88,7 @@ from PySide6.QtWidgets import (
 CONFIG = {
     "size_base": 100.0,
     "size_breath": 110.0,
-    # 呼吸颜色三段式：起始色 → 过渡色（中段） → 末尾色 → 起始色（「动效设置」可调）
+    # 呼吸颜色三段式：起始色 → 过渡色（中段） → 末尾色 → 起始色（「外观设置」可调）
     "color_start": "#FFFFFF",   # 呼吸起始色（可配；呼吸关闭时球体恒渲此色）
     "color_mid": "#283FFE",     # 呼吸过渡色（可配，原「主题色」）
     "color_end": "#FFFFFF",     # 呼吸末尾色（可配）
@@ -104,10 +103,10 @@ CONFIG = {
     "dur_start_mid": 5,         # 起始→过渡 渐变时长（s，1~30 整数，默认 5）
     "dur_mid_end": 5,           # 过渡→末尾 渐变时长（三色态中段；两色态回程）
     "dur_end_start": 5,         # 末尾→起始 渐变时长（仅三色态生效）
-    "aura_scale": 1.0,          # 呼吸动画速度倍率 0.1x~3x：相位推进速度 × 倍率
-    "idle_sec": 60,             # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停+透明度10%（10~600）
+    "aura_scale": 1.0,          # 呼吸动画速度倍率 0.1x~3x（每阶0.1）：相位推进速度 × 倍率
+    "idle_sec": 60,             # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停+透明度10%（30~600，每阶30）
     "opacity": 100,             # 总体透明度（%）：球体渲染 alpha 缩放，范围 10~100，默认 100
-    "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 1~20，默认 10（超过总体透明度则存 10）
+    "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 5~20（每阶5），默认 10（超过总体透明度则存 10）
     "fps": 60,
 
     "glow_px": 3.0,
@@ -179,7 +178,7 @@ BASE_DIR = os.path.dirname(app_executable())   # exe/脚本所在目录（迁移
 _APP_DATA_ROOT = os.environ.get("LOCALAPPDATA") or os.path.join(
     os.path.expanduser("~"), "AppData", "Local")
 APP_CONFIG_DIR = os.path.join(_APP_DATA_ROOT, "Aura_Pixie")
-CONFIG_PATH = os.path.join(APP_CONFIG_DIR, "setting.yaml")   # 统一配置文件（functions+aura+后续块）
+CONFIG_PATH = os.path.join(APP_CONFIG_DIR, "setting.yaml")   # 统一配置文件（functions+appearance+后续块）
 SETTINGS_PATH = CONFIG_PATH
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
 RUNNER_DIR = os.path.join(tempfile.gettempdir(), "AuraPixie")   # py 代码临时脚本目录
@@ -674,9 +673,10 @@ def _test_spawn(argv: list[str]) -> subprocess.Popen:
 # ---------------------------------------------------------------- 配置读写
 SETTINGS_HEADER = (
     "# Aura Pixie 设置（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml，"
-    "由设置/动效界面写回）\n"
-    "# 分块：functions = 功能扇区列表；aura = 光效（breath 呼吸开关 + 起始/过渡/末尾三色 + "
-    "三段渐变时长 dur_* + 倍率 + 透明度）；autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
+    "由设置/外观界面写回）\n"
+    "# 分块：functions = 功能扇区列表；appearance = 外观（breath 呼吸开关 + 起始/过渡/末尾三色 + "
+    "三段渐变时长 dur_* + 倍率 + 透明度；旧块名 aura 仍兼容读取）；"
+    "autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
     "#       window = 窗口行为（always_on_top = 保持球体置顶；pos_x/pos_y = 球心记忆位置）。\n"
     "# 扇区等分数 = functions 中 active: true 的条目数；最少 2，最多 9（超出只取前 9）；"
     "扇区顺序 = 条目顺序。\n"
@@ -708,7 +708,7 @@ def _yaml_blocks_legal(src) -> bool:
     不按文件名区分来源：只要包含至少一个「程序能识别的功能块」即视为合法。
     合法块：
       · functions：列表，元素为 dict（含 name/code/active 任一字段）
-      · aura：dict
+      · appearance：dict（外观块；旧配置里的同名块 aura 仍兼容读取）
       · autostart：dict 或 bool
       · window：dict
     旧版 functions.yaml / aura.yaml 不再做专属处理，与普通 *.yaml 一视同仁，
@@ -719,7 +719,8 @@ def _yaml_blocks_legal(src) -> bool:
     funcs = src.get("functions")
     if isinstance(funcs, list) and any(isinstance(f, dict) for f in funcs):
         return True
-    if isinstance(src.get("aura"), dict) or isinstance(src.get("autostart"), (dict, bool)) \
+    if isinstance(src.get("appearance"), dict) or isinstance(src.get("aura"), dict) \
+            or isinstance(src.get("autostart"), (dict, bool)) \
             or isinstance(src.get("window"), dict):
         return True
     return False
@@ -773,16 +774,29 @@ def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
                        default_flow_style=False, width=1000)
 
 
+def _extract_appearance_block(src: dict) -> dict | None:
+    """从配置 dict 取外观块，兼容旧块名 aura。
+
+    两块并存时以 appearance 为准（新键优先，语义是「改过名的新配置」）；
+    只有 aura 时回退读它，保证 V12 之前的老 setting.yaml 不丢外观设置。
+    """
+    if isinstance(src.get("appearance"), dict):
+        return src["appearance"]
+    if isinstance(src.get("aura"), dict):
+        return src["aura"]
+    return None
+
+
 def default_settings() -> dict:
     """出厂默认配置块（首次运行 / 迁移合并时的缺省兜底）。"""
     return {
         "functions": [],
-        "aura": {"breath": True,
-                 "color_start": "#FFFFFF", "color_mid": "#FFFFFF",
-                 "color_end": "#FFFFFF",
-                 "dur_start_mid": 5, "dur_mid_end": 5, "dur_end_start": 5,
-                 "aura_scale": 1.0, "idle_sec": 60,
-                 "opacity": 100, "sleep_opacity": 10},
+        "appearance": {"breath": True,
+                       "color_start": "#FFFFFF", "color_mid": "#FFFFFF",
+                       "color_end": "#FFFFFF",
+                       "dur_start_mid": 5, "dur_mid_end": 5, "dur_end_start": 5,
+                       "aura_scale": 1.0, "idle_sec": 60,
+                       "opacity": 100, "sleep_opacity": 10},
         "autostart": {"enabled": False},
         "window": {"always_on_top": False, "pos_x": None, "pos_y": None},
     }
@@ -792,14 +806,18 @@ def _merge_config(base: dict, src: dict) -> dict:
     """把迁移源/导入源内容合并进 base（就地返回 base）。
 
     · functions：源为**非空列表**时整体替换（避免空列表清掉已有功能）
-    · aura / window：dict 字段级合并（源字段覆盖 base 同名字段）
+    · appearance / window：dict 字段级合并（源字段覆盖 base 同名字段）
     · autostart：dict 字段级合并；裸 bool 转 {enabled: bool}
     """
     funcs = src.get("functions")
     if isinstance(funcs, list) and funcs:
         base["functions"] = funcs
-    if isinstance(src.get("aura"), dict):
-        base["aura"] = {**(base.get("aura") or {}), **src["aura"]}
+    app_blk = _extract_appearance_block(src)
+    if app_blk is not None:
+        # 迁移源只有旧块名 aura 时，字段并入 base 的 appearance 块；
+        # base 里残留的旧 aura 块删除，避免同一份配置出现两份外观设置。
+        base["appearance"] = {**(base.get("appearance") or {}), **app_blk}
+        base.pop("aura", None)
     astart = src.get("autostart")
     if isinstance(astart, dict):
         base["autostart"] = {**(base.get("autostart") or {}), **astart}
@@ -814,8 +832,9 @@ def merge_settings_with_defaults(src: dict) -> dict:
     """把迁移源/导入源内容与出厂默认块合并：缺少的功能块补默认，已有块保留原值。
 
     迁移源可能是完整 setting.yaml，也可能是旧版 functions.yaml（只有
-    functions 块）或 aura.yaml（只有 aura 块）——一律视为普通 yaml，
-    按块合并后写入主位置，保证 functions/aura/autostart/window 齐全。
+    functions 块）或 aura.yaml（只有旧名 aura 块）——一律视为普通 yaml，
+    按块合并后写入主位置，保证 functions/appearance/autostart/window 齐全
+    （旧 aura 块在合并时升级为 appearance 块，见 _extract_appearance_block）。
     """
     return _merge_config(default_settings(), src)
 
@@ -921,7 +940,7 @@ def load_functions(path: str = CONFIG_PATH) -> list[dict]:
 
 
 def save_functions(rows: list[dict], path: str = CONFIG_PATH) -> None:
-    """写回功能扇区块（functions），保留 setting.yaml 中其他配置块（aura/autostart/未来扩展）。
+    """写回功能扇区块（functions），保留 setting.yaml 中其他配置块（appearance/autostart/未来扩展）。
 
     条目顺序 = 表格行顺序；总数不限，可含未激活。
     """
@@ -1894,7 +1913,7 @@ CODE_EDIT_TEST_TOOLTIP = "真实执行当前指令（与点击扇区一致）。
 
 
 class CodeEditDialog(QDialog):
-    """指令独立编辑窗。模态 exec：未保存/取消前设置窗不可操作（与动效窗同级交互）。
+    """指令独立编辑窗。模态 exec：未保存/取消前设置窗不可操作（与外观窗同级交互）。
 
     编辑区内置隔离 tab 键（Tab 移出编辑区，不插入制表符）；「测试」在窗口内
     同步轮询子进程，不弹额外模态、不阻塞 UI；「保存」只做合法性校验不执行。
@@ -2216,7 +2235,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         self.resize(660, 440)
         self._help_dlg: QDialog | None = None
-        self._aura_dlg: QDialog | None = None   # 动效二级弹窗（有则前台、无则新建）
+        self._appearance_dlg: QDialog | None = None   # 外观二级弹窗（有则前台、无则新建）
         self._code_dlg: "CodeEditDialog | None" = None   # 指令高级编辑窗（右键入口，去重置前）
 
         self.table = ReorderTable(self)
@@ -2259,26 +2278,26 @@ class SettingsDialog(QDialog):
             self.table.rowCount(), {"name": "新功能", "code": "", "active": False}))
         btn_del.clicked.connect(self._delete_current)
 
-        # 底部按钮行（自定义）：动效 | 帮助 ……… 保存 | 取消
+        # 底部按钮行（自定义）：外观 | 帮助 ……… 保存 | 取消
         # 帮助窗与设置窗同级（非模态 show），打开帮助不阻塞操作设置；
         # 点 Save 时若帮助窗还开着会一并关闭。
-        btn_aura = QPushButton("动效", self)
+        btn_appearance = QPushButton("外观", self)
         btn_help = QPushButton("帮助", self)
         btn_save = QPushButton("保存", self)
         btn_save.setDefault(True)
         btn_cancel = QPushButton("取消", self)
         # 导入/导出配置（位于帮助按钮右侧；导出为 .yaml.bak，导入则覆盖当前配置）
         btn_transfer = QPushButton("导入/导出配置", self)
-        btn_aura.clicked.connect(self._open_aura_settings)
+        btn_appearance.clicked.connect(self._open_appearance_settings)
         btn_save.clicked.connect(self._on_save)
         btn_help.clicked.connect(self._show_code_help)
         btn_transfer.clicked.connect(self._transfer_config)
         btn_cancel.clicked.connect(self.reject)
-        self.btn_aura, self.btn_save, self.btn_help = btn_aura, btn_save, btn_help
+        self.btn_appearance, self.btn_save, self.btn_help = btn_appearance, btn_save, btn_help
         self.btn_transfer = btn_transfer
 
         btn_row = QHBoxLayout()
-        btn_row.addWidget(btn_aura)
+        btn_row.addWidget(btn_appearance)
         btn_row.addWidget(btn_help)
         btn_row.addWidget(btn_transfer)
         btn_row.addStretch(1)
@@ -2311,7 +2330,7 @@ class SettingsDialog(QDialog):
     def open_code_editor(self, row: int) -> None:
         """指令列「高级编辑」唯一入口：打开独立编辑窗（CodeEditDialog）。
 
-        去重：编辑窗已打开则置前，不做新建；先定位再模态 exec（与动效窗一致，
+        去重：编辑窗已打开则置前，不做新建；先定位再模态 exec（与外观窗一致，
         编辑期间设置窗不可操作）；保存（Accepted）后把编辑内容写回第 2 列单元格；
         取消不做任何更改。行号越界直接忽略（拖拽/删除后 emoji 场景防御）。
         """
@@ -2579,27 +2598,27 @@ class SettingsDialog(QDialog):
         # 二级弹窗定位：相对设置窗，选空间大的一侧、边缘相交、高度与设置窗一致
         self._place_sub_dialog(dlg)
 
-    def _open_aura_settings(self) -> None:
-        """打开动效设置（动效按钮）。去重：已打开则前台该窗口，未打开才新建。
+    def _open_appearance_settings(self) -> None:
+        """打开外观设置（外观按钮）。去重：已打开则前台该窗口，未打开才新建。
 
-        动效设置优先级高于基本设置：用模态 exec()，未完成（取消/关闭）前
+        外观设置优先级高于基本设置：用模态 exec()，未完成（取消/关闭）前
         本设置窗不可操作；点确定后颜色立即生效并同步配置。
         """
-        if self._aura_dlg is not None and self._aura_dlg.isVisible():
-            self._aura_dlg.raise_()
-            self._aura_dlg.activateWindow()
+        if self._appearance_dlg is not None and self._appearance_dlg.isVisible():
+            self._appearance_dlg.raise_()
+            self._appearance_dlg.activateWindow()
             return
-        dlg = AuraSettingsDialog(self)
-        dlg.finished.connect(lambda _r: setattr(self, "_aura_dlg", None))
-        self._aura_dlg = dlg
-        # 弹窗尺寸由 AuraSettingsDialog.__init__ 末尾自行按布局算到位，
-        # 调用处不做任何尺寸准备：日后增删动效项只改那个类，定位不会跑偏。
+        dlg = AppearanceSettingsDialog(self)
+        dlg.finished.connect(lambda _r: setattr(self, "_appearance_dlg", None))
+        self._appearance_dlg = dlg
+        # 弹窗尺寸由 AppearanceSettingsDialog.__init__ 末尾自行按布局算到位，
+        # 调用处不做任何尺寸准备：日后增删外观项只改那个类，定位不会跑偏。
         self._place_sub_dialog(dlg)   # 先定位再 exec，模态栈内位置不被 Qt 打乱
         if dlg.exec() == int(QDialog.DialogCode.Accepted):
-            _apply_aura_config(dlg.settings())
+            _apply_appearance_config(dlg.settings())
 
     def _place_sub_dialog(self, dlg: QDialog) -> None:
-        """二级弹窗（帮助/动效/未来扩展）定位：水平方向取空间较大的一侧
+        """二级弹窗（帮助/外观/未来扩展）定位：水平方向取空间较大的一侧
         （设置窗左/右），弹窗边缘与设置窗边缘相交；垂直方向下边缘与设置窗
         下边缘严格对齐。
 
@@ -2689,14 +2708,42 @@ def resolve_sleep_opacity(sleep_raw, opacity_raw) -> int:
     return 10 if sl > op else sl
 
 
-def load_aura_config() -> dict:
+# ── V12 外观窗滑块量程 ───────────────────────────────────────────────
+# QSlider 的值只能是整数，且拖动会落在**任意整数**上、不受 singleStep 约束，
+# 所以滑块值不取真实数值、而取「档位序号 1..N」，真实值 = 起点 + (档位-1)×步长。
+# 这样拖动天然只能停在整阶上，四项参数在 UI 侧不再需要任何输入钳制。
+# 格式：(档数, 起点, 步长)
+_SCALE_SPEC = (30, 0.1, 0.1)      # 呼吸倍率 0.1x~3.0x，每阶 0.1
+_IDLE_SPEC = (20, 30, 30)         # 休眠倒计时 30~600 秒，每阶 30
+_OPACITY_SPEC = (10, 10, 10)      # 总体透明度 10%~100%，每阶 10%
+_SLEEP_OP_SPEC = (4, 5, 5)        # 休眠透明度 5%~20%，每阶 5%
+
+
+def tier_to_value(tier: int, spec) -> float:
+    """档位序号 → 真实参数值（越界先夹进档数，整阶项返回 int、小数项返回 float）。"""
+    tiers, lo, step = spec
+    val = lo + (max(1, min(tiers, int(tier))) - 1) * step
+    return int(round(val)) if step % 1 == 0 else round(val, 2)
+
+
+def value_to_tier(val, spec) -> int:
+    """真实参数值 → 最近档位。老配置里的非整阶值就近吸附到整阶，非法回第 1 档。"""
+    tiers, lo, step = spec
+    try:
+        tier = round((float(val) - lo) / step) + 1
+    except (TypeError, ValueError):
+        tier = 1
+    return max(1, min(tiers, int(tier)))
+
+
+def load_appearance_config() -> dict:
     """读取光效配置块（呼吸开关+三色+三段渐变时长+倍率+休眠+透明度）。
 
     缺省回退 CONFIG 默认值；解析失败不打断启动。
     旧配置无 breath/color_start/color_end/dur_* 键 → 回退默认（观感与旧版一致：
     起末皆白、呼吸开启、时长 5/5/5 的两色态 5+5=10s 周期）。
     """
-    data = read_setting().get("aura") or {}
+    data = _extract_appearance_block(read_setting()) or {}
     if not isinstance(data, dict):
         data = {}
     # 兼容旧字段：已存在的 idle_min（分钟）按 60 换算成秒
@@ -2723,14 +2770,18 @@ def load_aura_config() -> dict:
     return out
 
 
-def save_aura_config(cfg: dict) -> None:
-    """写回光效配置块：三色归一 #RRGGBB 大写、渐变时长取整钳 [1,30]、呼吸开关布尔；
+def save_appearance_config(cfg: dict) -> None:
+    """写回外观配置块：三色归一 #RRGGBB 大写、渐变时长取整钳 [1,30]、呼吸开关布尔；
     倍率/休眠秒数/透明度保留；不动其他配置块。
+
+    块名 V12 起为 appearance；写入时顺带删除历史遗留的旧块名 aura，
+    避免同一份 setting.yaml 里出现两份外观设置。
 
     休眠透明度若大于总体透明度，按规则归一为 10%。
     """
     data = read_setting()
-    data["aura"] = {
+    data.pop("aura", None)
+    data["appearance"] = {
         "breath": bool(cfg.get("breath", True)),
         "color_start": str(cfg.get("color_start", CONFIG["color_start"])).upper(),
         "color_mid": str(cfg.get("color_mid", CONFIG["color_mid"])).upper(),
@@ -2748,10 +2799,10 @@ def save_aura_config(cfg: dict) -> None:
     try:
         write_setting(data)
     except OSError as exc:
-        _log_crash("save_aura_config", exc)
+        _log_crash("save_appearance_config", exc)
 
 
-def apply_aura_to_config(cfg: dict) -> None:
+def apply_appearance_to_config(cfg: dict) -> None:
     """把光效配置合并进 CONFIG（运行期立即生效，无需重启）。"""
     CONFIG["breath"] = bool(cfg.get("breath", CONFIG["breath"]))
     CONFIG["color_start"] = cfg.get("color_start", CONFIG["color_start"])
@@ -2784,8 +2835,8 @@ def normalize_hex(text: str, fallback: str) -> str:
     return fallback
 
 
-class AuraSettingsDialog(QDialog):
-    """动效设置对话框（V10）：球体呼吸开关 + 起始/过渡/末尾三色（十六进制+取色）
+class AppearanceSettingsDialog(QDialog):
+    """外观设置对话框（V10：动效设置改名而来）：球体呼吸开关 + 起始/过渡/末尾三色（十六进制+取色）
     + 三段渐变时长（1~30s）+ 呼吸倍率（0.1x~3x）+ 休眠倒计时 + 总体/休眠透明度。
 
     窗口高度不再固定，由设置项数量决定（布局自动撑开）。
@@ -2796,11 +2847,11 @@ class AuraSettingsDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("动效设置")
+        self.setWindowTitle("外观设置")
         # V10：取消固定高度，窗口随控件行数自适应；仅约束最小宽度保证排版
         self.setMinimumWidth(220)
 
-        cur = load_aura_config()
+        cur = load_appearance_config()
         self._fallback = cur
 
         # 球体呼吸开关（放颜色设置最上面；默认勾选开启）
@@ -2844,40 +2895,46 @@ class AuraSettingsDialog(QDialog):
             self.edit_dur.append(edt)
             dur_row.addWidget(edt, 1)
 
-        # 光效倍率：0.1x ~ 3x，步进 0.1（QDoubleSpinBox）——全局速度：
-        # 每段实际耗时 = 设定秒数 ÷ 倍率
-        self.spin_scale = QDoubleSpinBox(self)
-        self.spin_scale.setRange(0.1, 3.0)
-        self.spin_scale.setSingleStep(0.1)
-        self.spin_scale.setDecimals(1)
-        self.spin_scale.setSuffix("x")
-        self.spin_scale.setToolTip("呼吸整体速度：每段渐变实际耗时 = 设定秒数 ÷ 倍率")
-        self.spin_scale.setValue(float(cur.get("aura_scale", 1.0)))
+        # ── V12：倍率 / 休眠倒计时 / 两档透明度改滑块 ──────────────────
+        # 滑块值 = 档位序号，真实值由 tier_to_value 换算、右侧标签实时显示；
+        # 量程集中定义在模块级 *_SPEC，__init__ 与 settings() 共用同一套换算，
+        # 不会各写一份而失配（设计说明见 resolve_sleep_opacity 下方）。
+        def _slider_row(spec, fmt, tip: str, cur_val):
+            """建一行滑块（档位 1..N）+ 右侧实时数值标签，返回 (slider, label)。"""
+            sld = QSlider(Qt.Orientation.Horizontal, self)
+            sld.setRange(1, spec[0])
+            sld.setSingleStep(1)
+            sld.setPageStep(1)
+            sld.setValue(value_to_tier(cur_val, spec))
+            sld.setToolTip(tip)
+            lbl = QLabel(fmt(tier_to_value(sld.value(), spec)), self)
+            lbl.setMinimumWidth(46)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight
+                             | Qt.AlignmentFlag.AlignVCenter)
+            sld.valueChanged.connect(
+                lambda v: lbl.setText(fmt(tier_to_value(v, spec))))
+            return sld, lbl
 
-        # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数后呼吸暂停+透明度 sleep
-        self.spin_idle = QSpinBox(self)
-        self.spin_idle.setRange(10, 600)
-        self.spin_idle.setSuffix(" 秒")
-        self.spin_idle.setKeyboardTracking(False)   # 输入未提交时 value() 才不抢跑
-        self.spin_idle.setValue(_clamp_idle(cur.get("idle_sec", CONFIG["idle_sec"])))
-        self.spin_idle.editingFinished.connect(self._clamp_idle_input)
+        self.sld_scale, self.lbl_scale = _slider_row(
+            _SCALE_SPEC, lambda v: f"{v:.1f}x",
+            "呼吸整体速度：每段渐变实际耗时 = 设定秒数 ÷ 倍率（0.1x~3.0x，每阶 0.1）",
+            cur.get("aura_scale", CONFIG["aura_scale"]))
 
-        # 总体透明度：10~100%，球体渲染 alpha 乘该系数
-        self.spin_opacity = QSpinBox(self)
-        self.spin_opacity.setRange(10, 100)
-        self.spin_opacity.setSuffix("%")
-        self.spin_opacity.setKeyboardTracking(False)
-        self.spin_opacity.setValue(_clamp_opacity(cur.get("opacity", CONFIG["opacity"])))
-        self.spin_opacity.editingFinished.connect(self._clamp_opacity_input)
+        self.sld_idle, self.lbl_idle = _slider_row(
+            _IDLE_SPEC, lambda v: f"{v} 秒",
+            "无球体交互（悬停/点击/拖拽）达到该秒数后呼吸暂停并转入休眠"
+            "（30~600 秒，每阶 30）",
+            cur.get("idle_sec", CONFIG["idle_sec"]))
 
-        # 休眠透明度：1~20%，休眠时窗口透明度；若大于总体透明度则保存为 10%
-        self.spin_sleep_op = QSpinBox(self)
-        self.spin_sleep_op.setRange(1, 20)
-        self.spin_sleep_op.setSuffix("%")
-        self.spin_sleep_op.setKeyboardTracking(False)
-        self.spin_sleep_op.setValue(_clamp_sleep_op(cur.get("sleep_opacity",
-                                                           CONFIG["sleep_opacity"])))
-        self.spin_sleep_op.editingFinished.connect(self._clamp_sleep_op_input)
+        self.sld_opacity, self.lbl_opacity = _slider_row(
+            _OPACITY_SPEC, lambda v: f"{v}%",
+            "球体渲染 alpha 乘该系数（10%~100%，每阶 10%）",
+            cur.get("opacity", CONFIG["opacity"]))
+
+        self.sld_sleep_op, self.lbl_sleep_op = _slider_row(
+            _SLEEP_OP_SPEC, lambda v: f"{v}%",
+            "休眠时窗口透明度（5%~20%，每阶 5%）；大于总体透明度时按规则存 10%",
+            cur.get("sleep_opacity", CONFIG["sleep_opacity"]))
 
         grid = QVBoxLayout()
         grid.addWidget(self.chk_breath)
@@ -2889,14 +2946,19 @@ class AuraSettingsDialog(QDialog):
         grid.addLayout(end_row)
         grid.addWidget(QLabel("渐变时长（秒，起→中 / 中→末 / 末→起）", self))
         grid.addLayout(dur_row)
-        grid.addWidget(QLabel("呼吸倍率（0.1x~3.0x）", self))
-        grid.addWidget(self.spin_scale)
-        grid.addWidget(QLabel("休眠倒计时（秒）", self))
-        grid.addWidget(self.spin_idle)
-        grid.addWidget(QLabel("总体透明度（10%~100%）", self))
-        grid.addWidget(self.spin_opacity)
-        grid.addWidget(QLabel("休眠透明度（1%~20%）", self))
-        grid.addWidget(self.spin_sleep_op)
+
+        def _grid_slider_row(title: str, sld: QSlider, lbl: QLabel) -> None:
+            """一行「标题 + 滑块 + 当前值」，滑块占满中间弹性空间。"""
+            row = QHBoxLayout()
+            row.addWidget(QLabel(title, self))
+            row.addWidget(sld, 1)
+            row.addWidget(lbl)
+            grid.addLayout(row)
+
+        _grid_slider_row("呼吸倍率", self.sld_scale, self.lbl_scale)
+        _grid_slider_row("休眠倒计时", self.sld_idle, self.lbl_idle)
+        _grid_slider_row("总体透明度", self.sld_opacity, self.lbl_opacity)
+        _grid_slider_row("休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                | QDialogButtonBox.StandardButton.Cancel, self)
@@ -2915,7 +2977,7 @@ class AuraSettingsDialog(QDialog):
         # width()/height() 一直是 Qt 默认的 640x480。_place_sub_dialog 靠这两
         # 个值选弹出侧、贴边、与设置窗底部对齐，拿到默认值就会整体偏移。
         # 因此必须在构造末尾按布局实际尺寸撑开一次，让「谁定义内容、谁保证
-        # 尺寸正确」内聚在本类：日后任意增删上面的动效项，这里都会自动重算，
+        # 尺寸正确」内聚在本类：日后任意增删上面的外观项，这里都会自动重算，
         # 调用处无需也不应再做尺寸准备。
         self.adjustSize()
 
@@ -2929,7 +2991,7 @@ class AuraSettingsDialog(QDialog):
                 w.setEnabled(on)
         for edt in self.edit_dur:
             edt.setEnabled(on)
-        self.spin_scale.setEnabled(on)
+        self.sld_scale.setEnabled(on)
 
     def _pick_color(self, edt: QLineEdit, title: str) -> None:
         """通用取色：以该框当前合法色为初值打开系统取色器，选定后回填大写色码。"""
@@ -2940,38 +3002,20 @@ class AuraSettingsDialog(QDialog):
 
     def _clamp_dur_input(self, edt: QLineEdit) -> None:
         """渐变时长失焦/回车时：float→向下取整→钳 [1,30] 后回填；
-        非数字回退当前生效值（不动其他框）。"""
+        非数字回退当前生效值（不动其他框）。
+
+        V12 起只保留时长一项：倍率/休眠倒计时/两档透明度已改滑块，
+        档位换算天然整阶，对应的 _clamp_*_input 输入槽随之删除。
+        """
         n = _clamp_dur(edt.text())
         edt.setText(str(n))
 
-    def _clamp_idle_input(self) -> None:
-        """休眠秒数输入失焦/回车时：就近取值钳制到 [10, 600] 并回填输入框，
-        让用户看到修正后的值（<10 → 10，>600 → 600，非法 → 60）。"""
-        v = self.spin_idle.value()
-        clamped = _clamp_idle(v)
-        if clamped != v:
-            self.spin_idle.setValue(clamped)
-
-    def _clamp_opacity_input(self) -> None:
-        """总体透明度输入失焦/回车时：钳制到 [10, 100] 并回填。"""
-        v = self.spin_opacity.value()
-        clamped = _clamp_opacity(v)
-        if clamped != v:
-            self.spin_opacity.setValue(clamped)
-
-    def _clamp_sleep_op_input(self) -> None:
-        """休眠透明度输入失焦/回车时：钳制到 [1, 20] 并回填。"""
-        v = self.spin_sleep_op.value()
-        clamped = _clamp_sleep_op(v)
-        if clamped != v:
-            self.spin_sleep_op.setValue(clamped)
-
     def settings(self) -> dict:
         """收集当前设置：三色非法各自回退原值；时长取整钳 [1,30]（未失焦时
-        直接按同规则解析当前文本）；倍率夹 0.1~3；休眠秒数就近钳制；
-        总体透明度 [10,100]；休眠透明度按「大于总体则取 10%」规则归一；
+        直接按同规则解析当前文本）；倍率/休眠倒计时/两档透明度取滑块档位换算
+        出的整阶值（无需再钳制）；休眠透明度按「大于总体则取 10%」规则归一；
         呼吸开关取复选框状态。"""
-        op = _clamp_opacity(self.spin_opacity.value())
+        op = tier_to_value(self.sld_opacity.value(), _OPACITY_SPEC)
         d1, d2, d3 = (self._dur_value(e, k) for e, k in
                       zip(self.edit_dur, ("dur_start_mid", "dur_mid_end",
                                           "dur_end_start")))
@@ -2986,10 +3030,11 @@ class AuraSettingsDialog(QDialog):
             "dur_start_mid": d1,
             "dur_mid_end": d2,
             "dur_end_start": d3,
-            "aura_scale": round(float(self.spin_scale.value()), 2),
-            "idle_sec": _clamp_idle(self.spin_idle.value()),
+            "aura_scale": tier_to_value(self.sld_scale.value(), _SCALE_SPEC),
+            "idle_sec": tier_to_value(self.sld_idle.value(), _IDLE_SPEC),
             "opacity": op,
-            "sleep_opacity": resolve_sleep_opacity(self.spin_sleep_op.value(), op),
+            "sleep_opacity": resolve_sleep_opacity(
+                tier_to_value(self.sld_sleep_op.value(), _SLEEP_OP_SPEC), op),
         }
 
     @staticmethod
@@ -2998,11 +3043,11 @@ class AuraSettingsDialog(QDialog):
         return _clamp_dur(edt.text())
 
 
-def _apply_aura_config(cfg: dict) -> None:
+def _apply_appearance_config(cfg: dict) -> None:
     """光效设置确定后：写盘 + 合并到运行期 CONFIG。"""
-    apply_aura_to_config(cfg)
+    apply_appearance_to_config(cfg)
     try:
-        save_aura_config(cfg)
+        save_appearance_config(cfg)
     except OSError as exc:  # noqa: BLE001
         _log_crash("aura_config_save", exc)
 
@@ -4062,7 +4107,7 @@ class AuraBall(QWidget):
 
     def open_settings(self) -> None:
         try:
-            # 去重：设置窗口已打开则前台该窗口，未打开才新建（与帮助/动效一致）
+            # 去重：设置窗口已打开则前台该窗口，未打开才新建（与帮助/外观一致）
             if self._settings_dlg is not None and self._settings_dlg.isVisible():
                 self._settings_dlg.raise_()
                 self._settings_dlg.activateWindow()
@@ -4350,8 +4395,8 @@ def main(argv: list[str]) -> int:
     # 开机自启动自我保护：比对配置与注册表，被清理/误删则自动修正（不打扰、不打断）
     autostart_self_heal()
 
-    # 启动即套用光效设置（setting.yaml 的 aura 块；缺失回退默认三段色）
-    apply_aura_to_config(load_aura_config())
+    # 启动即套用外观设置（setting.yaml 的 appearance 块；缺失回退默认三段色）
+    apply_appearance_to_config(load_appearance_config())
     ball = AuraBall()
     screen = QApplication.primaryScreen().availableGeometry()
     saved = saved_ball_position()
