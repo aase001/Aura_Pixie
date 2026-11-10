@@ -1343,6 +1343,46 @@ def main() -> int:
     _src_aura = _inspect_aura.getsource(M.AuraSettingsDialog.__init__)
     check("动效窗固定高度已移除（源码无 resize(220, 245)）",
           "resize(220, 245)" not in _src_aura, "", failures)
+
+    # ── V11 防跑偏：动效窗尺寸必须在类内自定，定位才准 ────────────────
+    # 背景：动效窗高度随内容增长，而 QDialog 弹出前 width()/height() 仍是
+    # Qt 默认 640x480。_place_sub_dialog 靠这两个值选侧/贴边/底部对齐，
+    # 拿到默认值就会整体偏移。修复方式是把 adjustSize() 放在
+    # AuraSettingsDialog.__init__ 末尾——「谁定义内容、谁保证尺寸正确」，
+    # 于是日后增删动效项只需改那个类，不会在调用处漏掉尺寸准备。
+    # 下面四条断言分别看守「尺寸内聚」「调用处不越俎」「真实一致」
+    # 「内容增减后仍成立」，任何一条被破坏都说明定位又开始跑偏。
+    check("动效窗构造末尾自算尺寸（__init__ 含 self.adjustSize()）",
+          "self.adjustSize()" in _src_aura, "", failures)
+    _src_open = _inspect_aura.getsource(M.SettingsDialog._open_aura_settings)
+    check("动效窗打开处不做尺寸准备（尺寸内聚在类里，不靠调用方补）",
+          ".adjustSize(" not in _src_open, "", failures)
+    check("动效窗定位前尺寸已到位（构造即真实尺寸，非 Qt 默认 640x480）",
+          (dlg_aura2.width(), dlg_aura2.height()) != (640, 480),
+          f"（{dlg_aura2.width()}x{dlg_aura2.height()}）", failures)
+    _dlg_show = M.AuraSettingsDialog()
+    _dlg_show.show()
+    QApplication.processEvents()
+    check("动效窗弹出后尺寸不变（定位用的尺寸与实际渲染尺寸一致）",
+          (_dlg_show.width(), _dlg_show.height())
+          == (dlg_aura2.width(), dlg_aura2.height()),
+          f"（弹出 {dlg_aura2.width()}x{dlg_aura2.height()} vs "
+          f"{_dlg_show.width()}x{_dlg_show.height()}）", failures)
+    _dlg_show.close()
+
+    # 内容增减模拟：动效项变多时（本窗日后扩充内容的主路径）尺寸须跟着变，
+    # 且仍在构造时就定准——否则新增一项就会重现位置偏移。
+    _extra = M.AuraSettingsDialog()
+    _n0 = (_extra.width(), _extra.height())
+    for _i in range(6):
+        _extra.layout().itemAt(0).layout().addWidget(
+            M.QLabel(f"占位新增项 {_i}", _extra))
+    _extra.show()
+    QApplication.processEvents()
+    check("动效窗扩充内容后尺寸随布局重算（增高且弹出尺寸与定位尺寸一致）",
+          _extra.height() > _n0[1],
+          f"（{_n0} → {_extra.width()}x{_extra.height()}）", failures)
+    _extra.close()
     # 呼吸关联动置灰：取消勾选 → 三色框/时长框/倍率禁用；恢复勾选 → 重新可用
     dlg_aura2.chk_breath.setChecked(False)
     check("呼吸关闭 → 颜色/时长/倍率置灰",
