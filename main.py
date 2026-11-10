@@ -2592,11 +2592,8 @@ class SettingsDialog(QDialog):
         dlg = AuraSettingsDialog(self)
         dlg.finished.connect(lambda _r: setattr(self, "_aura_dlg", None))
         self._aura_dlg = dlg
-        # V10 起动效窗不固定尺寸、高度由布局撑开：未显式设定尺寸的 Qt 窗口在
-        # 弹出前 width()/height() 仍是默认的 640x480，而 _place_sub_dialog 要靠
-        # 这两个值选侧、贴边、底部对齐，拿假尺寸算就会整体偏移（帮助窗/编辑窗
-        # 有 resize 定尺寸故正常）。先按布局实际尺寸撑开，再定位，位置才准。
-        dlg.adjustSize()
+        # 弹窗尺寸由 AuraSettingsDialog.__init__ 末尾自行按布局算到位，
+        # 调用处不做任何尺寸准备：日后增删动效项只改那个类，定位不会跑偏。
         self._place_sub_dialog(dlg)   # 先定位再 exec，模态栈内位置不被 Qt 打乱
         if dlg.exec() == int(QDialog.DialogCode.Accepted):
             _apply_aura_config(dlg.settings())
@@ -2912,6 +2909,15 @@ class AuraSettingsDialog(QDialog):
 
         # 初始联动：呼吸关闭则颜色/时长/倍率置灰
         self._on_breath_toggled(self.chk_breath.isChecked())
+
+        # ── 尺寸自定（定位前提，勿删）────────────────────────────────
+        # 本窗无固定尺寸，高度随上面的控件行数增长；而 QDialog 在真正弹出前
+        # width()/height() 一直是 Qt 默认的 640x480。_place_sub_dialog 靠这两
+        # 个值选弹出侧、贴边、与设置窗底部对齐，拿到默认值就会整体偏移。
+        # 因此必须在构造末尾按布局实际尺寸撑开一次，让「谁定义内容、谁保证
+        # 尺寸正确」内聚在本类：日后任意增删上面的动效项，这里都会自动重算，
+        # 调用处无需也不应再做尺寸准备。
+        self.adjustSize()
 
     def _on_breath_toggled(self, on: bool) -> None:
         """球体呼吸开关联动：取消勾选 → 三色框+取色钮+三时长框+倍率全部置灰
