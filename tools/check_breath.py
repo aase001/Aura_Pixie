@@ -1191,6 +1191,19 @@ def main() -> int:
         bf._phase = bf._frozen_phase  # noqa: SLF001 - 复现 _on_tick 的冻结覆盖
     check("冻结期间相位被锁在展开瞬间", bf._phase == phase_before,
           f"（phase={bf._phase}，期望 {phase_before}）", failures)
+
+    # ── 首次展开闪动修复看守（真机：扩容瞬间露出后备存储的陈旧像素）──────
+    # 离屏测不出合成器层面的瞬时闪动，故看守「修复动作本身还在」：扩容必须
+    # 同帧 repaint()，且只在变大时做（收起是缩窗、无新增区域，多刷一次白费）。
+    import inspect as _insp_rs
+    _src_rs = _insp_rs.getsource(M.AuraBall._resize_keep_center)
+    check("扩容后同步整窗重绘（防首次展开闪出陌生窗口一角）",
+          "self.repaint()" in _src_rs and "grew" in _src_rs, "", failures)
+    check("重绘仅在扩容方向触发（缩窗不刷）",
+          "if grew:" in _src_rs, "", failures)
+    _w0 = bf.width()
+    bf._resize_keep_center(_w0 + 100)
+    check("扩容路径可执行且球心不偏移", bf.width() == _w0 + 100, "", failures)
     bf._on_hidden()
     check("回收后解冻呼吸", bf._breath_frozen is False and bf.state == "hidden",
           f"（frozen={bf._breath_frozen}, state={bf.state}）", failures)
