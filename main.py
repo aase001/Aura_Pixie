@@ -108,10 +108,8 @@ CONFIG = {
     "idle_sec": 60,             # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停+透明度10%（30~600，每阶30）
     "opacity": 100,             # 总体透明度（%）：球体渲染 alpha 缩放，范围 10~100，默认 100
     "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 5~20（每阶5），默认 10（超过总体透明度则存 10）
-    # —— V13 显示缩放：每单元 {enabled: 勾选启用, percent: 50~200 且为 25 的整数倍} ——
-    #   ball=球体及扇形（直径/光晕/环几何/扇区字号，呼吸尺寸算完后再乘本系数）
-    #   monitor=资源监视单元、quicklaunch=快捷启动单元（配置先落地，对应 UI 待开发）
-    #   未勾选（enabled=false）的单元恒按 100% 生效，percent 值保留但不参与渲染。
+    # —— 显示缩放（单元清单见 SCALE_UNITS）：enabled=界面复选框，percent=下拉值 ——
+    #    percent 为 50~200 且 25 的整数倍；enabled=false 的单元恒按 100% 生效。
     "display_scale": {
         "ball": {"enabled": True, "percent": 100},
         "monitor": {"enabled": True, "percent": 100},
@@ -204,9 +202,8 @@ MIN_SECTORS, MAX_SECTORS = 2, 9
 CREATE_NO_WINDOW = 0x08000000
 
 # ---------------------------------------------------------------- 显示缩放
-# V13：外观窗「显示缩放」——每个单元一份（复选框=启用/禁用 + 50%~200%，每阶 25%）。
-# 未勾选的单元恒按 100% 处理（因子 1.0），配置值保留但不生效。
-# 首批三个单元，后续新增只需在此表加一行 + 渲染处调 display_scale_factor(键)。
+# 每单元一份（复选框=启用 + 50%~200%，每阶 25%）；未勾选恒按 100% 生效。
+# 后续新增单元：此表加一行 + 渲染处调 display_scale_factor(键)。
 SCALE_UNITS = (
     ("ball", "球体及扇形"),          # 球体直径/光晕/扇环几何/扇区字号（渲染已接入）
     ("monitor", "资源监视单元"),      # 预留给后续资源监视窗（MonitorDialog 尚未实现）
@@ -218,8 +215,7 @@ _SCALE_MIN, _SCALE_MAX, _SCALE_STEP = 50, 200, 25
 def _clamp_scale_pct(v) -> int:
     """显示缩放百分比就近吸附到 25 的整数倍并夹进 [50,200]；非法回退 100。
 
-    界面下拉只会给整阶值，这里兜的是手改 yaml / 导入老配置的场景
-    （同 V12 滑块「档位制 + 读盘钳制」的分工思路）。
+    界面下拉只会给整阶值，这里兜手改 yaml / 导入老配置的脏值。
     """
     try:
         n = int(round(float(v)))
@@ -265,9 +261,8 @@ def display_scale_factor(unit: str, block: dict | None = None) -> float:
 TARGET_FRAME_MS = 1000.0 / CONFIG["fps"]
 HEARTBEAT_MS = 15   # 心跳比 16.667ms 密，逐拍跨帧点才重绘，平均正好 60FPS
 
-# —— 几何量：一律 = 基准值 × 球体显示缩放，由 refresh_geometry() 统一重算 ——
-# 下游 40 余处（绘制/命中/吸附/摆放）直接读这些模块级全局名，逐处包乘算极易漏，
-# 所以缩放只在此处生效一次：改缩放 → 重算这几个量 → 全链路自动跟上。
+# —— 几何量 = 基准值 × 球体显示缩放，全部由 refresh_geometry() 统一重算 ——
+# 下游 40 余处（绘制/命中/吸附/摆放）直接读这些全局名，逐处包乘算极易漏。
 _GEOM_BASE = {
     "HALO_PX": CONFIG["glow_px"],
     "HOVER_RADIUS": CONFIG["size_base"] / 2.0,
@@ -278,21 +273,14 @@ BALL_SCALE = 1.0   # 当前生效的球体缩放因子，唯一写入口 = refre
 
 
 def refresh_geometry(scale_block: dict | None = None) -> None:
-    """按球体显示缩放重算全部几何量（原地改写模块级全局，函数内必须声明 global）。
+    """按球体显示缩放重算几何量并落到 BALL_SCALE（缩放因子的唯一写入口）。
 
-    设计要点（V13）：
-      · **单一来源**：缩放因子同时落到 BALL_SCALE，绘制侧（球体直径、扇区字号）
-        与几何侧（环/窗口尺寸）读同一个值——若各自去查 CONFIG，改缩放后会出现
-        「窗口已放大但直径仍按旧系数画」的错位；
-      · **绝对量**（光晕、环宽、环间隙）随缩放乘算——它们直接画在像素上；
-      · **球体直径**（size_base/size_breath）不在这里乘，而是在 shape_at() 里
-        乘到「呼吸结果」上（用户拍板口径：先算呼吸尺寸，再乘显示缩放）；
-      · **派生量** RING_IN/RING_OUT/窗口尺寸一律由上面几项推出，保证环与球同心；
-      · **相对量不乘**：ring_pad（感应外容差）是固定像素手感值，snap_margin /
-        warn_* 是行为参数，乘缩放反而会让吸附与判定手感漂移。
+    绘制侧（shape_at 直径、扇区字号）与几何侧（环/窗口尺寸）同读 BALL_SCALE，
+    保证任一帧内球、环、字是同一系数。光晕/环宽/环间隙等像素量随缩放乘算；
+    ring_pad、snap_margin 等手感/行为参数不乘。球体直径的乘算在 shape_at()
+    作用于「呼吸结果」：呼吸倍率只管速度，不碰尺寸。
     """
-    global HALO_PX, HOVER_RADIUS, RING_IN, RING_OUT, IDLE_SIZE, ACTIVE_SIZE
-    global BALL_SCALE
+    global HALO_PX, HOVER_RADIUS, RING_IN, RING_OUT, IDLE_SIZE, ACTIVE_SIZE, BALL_SCALE
     f = display_scale_factor("ball", scale_block)
     BALL_SCALE = f
     b = _GEOM_BASE
@@ -397,7 +385,7 @@ def system_dark_mode() -> bool:
 
 
 def breath_colors() -> tuple[QColor, QColor, QColor]:
-    """当前呼吸三段色（起始 / 中间 / 末尾）。每次取读，光效设置改完立即生效。"""
+    """当前呼吸三段色（起始 / 中间 / 末尾）。每次取读，外观设置改完立即生效。"""
     return (QColor(CONFIG["color_start"]),
             QColor(CONFIG["color_mid"]),
             QColor(CONFIG["color_end"]))
@@ -440,9 +428,7 @@ def breath_cycle_ms() -> int:
 def shape_at(phase: float) -> tuple[float, float, QColor]:
     c_start, c_mid, c_end = breath_colors()
     segs = breath_durations_ms()
-    # 用户拍板口径：球体尺寸 = 「原呼吸尺寸」× 显示缩放。呼吸倍率（aura_scale）
-    # 仍只管动画速度、不碰尺寸；这里乘的是呼吸算完之后的最终直径。
-    # 读 BALL_SCALE（refresh_geometry 写入）而非现查 CONFIG，确保与环几何同因子。
+    # 直径 = 呼吸结果 × BALL_SCALE（口径与分工见 refresh_geometry docstring）
     f = BALL_SCALE
     if segs is None:
         # 球体呼吸关闭：颜色恒起始色、大小恒基准直径（完全静止）
@@ -2787,7 +2773,7 @@ def build_code_help_dialog(parent: QWidget | None = None) -> QDialog:
     return dlg
 
 
-# ---------------------------------------------------------------- Aura 光效设置
+# ---------------------------------------------------------------- 外观设置
 def _clamp_scale(v) -> float:
     """倍率钳制到 [0.1, 3.0]：超出或不足取最近边界值。"""
     try:
@@ -2827,11 +2813,10 @@ def resolve_sleep_opacity(sleep_raw, opacity_raw) -> int:
     return 10 if sl > op else sl
 
 
-# ── V12 外观窗滑块量程 ───────────────────────────────────────────────
-# QSlider 的值只能是整数，且拖动会落在**任意整数**上、不受 singleStep 约束，
-# 所以滑块值不取真实数值、而取「档位序号 1..N」，真实值 = 起点 + (档位-1)×步长。
-# 这样拖动天然只能停在整阶上，四项参数在 UI 侧不再需要任何输入钳制。
-# 格式：(档数, 起点, 步长)
+# ── 外观窗滑块量程 ──────────────────────────────────────────────
+# QSlider 只能整数值、拖动落在任意整数上（不受 singleStep 约束），所以滑块值
+# 取「档位序号 1..N」而非真实数值：真实值 = 起点 + (档位-1)×步长，天然整阶，
+# UI 侧无需输入钳制。格式：(档数, 起点, 步长)
 _SCALE_SPEC = (30, 0.1, 0.1)      # 呼吸倍率 0.1x~3.0x，每阶 0.1
 _IDLE_SPEC = (20, 30, 30)         # 休眠倒计时 30~600 秒，每阶 30
 _OPACITY_SPEC = (10, 10, 10)      # 总体透明度 10%~100%，每阶 10%
@@ -2856,11 +2841,10 @@ def value_to_tier(val, spec) -> int:
 
 
 def load_appearance_config() -> dict:
-    """读取光效配置块（呼吸开关+三色+三段渐变时长+倍率+休眠+透明度）。
+    """读取外观配置块（呼吸开关+三色+三段时长+倍率+休眠+透明度+显示缩放）。
 
-    缺省回退 CONFIG 默认值；解析失败不打断启动。
-    旧配置无 breath/color_start/color_end/dur_* 键 → 回退默认（观感与旧版一致：
-    起末皆白、呼吸开启、时长 5/5/5 的两色态 5+5=10s 周期）。
+    缺省回退 CONFIG 默认值；解析失败不打断启动。老配置缺失的键一律走默认，
+    观感与旧版一致（起末皆白、呼吸开启、时长 5/5/5、缩放全单元 100%）。
     """
     data = _extract_appearance_block(read_setting()) or {}
     if not isinstance(data, dict):
@@ -2885,7 +2869,7 @@ def load_appearance_config() -> dict:
         "sleep_opacity": resolve_sleep_opacity(
             data.get("sleep_opacity", CONFIG["sleep_opacity"]),
             data.get("opacity", CONFIG["opacity"])),
-        # V13 显示缩放：随外观块一起读；老配置无此键 → 归一后全单元 100% 启用
+        # 显示缩放随外观块一起读；老配置无此键 → 归一后全单元 100% 启用
         "display_scale": normalize_scale_block(
             data.get("display_scale", CONFIG["display_scale"])),
     }
@@ -2893,13 +2877,9 @@ def load_appearance_config() -> dict:
 
 
 def save_appearance_config(cfg: dict) -> None:
-    """写回外观配置块：三色归一 #RRGGBB 大写、渐变时长取整钳 [1,30]、呼吸开关布尔；
-    倍率/休眠秒数/透明度保留；不动其他配置块。
+    """写回外观配置块（含显示缩放整块归一）；不动其他配置块。
 
-    块名 V12 起为 appearance；写入时顺带删除历史遗留的旧块名 aura，
-    避免同一份 setting.yaml 里出现两份外观设置。
-
-    休眠透明度若大于总体透明度，按规则归一为 10%。
+    块名 appearance；写入时删除历史遗留旧块名 aura，避免一份配置两对外观。
     """
     data = read_setting()
     data.pop("aura", None)
@@ -2917,7 +2897,7 @@ def save_appearance_config(cfg: dict) -> None:
         "sleep_opacity": resolve_sleep_opacity(
             cfg.get("sleep_opacity", CONFIG["sleep_opacity"]),
             cfg.get("opacity", CONFIG["opacity"])),
-        # V13：整块归一后写入（只保留已注册单元，脏键不落盘）；
+        # 整块归一后写入（只保留已注册单元，脏键不落盘）；
         # 调用方没带这个键时以 CONFIG 现值兜底，避免把用户已设缩放静默重置。
         "display_scale": normalize_scale_block(
             cfg.get("display_scale", CONFIG["display_scale"])),
@@ -2929,11 +2909,7 @@ def save_appearance_config(cfg: dict) -> None:
 
 
 def apply_appearance_to_config(cfg: dict) -> None:
-    """把外观配置合并进 CONFIG（运行期立即生效，无需重启）。
-
-    显示缩放变更后必须立刻 refresh_geometry()——环几何/球体窗口尺寸是模块级
-    全局量，不重算就得重启才生效（同 V10 置顶「写盘后对表」的即时性要求）。
-    """
+    """把外观配置合并进 CONFIG 并立即重算几何（运行期生效，无需重启）。"""
     CONFIG["breath"] = bool(cfg.get("breath", CONFIG["breath"]))
     CONFIG["color_start"] = cfg.get("color_start", CONFIG["color_start"])
     CONFIG["color_mid"] = cfg["color_mid"]
@@ -2969,20 +2945,19 @@ def normalize_hex(text: str, fallback: str) -> str:
 
 
 class AppearanceSettingsDialog(QDialog):
-    """外观设置对话框（V10：动效设置改名而来）：球体呼吸开关 + 起始/过渡/末尾三色（十六进制+取色）
-    + 三段渐变时长（1~30s）+ 呼吸倍率（0.1x~3x）+ 休眠倒计时 + 总体/休眠透明度。
+    """外观设置对话框：球体呼吸开关、三色、三段渐变时长、呼吸倍率、休眠倒计时、
+    总体/休眠透明度（后四项滑块，右侧标签实时显示当前值）、显示缩放
+    （每单元复选框=启用 + 下拉 50%~200% 每阶 25%）。
 
-    窗口高度不再固定，由设置项数量决定（布局自动撑开）。
-    呼吸关闭时，颜色/时长/倍率输入全部置灰（渲染全停，参数无意义）。
-
+    窗口高度随设置项数量自适应（构造末尾 adjustSize，勿删，原因见其注释）。
+    呼吸关闭时，颜色/时长/倍率控件置灰（渲染全停，参数无意义）。
     等级高于基本设置：模态 exec() 打开，未确定/取消前不能操作设置主窗。
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("外观设置")
-        # V10：取消固定高度，窗口随控件行数自适应；仅约束最小宽度保证排版
-        self.setMinimumWidth(220)
+        self.setMinimumWidth(220)   # 仅约束最小宽度保证排版，高度随布局撑开
 
         cur = load_appearance_config()
         self._fallback = cur
@@ -3028,10 +3003,7 @@ class AppearanceSettingsDialog(QDialog):
             self.edit_dur.append(edt)
             dur_row.addWidget(edt, 1)
 
-        # ── V12：倍率 / 休眠倒计时 / 两档透明度改滑块 ──────────────────
-        # 滑块值 = 档位序号，真实值由 tier_to_value 换算、右侧标签实时显示；
-        # 量程集中定义在模块级 *_SPEC，__init__ 与 settings() 共用同一套换算，
-        # 不会各写一份而失配（设计说明见 resolve_sleep_opacity 下方）。
+        # 倍率 / 休眠倒计时 / 两档透明度：滑块（量程与档位制说明见 *_SPEC 处）
         def _slider_row(spec, fmt, tip: str, cur_val):
             """建一行滑块（档位 1..N）+ 右侧实时数值标签，返回 (slider, label)。"""
             sld = QSlider(Qt.Orientation.Horizontal, self)
@@ -3093,10 +3065,8 @@ class AppearanceSettingsDialog(QDialog):
         _grid_slider_row("总体透明度", self.sld_opacity, self.lbl_opacity)
         _grid_slider_row("休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
 
-        # ── V13：显示缩放（50%~200%，每阶 25%）── 复选框=启用，下拉=倍数 ──
-        # 未勾选的单元恒按 100% 生效（下拉同时置灰），配置值保留但不参与渲染。
-        # monitor / quicklaunch 两单元本批只做配置落地，对应 UI 尚未开发，
-        # 接上后由各自渲染处调 display_scale_factor("键名") 即自然生效。
+        # 显示缩放：每单元一行「复选框（=启用）+ 下拉（50%~200%，每阶 25%）」。
+        # 未勾选 → 下拉置灰、恒按 100% 生效，配置值保留；单元清单与接入方式见 SCALE_UNITS。
         grid.addWidget(QLabel("显示缩放（勾选=启用）", self))
         self.scale_checks, self.scale_combos = {}, {}
         scale_cfg = normalize_scale_block(cur.get("display_scale"))
@@ -3134,13 +3104,9 @@ class AppearanceSettingsDialog(QDialog):
         # 初始联动：呼吸关闭则颜色/时长/倍率置灰
         self._on_breath_toggled(self.chk_breath.isChecked())
 
-        # ── 尺寸自定（定位前提，勿删）────────────────────────────────
-        # 本窗无固定尺寸，高度随上面的控件行数增长；而 QDialog 在真正弹出前
-        # width()/height() 一直是 Qt 默认的 640x480。_place_sub_dialog 靠这两
-        # 个值选弹出侧、贴边、与设置窗底部对齐，拿到默认值就会整体偏移。
-        # 因此必须在构造末尾按布局实际尺寸撑开一次，让「谁定义内容、谁保证
-        # 尺寸正确」内聚在本类：日后任意增删上面的外观项，这里都会自动重算，
-        # 调用处无需也不应再做尺寸准备。
+        # ── 尺寸自定（定位前提，勿删）── QDialog 弹出前尺寸是 Qt 默认的 640x480，
+        # _place_sub_dialog 靠它选侧/贴边/底部对齐；必须在此按布局实际撑开，
+        # 「谁定义内容、谁保证尺寸正确」内聚本类，调用处不做尺寸准备。
         self.adjustSize()
 
     def _on_breath_toggled(self, on: bool) -> None:
@@ -3164,23 +3130,15 @@ class AppearanceSettingsDialog(QDialog):
 
     def _clamp_dur_input(self, edt: QLineEdit) -> None:
         """渐变时长失焦/回车时：float→向下取整→钳 [1,30] 后回填；
-        非数字回退当前生效值（不动其他框）。
-
-        V12 起只保留时长一项：倍率/休眠倒计时/两档透明度已改滑块，
-        档位换算天然整阶，对应的 _clamp_*_input 输入槽随之删除。
-        """
+        非数字回退当前生效值（不动其他框）。"""
         n = _clamp_dur(edt.text())
         edt.setText(str(n))
 
     def settings(self) -> dict:
-        """收集当前设置：三色非法各自回退原值；时长取整钳 [1,30]（未失焦时
-        直接按同规则解析当前文本）；倍率/休眠倒计时/两档透明度取滑块档位换算
-        出的整阶值（无需再钳制）；休眠透明度按「大于总体则取 10%」规则归一；
-        呼吸开关取复选框状态。"""
+        """收集当前设置：滑块/下拉取档位换算值（无需再钳制）；三色非法回退原值；
+        时长按「向下取整+钳制」解析文本；休眠透明度大于总体时归一 10%。"""
         op = tier_to_value(self.sld_opacity.value(), _OPACITY_SPEC)
-        d1, d2, d3 = (self._dur_value(e, k) for e, k in
-                      zip(self.edit_dur, ("dur_start_mid", "dur_mid_end",
-                                          "dur_end_start")))
+        d1, d2, d3 = (self._dur_value(e) for e in self.edit_dur)
         return {
             "breath": self.chk_breath.isChecked(),
             "color_start": normalize_hex(self.edt_start.text(),
@@ -3197,7 +3155,7 @@ class AppearanceSettingsDialog(QDialog):
             "opacity": op,
             "sleep_opacity": resolve_sleep_opacity(
                 tier_to_value(self.sld_sleep_op.value(), _SLEEP_OP_SPEC), op),
-            # V13 显示缩放：逐单元收集「勾选=启用 + 下拉百分比」
+            # 显示缩放：逐单元收集「勾选=启用 + 下拉百分比」
             "display_scale": {
                 _k: {"enabled": self.scale_checks[_k].isChecked(),
                      "percent": _SCALE_MIN
@@ -3207,18 +3165,18 @@ class AppearanceSettingsDialog(QDialog):
         }
 
     @staticmethod
-    def _dur_value(edt: QLineEdit, key: str) -> int:
+    def _dur_value(edt: QLineEdit) -> int:
         """时长框取值：按「向下取整+钳制」解析当前文本（回车未触发也能取对）。"""
         return _clamp_dur(edt.text())
 
 
 def _apply_appearance_config(cfg: dict) -> None:
-    """光效设置确定后：写盘 + 合并到运行期 CONFIG。"""
+    """外观设置点确定后：合并到运行期 CONFIG + 写盘。"""
     apply_appearance_to_config(cfg)
     try:
         save_appearance_config(cfg)
     except OSError as exc:  # noqa: BLE001
-        _log_crash("aura_config_save", exc)
+        _log_crash("appearance_config_save", exc)
 
 
 # ---------------------------------------------------------------- 主窗口
