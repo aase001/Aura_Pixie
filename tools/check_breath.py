@@ -1520,6 +1520,168 @@ def main() -> int:
     check("恢复透明度 100%",
           M.CONFIG["opacity"] == 100 and M.CONFIG["sleep_opacity"] == 10, "", failures)
 
+    # ---------- 18c 显示缩放（V13：复选框=启用 + 50%~200% 每阶 25%） ----------
+    # 用例一律按 SCALE_UNITS 注册表循环生成，不写死单元数量：
+    # 后续新增缩放子项（如音量、其他单元）只需在注册表加一行，本节自动覆盖，
+    # 不会因为「加了单元没加测试」而漏检。
+    print("\n显示缩放")
+
+    # 整阶吸附：下拉只会给整阶，这里兜手改 yaml / 导入老配置
+    for raw, want in ((100, 100), (50, 50), (200, 200), (60, 50), (62, 50),
+                      (63, 75), (199, 200), (25, 50), (9999, 200), (-3, 50),
+                      ("125", 125), ("abc", 100), (None, 100), (12.5, 50)):
+        got = M._clamp_scale_pct(raw)
+        check(f"缩放百分比吸附 25 阶 {raw!r} → {want}", got == want, f"（实得 {got}）", failures)
+    check("吸附结果恒为 25 的整数倍且在量程内",
+          all(got % 25 == 0 and 50 <= got <= 200
+              for got in (M._clamp_scale_pct(v) for v in (51, 87, 133, 199, 7, 400))),
+          "", failures)
+
+    # 块归一：缺单元补默认、脏键丢弃、两种简写容错
+    empty_blk = M.normalize_scale_block(None)
+    check("空配置 → 每个注册单元都有默认（启用 + 100%）",
+          set(empty_blk) == {k for k, _ in M.SCALE_UNITS}
+          and all(v == {"enabled": True, "percent": 100} for v in empty_blk.values()),
+          f"（{empty_blk}）", failures)
+    check("未注册单元键被丢弃（脏键不长期堆积）",
+          set(M.normalize_scale_block({"ghost": {"enabled": True, "percent": 75}}))
+          == set(empty_blk), "", failures)
+    check("简写容错：只写 bool → 启用+100%；只写数字 → 启用+整阶（137→125）",
+          M.normalize_scale_block({"ball": False})["ball"]
+          == {"enabled": False, "percent": 100}
+          and M.normalize_scale_block({"ball": 137})["ball"]
+          == {"enabled": True, "percent": 125}, "", failures)
+
+    # 因子口径：勾选生效 / 未勾选恒 1.0（配置值保留但不参与渲染）
+    _blk = {"ball": {"enabled": True, "percent": 150},
+            "monitor": {"enabled": False, "percent": 200}}
+    check("勾选单元 → 因子 = 百分比/100",
+          M.display_scale_factor("ball", _blk) == 1.5, "", failures)
+    check("未勾选单元 → 因子恒 1.0（即使 percent=200）",
+          M.display_scale_factor("monitor", _blk) == 1.0, "", failures)
+    check("未知单元 → 因子 1.0（不抛异常）",
+          M.display_scale_factor("nope", _blk) == 1.0, "", failures)
+
+    # 默认态必须等于「不缩放」，否则老用户升级后观感突变
+    M.refresh_geometry(M.normalize_scale_block(None))
+    _base = {n: getattr(M, n) for n in ("HALO_PX", "HOVER_RADIUS",
+                                        "RING_IN", "RING_OUT", "IDLE_SIZE", "ACTIVE_SIZE")}
+    check("默认（100%）几何与基准常量一致（升级观感不变）",
+          _base["HOVER_RADIUS"] == M.CONFIG["size_base"] / 2.0
+          and _base["RING_IN"] == _base["HOVER_RADIUS"] + _base["HALO_PX"] + M.CONFIG["ring_gap"]
+          and _base["RING_OUT"] == _base["RING_IN"] + M.CONFIG["ring_width"]
+          and _base["ACTIVE_SIZE"] == 2 * (_base["RING_OUT"] + 6), f"（{_base}）", failures)
+
+    # 几何随缩放重算：环外径必须严格线性（球与环同心的前提）
+    for pct, f in ((50, 0.5), (75, 0.75), (125, 1.25), (150, 1.5), (200, 2.0)):
+        M.refresh_geometry({"ball": {"enabled": True, "percent": pct},
+                            "monitor": {"enabled": True, "percent": 100},
+                            "quicklaunch": {"enabled": True, "percent": 100}})
+        check(f"缩放 {pct}% → 环外径严格 ×{f}（球环同心）",
+              abs(M.RING_OUT - _base["RING_OUT"] * f) < 1e-9
+              and abs(M.RING_IN - _base["RING_IN"] * f) < 1e-9
+              and abs(M.HOVER_RADIUS - _base["HOVER_RADIUS"] * f) < 1e-9,
+              f"（{M.RING_OUT:.2f} vs {_base['RING_OUT'] * f:.2f}）", failures)
+        d_mid = M.shape_at(0.0)[0]
+        check(f"缩放 {pct}% → 呼吸直径同倍乘算且窗口装得下",
+              abs(d_mid - M.CONFIG["size_base"] * f) < 1e-9
+              and M.IDLE_SIZE >= M.CONFIG["size_breath"] * f, "", failures)
+    M.refresh_geometry(M.normalize_scale_block(None))
+
+    # 用户拍板口径：呼吸倍率只调速度、不调尺寸（乘算只发生在显示缩放）
+    _d1 = M.shape_at(0.5)[0]
+    M.CONFIG["aura_scale"] = 3.0
+    _d3 = M.shape_at(0.5)[0]
+    M.CONFIG["aura_scale"] = 1.0
+    check("呼吸倍率改 1.0→3.0 不影响直径（倍率仍只管速度）",
+          abs(_d1 - _d3) < 1e-9, f"（{_d1} vs {_d3}）", failures)
+
+    # 字号随缩放（扇区名不能放大后显得过小）
+    _src_ring = _inspect_aura.getsource(M.paint_ring)
+    check("扇区字号乘显示缩放（源码含 label_font_px * BALL_SCALE）",
+          "CONFIG[\"label_font_px\"] * BALL_SCALE" in _src_ring, "", failures)
+    _src_shape = _inspect_aura.getsource(M.shape_at)
+    check("球体直径读统一因子 BALL_SCALE（与环同因子，不各自现查配置）",
+          "f = BALL_SCALE" in _src_shape, "", failures)
+
+    # UI 结构：每单元一行「复选框 + 下拉」，下拉恒 7 档
+    dlg_sc = M.AppearanceSettingsDialog()
+    _units = [k for k, _ in M.SCALE_UNITS]
+    check("每个注册单元都有复选框与下拉（按注册表循环，不写死数量）",
+          set(dlg_sc.scale_checks) == set(_units) and set(dlg_sc.scale_combos) == set(_units),
+          f"（{sorted(dlg_sc.scale_checks)}）", failures)
+    check("下拉恒 50%~200% 每阶 25%（7 项）",
+          all(dlg_sc.scale_combos[k].count() == 7
+              and dlg_sc.scale_combos[k].itemText(0) == "50%"
+              and dlg_sc.scale_combos[k].itemText(6) == "200%" for k in _units), "", failures)
+    check("默认打开：全部勾选启用、下拉停在 100%",
+          all(dlg_sc.scale_checks[k].isChecked()
+              and dlg_sc.scale_combos[k].currentText() == "100%"
+              and dlg_sc.scale_combos[k].isEnabled() for k in _units), "", failures)
+    check("未实现单元有提示（说明值先保存、接入后生效）",
+          "尚未" in dlg_sc.scale_checks["monitor"].toolTip()
+          and "尚未" in dlg_sc.scale_checks["quicklaunch"].toolTip()
+          and "尚未" not in dlg_sc.scale_checks["ball"].toolTip(), "", failures)
+
+    # 复选框联动下拉可用性（勾选=启用，取消=禁用并置灰）
+    dlg_sc.scale_checks["ball"].setChecked(False)
+    check("取消勾选 → 该单元下拉置灰",
+          not dlg_sc.scale_combos["ball"].isEnabled(), "", failures)
+    dlg_sc.scale_combos["monitor"].setCurrentIndex(6)   # 200%
+    dlg_sc.scale_checks["monitor"].setChecked(False)
+    s_sc = dlg_sc.settings()
+    check("取消勾选后配置值仍保留（200% 不被清掉，只是不生效）",
+          s_sc["display_scale"]["monitor"] == {"enabled": False, "percent": 200},
+          f"（{s_sc['display_scale']['monitor']}）", failures)
+    check("未勾选单元经因子换算后恒 1.0（禁用即不缩放）",
+          M.display_scale_factor("monitor", s_sc["display_scale"]) == 1.0, "", failures)
+    dlg_sc.scale_checks["monitor"].setChecked(True)
+    check("重新勾选 → 下拉恢复可用且值仍是刚才的 200%",
+          dlg_sc.scale_combos["monitor"].isEnabled()
+          and dlg_sc.scale_combos["monitor"].currentText() == "200%", "", failures)
+    dlg_sc.scale_checks["ball"].setChecked(True)
+    dlg_sc.scale_combos["ball"].setCurrentIndex(5)      # 175%
+    s_sc2 = dlg_sc.settings()
+    check("settings 带出全部注册单元的最新值",
+          s_sc2["display_scale"]["ball"] == {"enabled": True, "percent": 175}
+          and set(s_sc2["display_scale"]) == set(_units),
+          f"（{s_sc2['display_scale']}）", failures)
+    dlg_sc.deleteLater()
+
+    # 应用即重算（漏掉 refresh_geometry 就会出现「保存了但球不变大」的静默失效）
+    M.apply_appearance_to_config({"color_mid": "#283FFE", "aura_scale": 1.0,
+                                  "idle_sec": 60, "opacity": 100, "sleep_opacity": 10,
+                                  "display_scale": {"ball": {"enabled": True, "percent": 150}}})
+    check("应用外观配置后立即重算几何（免重启生效）",
+          abs(M.RING_OUT - _base["RING_OUT"] * 1.5) < 1e-9
+          and abs(M.display_scale_factor("ball") - 1.5) < 1e-9, "", failures)
+    _src_apply = _inspect_aura.getsource(M.apply_appearance_to_config)
+    check("源码看守：apply_appearance_to_config 内含 refresh_geometry 调用",
+          "refresh_geometry(" in _src_apply, "", failures)
+    _src_load = _inspect_aura.getsource(M.main)
+    check("源码看守：启动时先应用配置再建球体窗口",
+          _src_load.index("apply_appearance_to_config") < _src_load.index("AuraBall()"),
+          "", failures)
+    M.apply_appearance_to_config({"color_mid": "#283FFE", "aura_scale": 1.0,
+                                  "idle_sec": 60, "opacity": 100, "sleep_opacity": 10,
+                                  "display_scale": M.normalize_scale_block(None)})
+    check("复位到 100% 后几何回到基准（后续断言不受污染）",
+          abs(M.RING_OUT - _base["RING_OUT"]) < 1e-9, "", failures)
+
+    # 配置往返：导入/合并链路归一缩放块
+    merged_sc = M.merge_settings_with_defaults(
+        {"appearance": {"color_mid": "#123456",
+                        "display_scale": {"ball": {"enabled": True, "percent": 137}}}})
+    check("导入配置 → 缩放块整块归一并吸附整阶（137 → 125）",
+          merged_sc["appearance"]["display_scale"]["ball"]
+          == {"enabled": True, "percent": 125}
+          and set(merged_sc["appearance"]["display_scale"]) == set(_units),
+          f"（{merged_sc['appearance']['display_scale']}）", failures)
+    check("出厂默认含全部注册单元的缩放项",
+          set(M.default_settings()["appearance"]["display_scale"]) == set(_units), "", failures)
+    check("配置注释头提到显示缩放块",
+          "display_scale" in M.SETTINGS_HEADER and "缩放" in M.SETTINGS_HEADER, "", failures)
+
     # ---------- 19b 球心位置记忆（window.pos_x / pos_y） ----------
     print("\n球心位置记忆")
     pos_tmp = os.path.join(tempfile.mkdtemp(prefix="aura_pos_"), "s.yaml")

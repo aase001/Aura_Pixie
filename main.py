@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QColorDialog,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -107,6 +108,15 @@ CONFIG = {
     "idle_sec": 60,             # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停+透明度10%（30~600，每阶30）
     "opacity": 100,             # 总体透明度（%）：球体渲染 alpha 缩放，范围 10~100，默认 100
     "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 5~20（每阶5），默认 10（超过总体透明度则存 10）
+    # —— V13 显示缩放：每单元 {enabled: 勾选启用, percent: 50~200 且为 25 的整数倍} ——
+    #   ball=球体及扇形（直径/光晕/环几何/扇区字号，呼吸尺寸算完后再乘本系数）
+    #   monitor=资源监视单元、quicklaunch=快捷启动单元（配置先落地，对应 UI 待开发）
+    #   未勾选（enabled=false）的单元恒按 100% 生效，percent 值保留但不参与渲染。
+    "display_scale": {
+        "ball": {"enabled": True, "percent": 100},
+        "monitor": {"enabled": True, "percent": 100},
+        "quicklaunch": {"enabled": True, "percent": 100},
+    },
     "fps": 60,
 
     "glow_px": 3.0,
@@ -193,15 +203,108 @@ PLACEHOLDER_COLOR = QColor("#9AA0A6")
 MIN_SECTORS, MAX_SECTORS = 2, 9
 CREATE_NO_WINDOW = 0x08000000
 
+# ---------------------------------------------------------------- 显示缩放
+# V13：外观窗「显示缩放」——每个单元一份（复选框=启用/禁用 + 50%~200%，每阶 25%）。
+# 未勾选的单元恒按 100% 处理（因子 1.0），配置值保留但不生效。
+# 首批三个单元，后续新增只需在此表加一行 + 渲染处调 display_scale_factor(键)。
+SCALE_UNITS = (
+    ("ball", "球体及扇形"),          # 球体直径/光晕/扇环几何/扇区字号（渲染已接入）
+    ("monitor", "资源监视单元"),      # 预留给后续资源监视窗（MonitorDialog 尚未实现）
+    ("quicklaunch", "快捷启动单元"),  # 预留给后续快捷启动单元（尚未开发）
+)
+_SCALE_MIN, _SCALE_MAX, _SCALE_STEP = 50, 200, 25
+
+
+def _clamp_scale_pct(v) -> int:
+    """显示缩放百分比就近吸附到 25 的整数倍并夹进 [50,200]；非法回退 100。
+
+    界面下拉只会给整阶值，这里兜的是手改 yaml / 导入老配置的场景
+    （同 V12 滑块「档位制 + 读盘钳制」的分工思路）。
+    """
+    try:
+        n = int(round(float(v)))
+    except (TypeError, ValueError):
+        return 100
+    n = max(_SCALE_MIN, min(_SCALE_MAX, n))
+    return int(round(n / _SCALE_STEP) * _SCALE_STEP)
+
+
+def normalize_scale_block(raw) -> dict:
+    """把配置里的 display_scale 块归一为 {unit: {"enabled": bool, "percent": int}}。
+
+    缺失单元补默认（启用 + 100%）；未注册的单元键直接丢弃，避免脏键长期堆积。
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    out = {}
+    for key, _label in SCALE_UNITS:
+        item = raw.get(key)
+        if isinstance(item, dict):
+            en, pct = item.get("enabled"), item.get("percent")
+        elif isinstance(item, bool):
+            en, pct = item, 100            # 容错：只写了开关
+        elif isinstance(item, (int, float)):
+            en, pct = True, item           # 容错：只写了百分比
+        else:
+            en = pct = None                # 缺失 → 走默认
+        out[key] = {
+            "enabled": bool(en) if isinstance(en, bool) else True,
+            "percent": _clamp_scale_pct(pct) if pct is not None else 100,
+        }
+    return out
+
+
+def display_scale_factor(unit: str, block: dict | None = None) -> float:
+    """某单元的显示缩放因子：勾选启用 → 百分比/100；未勾选或未知单元 → 1.0。"""
+    blk = block if isinstance(block, dict) else CONFIG.get("display_scale") or {}
+    item = blk.get(unit)
+    if not isinstance(item, dict) or not item.get("enabled", False):
+        return 1.0
+    return _clamp_scale_pct(item.get("percent", 100)) / 100.0
+
+
 TARGET_FRAME_MS = 1000.0 / CONFIG["fps"]
 HEARTBEAT_MS = 15   # 心跳比 16.667ms 密，逐拍跨帧点才重绘，平均正好 60FPS
 
-HALO_PX = CONFIG["glow_px"]
-HOVER_RADIUS = CONFIG["size_base"] / 2.0
-RING_IN = HOVER_RADIUS + HALO_PX + CONFIG["ring_gap"]
-RING_OUT = RING_IN + CONFIG["ring_width"]
-IDLE_SIZE = int(CONFIG["size_breath"] + 2 * HALO_PX + 4)
-ACTIVE_SIZE = int(2 * (RING_OUT + 6))
+# —— 几何量：一律 = 基准值 × 球体显示缩放，由 refresh_geometry() 统一重算 ——
+# 下游 40 余处（绘制/命中/吸附/摆放）直接读这些模块级全局名，逐处包乘算极易漏，
+# 所以缩放只在此处生效一次：改缩放 → 重算这几个量 → 全链路自动跟上。
+_GEOM_BASE = {
+    "HALO_PX": CONFIG["glow_px"],
+    "HOVER_RADIUS": CONFIG["size_base"] / 2.0,
+    "RING_GAP": CONFIG["ring_gap"],
+    "RING_WIDTH": CONFIG["ring_width"],
+}
+BALL_SCALE = 1.0   # 当前生效的球体缩放因子，唯一写入口 = refresh_geometry()
+
+
+def refresh_geometry(scale_block: dict | None = None) -> None:
+    """按球体显示缩放重算全部几何量（原地改写模块级全局，函数内必须声明 global）。
+
+    设计要点（V13）：
+      · **单一来源**：缩放因子同时落到 BALL_SCALE，绘制侧（球体直径、扇区字号）
+        与几何侧（环/窗口尺寸）读同一个值——若各自去查 CONFIG，改缩放后会出现
+        「窗口已放大但直径仍按旧系数画」的错位；
+      · **绝对量**（光晕、环宽、环间隙）随缩放乘算——它们直接画在像素上；
+      · **球体直径**（size_base/size_breath）不在这里乘，而是在 shape_at() 里
+        乘到「呼吸结果」上（用户拍板口径：先算呼吸尺寸，再乘显示缩放）；
+      · **派生量** RING_IN/RING_OUT/窗口尺寸一律由上面几项推出，保证环与球同心；
+      · **相对量不乘**：ring_pad（感应外容差）是固定像素手感值，snap_margin /
+        warn_* 是行为参数，乘缩放反而会让吸附与判定手感漂移。
+    """
+    global HALO_PX, HOVER_RADIUS, RING_IN, RING_OUT, IDLE_SIZE, ACTIVE_SIZE
+    global BALL_SCALE
+    f = display_scale_factor("ball", scale_block)
+    BALL_SCALE = f
+    b = _GEOM_BASE
+    HALO_PX = b["HALO_PX"] * f
+    HOVER_RADIUS = b["HOVER_RADIUS"] * f
+    RING_IN = HOVER_RADIUS + HALO_PX + b["RING_GAP"] * f
+    RING_OUT = RING_IN + b["RING_WIDTH"] * f
+    IDLE_SIZE = int(CONFIG["size_breath"] * f + 2 * HALO_PX + 4)
+    ACTIVE_SIZE = int(2 * (RING_OUT + 6))
+
+
+refresh_geometry(normalize_scale_block(CONFIG.get("display_scale")))
 
 _WHITE = QColor("#FFFFFF")   # 装饰白：高光层/闪光提亮用
 _FAIL_RED = QColor("#FF5252")
@@ -337,12 +440,17 @@ def breath_cycle_ms() -> int:
 def shape_at(phase: float) -> tuple[float, float, QColor]:
     c_start, c_mid, c_end = breath_colors()
     segs = breath_durations_ms()
+    # 用户拍板口径：球体尺寸 = 「原呼吸尺寸」× 显示缩放。呼吸倍率（aura_scale）
+    # 仍只管动画速度、不碰尺寸；这里乘的是呼吸算完之后的最终直径。
+    # 读 BALL_SCALE（refresh_geometry 写入）而非现查 CONFIG，确保与环几何同因子。
+    f = BALL_SCALE
     if segs is None:
         # 球体呼吸关闭：颜色恒起始色、大小恒基准直径（完全静止）
-        d = CONFIG["size_base"]
+        d = CONFIG["size_base"] * f
         return d, d / 2.0, QColor(c_start)
     ease = ease_at(phase)
-    diameter = CONFIG["size_base"] + (CONFIG["size_breath"] - CONFIG["size_base"]) * ease
+    diameter = (CONFIG["size_base"]
+                + (CONFIG["size_breath"] - CONFIG["size_base"]) * ease) * f
     # 分段渐变必须按 phase（单调时间）切分，总周期 = 各段时长之和；
     # 倍率作为全局速度在相位推进处生效（每段实际耗时 = 设定秒数 ÷ 倍率）。
     # 尺寸 ease 仍按整圈位置映射（一圈 小→大→小），与色彩周期同拍。
@@ -675,9 +783,12 @@ SETTINGS_HEADER = (
     "# Aura Pixie 设置（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml，"
     "由设置/外观界面写回）\n"
     "# 分块：functions = 功能扇区列表；appearance = 外观（breath 呼吸开关 + 起始/过渡/末尾三色 + "
-    "三段渐变时长 dur_* + 倍率 + 透明度；旧块名 aura 仍兼容读取）；"
+    "三段渐变时长 dur_* + 倍率 + 透明度 + 显示缩放 display_scale；旧块名 aura 仍兼容读取）；"
     "autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
     "#       window = 窗口行为（always_on_top = 保持球体置顶；pos_x/pos_y = 球心记忆位置）。\n"
+    "# display_scale = 每单元 {enabled: 勾选启用, percent: 50~200 且为 25 的整数倍}，"
+    "未勾选的单元恒按 100% 生效；当前单元："
+    + " / ".join(f"{_k}（{_v}）" for _k, _v in SCALE_UNITS) + "。\n"
     "# 扇区等分数 = functions 中 active: true 的条目数；最少 2，最多 9（超出只取前 9）；"
     "扇区顺序 = 条目顺序。\n"
     "# code 格式：默认 py 代码；以 cmd: 开头走 CMD，以 ps:/powershell: 开头走 PowerShell 5.1，"
@@ -796,7 +907,9 @@ def default_settings() -> dict:
                        "color_end": "#FFFFFF",
                        "dur_start_mid": 5, "dur_mid_end": 5, "dur_end_start": 5,
                        "aura_scale": 1.0, "idle_sec": 60,
-                       "opacity": 100, "sleep_opacity": 10},
+                       "opacity": 100, "sleep_opacity": 10,
+                       # 按注册表生成，保证与 SCALE_UNITS 单一来源、不会漏项
+                       "display_scale": normalize_scale_block(None)},
         "autostart": {"enabled": False},
         "window": {"always_on_top": False, "pos_x": None, "pos_y": None},
     }
@@ -818,6 +931,12 @@ def _merge_config(base: dict, src: dict) -> dict:
         # base 里残留的旧 aura 块删除，避免同一份配置出现两份外观设置。
         base["appearance"] = {**(base.get("appearance") or {}), **app_blk}
         base.pop("aura", None)
+    # 显示缩放归一：块在 appearance **内部**，上面是字段级 merge，脏值会原样
+    # 漏进来（如手改 percent: 137 直接落盘），所以合并完整块归一一次——
+    # 缺单元补默认、非整阶吸附、未注册脏键丢弃。
+    app = base.get("appearance")
+    if isinstance(app, dict):
+        app["display_scale"] = normalize_scale_block(app.get("display_scale"))
     astart = src.get("autostart")
     if isinstance(astart, dict):
         base["autostart"] = {**(base.get("autostart") or {}), **astart}
@@ -1585,7 +1704,7 @@ def paint_ring(painter: QPainter, size: int, sectors: list[dict], progress: floa
                 pen = with_alpha(text_color, round(255 * fade))
             paint_arc_label(painter, cx, cy, (RING_IN + r_out) / 2.0,
                             sector_center_deg(i, n), label,
-                            CONFIG["label_font_px"], pen,
+                            CONFIG["label_font_px"] * BALL_SCALE, pen,
                             CONFIG["label_spacing_em"], step - gap - 4.0)
 
 
@@ -2766,6 +2885,9 @@ def load_appearance_config() -> dict:
         "sleep_opacity": resolve_sleep_opacity(
             data.get("sleep_opacity", CONFIG["sleep_opacity"]),
             data.get("opacity", CONFIG["opacity"])),
+        # V13 显示缩放：随外观块一起读；老配置无此键 → 归一后全单元 100% 启用
+        "display_scale": normalize_scale_block(
+            data.get("display_scale", CONFIG["display_scale"])),
     }
     return out
 
@@ -2795,6 +2917,10 @@ def save_appearance_config(cfg: dict) -> None:
         "sleep_opacity": resolve_sleep_opacity(
             cfg.get("sleep_opacity", CONFIG["sleep_opacity"]),
             cfg.get("opacity", CONFIG["opacity"])),
+        # V13：整块归一后写入（只保留已注册单元，脏键不落盘）；
+        # 调用方没带这个键时以 CONFIG 现值兜底，避免把用户已设缩放静默重置。
+        "display_scale": normalize_scale_block(
+            cfg.get("display_scale", CONFIG["display_scale"])),
     }
     try:
         write_setting(data)
@@ -2803,7 +2929,11 @@ def save_appearance_config(cfg: dict) -> None:
 
 
 def apply_appearance_to_config(cfg: dict) -> None:
-    """把光效配置合并进 CONFIG（运行期立即生效，无需重启）。"""
+    """把外观配置合并进 CONFIG（运行期立即生效，无需重启）。
+
+    显示缩放变更后必须立刻 refresh_geometry()——环几何/球体窗口尺寸是模块级
+    全局量，不重算就得重启才生效（同 V10 置顶「写盘后对表」的即时性要求）。
+    """
     CONFIG["breath"] = bool(cfg.get("breath", CONFIG["breath"]))
     CONFIG["color_start"] = cfg.get("color_start", CONFIG["color_start"])
     CONFIG["color_mid"] = cfg["color_mid"]
@@ -2819,6 +2949,9 @@ def apply_appearance_to_config(cfg: dict) -> None:
     CONFIG["sleep_opacity"] = resolve_sleep_opacity(
         cfg.get("sleep_opacity", CONFIG["sleep_opacity"]),
         cfg.get("opacity", CONFIG["opacity"]))
+    CONFIG["display_scale"] = normalize_scale_block(
+        cfg.get("display_scale", CONFIG["display_scale"]))
+    refresh_geometry(CONFIG["display_scale"])
 
 
 def normalize_hex(text: str, fallback: str) -> str:
@@ -2960,6 +3093,35 @@ class AppearanceSettingsDialog(QDialog):
         _grid_slider_row("总体透明度", self.sld_opacity, self.lbl_opacity)
         _grid_slider_row("休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
 
+        # ── V13：显示缩放（50%~200%，每阶 25%）── 复选框=启用，下拉=倍数 ──
+        # 未勾选的单元恒按 100% 生效（下拉同时置灰），配置值保留但不参与渲染。
+        # monitor / quicklaunch 两单元本批只做配置落地，对应 UI 尚未开发，
+        # 接上后由各自渲染处调 display_scale_factor("键名") 即自然生效。
+        grid.addWidget(QLabel("显示缩放（勾选=启用）", self))
+        self.scale_checks, self.scale_combos = {}, {}
+        scale_cfg = normalize_scale_block(cur.get("display_scale"))
+        _pending_tip = {"monitor": "资源监视单元尚未实现，设置先保存，界面接入后生效",
+                        "quicklaunch": "快捷启动单元尚未开发，设置先保存，界面接入后生效"}
+        for _key, _label in SCALE_UNITS:
+            _item = scale_cfg[_key]
+            chk = QCheckBox(_label, self)
+            chk.setChecked(_item["enabled"])
+            chk.setToolTip(_pending_tip.get(
+                _key, "勾选=按右侧倍数缩放；取消=该单元恒按 100% 显示"))
+            cmb = QComboBox(self)
+            for _pct in range(_SCALE_MIN, _SCALE_MAX + 1, _SCALE_STEP):
+                cmb.addItem(f"{_pct}%")
+            cmb.setCurrentIndex((_item["percent"] - _SCALE_MIN) // _SCALE_STEP)
+            cmb.setEnabled(_item["enabled"])
+            chk.toggled.connect(cmb.setEnabled)
+            _row = QHBoxLayout()
+            _row.addWidget(chk)
+            _row.addStretch(1)
+            _row.addWidget(cmb)
+            grid.addLayout(_row)
+            self.scale_checks[_key] = chk
+            self.scale_combos[_key] = cmb
+
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                | QDialogButtonBox.StandardButton.Cancel, self)
         box.accepted.connect(self.accept)
@@ -3035,6 +3197,13 @@ class AppearanceSettingsDialog(QDialog):
             "opacity": op,
             "sleep_opacity": resolve_sleep_opacity(
                 tier_to_value(self.sld_sleep_op.value(), _SLEEP_OP_SPEC), op),
+            # V13 显示缩放：逐单元收集「勾选=启用 + 下拉百分比」
+            "display_scale": {
+                _k: {"enabled": self.scale_checks[_k].isChecked(),
+                     "percent": _SCALE_MIN
+                     + self.scale_combos[_k].currentIndex() * _SCALE_STEP}
+                for _k, _label in SCALE_UNITS
+            },
         }
 
     @staticmethod
