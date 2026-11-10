@@ -43,8 +43,10 @@ import time
 import winreg
 
 import yaml
-from PySide6.QtCore import (QByteArray, QElapsedTimer, QEvent, QMimeData, QPoint,
-                            QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer, Signal)
+from PySide6.QtCore import (QByteArray, QElapsedTimer, QEvent, QLibraryInfo,
+                            QMimeData, QPoint,
+                            QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer,
+                            QTranslator, Signal)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import (
     QCursor,
@@ -161,6 +163,7 @@ CONFIG = {
     "label_orientation": "auto",
 }
 
+
 def app_executable() -> str:
     """用户实际启动/分发的程序路径（配置文件的定位基准）。
 
@@ -181,6 +184,27 @@ def app_executable() -> str:
 
 
 BASE_DIR = os.path.dirname(app_executable())   # exe/脚本所在目录（迁移源、图标、crash.log 位置）
+
+_zh_translators_keep: list = []   # 翻译器实例须长期持有，否则被回收后 Qt 自动卸载
+
+
+def install_chinese_buttons(app) -> None:
+    """加载 Qt 官方中文翻译，使标准对话框按钮显示中文（确定/取消/关闭/是/否）。
+
+    散落的 QMessageBox / QDialogButtonBox 按钮文案来自 Qt 内置词条，逐处改
+    不现实，官方 qtbase_zh_CN.qm 一次到位。实例存模块级列表长期持有（同
+    QLocalServer 保引用的道理）。加载不到时静默保持英文——外观/帮助两个主
+    对话框另有就地 setText 硬编码中文，不受此处影响。
+    """
+    _zh_translators_keep.clear()
+    tdir = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    for base in ("qtbase_zh_CN", "qt_zh_CN"):
+        tr = QTranslator(app)
+        if tr.load(base, tdir):
+            app.installTranslator(tr)
+            _zh_translators_keep.append(tr)
+            break
+
 # 配置文件主位置：从本版本起迁移到 %LOCALAPPDATA%\Aura_Pixie\setting.yaml
 # （exe 目录可能只读；用户配置统一放系统为当前用户保留的本地应用数据目录）
 _APP_DATA_ROOT = os.environ.get("LOCALAPPDATA") or os.path.join(
@@ -2767,6 +2791,7 @@ def build_code_help_dialog(parent: QWidget | None = None) -> QDialog:
     scroll.setWidget(label)
     box.addWidget(scroll)
     close_btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+    close_btn.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
     close_btn.rejected.connect(dlg.reject)
     close_btn.accepted.connect(dlg.reject)
     box.addWidget(close_btn)
@@ -3094,6 +3119,10 @@ class AppearanceSettingsDialog(QDialog):
 
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                | QDialogButtonBox.StandardButton.Cancel, self)
+        # 就地显式中文：「保存」是本项目语义（官方翻译只会给「确定」），且
+        # 不依赖 .qm 是否随包，保证任何运行环境文案一致。
+        box.button(QDialogButtonBox.StandardButton.Ok).setText("保存")
+        box.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
 
@@ -3886,8 +3915,19 @@ class AuraBall(QWidget):
             self._sub_pending_items = None
 
     def _resize_keep_center(self, size: int) -> None:
+        """改窗口尺寸并保持球心不动（球心是唯一坐标真源）。
+
+        扩容后必须 repaint()：setFixedSize 变大时，Qt 后备存储的**新增区域内容
+        未定义**，只被标脏、等下一帧才补画。首次展开时这块内存恰是系统回收来
+        的其他窗口缓冲，于是屏幕上会闪出「陌生窗口一角」；后续展开复用已分配
+        容量、收起方向又是缩窗（无新增区域），所以只在首次展开出现。repaint()
+        在改尺寸的同一轮里同步整窗重绘，脏区不会出现在任何一帧画面上。
+        """
+        grew = size > self.width()
         self.setFixedSize(size, size)
         self._apply_center()
+        if grew:
+            self.repaint()
 
     # ------------------------------------------------------------ 绘制
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -4487,6 +4527,9 @@ def main(argv: list[str]) -> int:
     sys.unraisablehook = lambda unis: _log_crash("unraisable", unis.exc_value)
 
     app = QApplication(argv)
+    # 标准对话框按钮中文（确定/取消/关闭/是/否）：装在 QApplication 之后、
+    # 任何窗口之前，覆盖全部 QMessageBox 与未就地 setText 的按钮盒。
+    install_chinese_buttons(app)
     # 关键：窗口短暂被关闭/重建（例如弹出设置、菜单）时绝不自动退出事件循环。
     # 上次「点保存程序整体消失」的直接原因之一就是最后可见窗口判定把应用带走了。
     app.setQuitOnLastWindowClosed(False)
