@@ -2592,6 +2592,11 @@ class SettingsDialog(QDialog):
         dlg = AuraSettingsDialog(self)
         dlg.finished.connect(lambda _r: setattr(self, "_aura_dlg", None))
         self._aura_dlg = dlg
+        # V10 起动效窗不固定尺寸、高度由布局撑开：未显式设定尺寸的 Qt 窗口在
+        # 弹出前 width()/height() 仍是默认的 640x480，而 _place_sub_dialog 要靠
+        # 这两个值选侧、贴边、底部对齐，拿假尺寸算就会整体偏移（帮助窗/编辑窗
+        # 有 resize 定尺寸故正常）。先按布局实际尺寸撑开，再定位，位置才准。
+        dlg.adjustSize()
         self._place_sub_dialog(dlg)   # 先定位再 exec，模态栈内位置不被 Qt 打乱
         if dlg.exec() == int(QDialog.DialogCode.Accepted):
             _apply_aura_config(dlg.settings())
