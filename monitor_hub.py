@@ -137,6 +137,10 @@ class SidecarRunner:
 
     重启策略：进程退出/断流超过 stale_sec 秒则重启，连续失败 max_restarts 次后
     静默放弃（上层指标转 not_installed / stale，不弹窗不报错）。
+
+    线程事件分工（防回归）：_stop 只由 stop()/start() 管理，代表「用户要求
+    停止」；读取线程 EOF 只置 _reader_done 并退出自己，绝不置 _stop——
+    否则看守线程会被连带退出，进程崩溃路径上的重启永远走不到。
     """
 
     def __init__(self, exe_path: Optional[str] = None, interval_ms: int = 1000,
@@ -151,7 +155,8 @@ class SidecarRunner:
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
         self._watch: Optional[threading.Thread] = None
-        self._stop = threading.Event()
+        self._stop = threading.Event()       # 仅用户停止请求（stop() 置位）
+        self._reader_done = threading.Event()  # 当前读取线程已退出（watch 重启时清）
         self._lock = threading.Lock()
         self._latest: Optional[dict] = None      # {"ts":..,"sensors":[..]}
         self._meta: Optional[dict] = None        # {"elevated":..,"hwIndex":[..]}
@@ -166,6 +171,8 @@ class SidecarRunner:
         if not self.installed:
             return False
         self._stop.clear()
+        self._reader_done.clear()
+        self._restarts = 0
         try:
             self._spawn()
         except OSError:
@@ -263,30 +270,40 @@ class SidecarRunner:
                         self.on_frame(obj)
                     except Exception:
                         pass
-        self._stop.set()
+        # EOF/异常退出只标记「本读取线程结束」，绝不置 _stop：
+        # _stop 是用户停止信号，置位会连带杀死看守线程，重启逻辑就成死代码。
+        self._reader_done.set()
 
     def _watch_loop(self) -> None:
-        """进程死了或断流 → 重启；连续失败超限 → 静默放弃。"""
+        """进程死了或断流 → 重启；连续失败超限 → 静默放弃。
+
+        循环只看 _stop（用户停止）；读取线程是否退出由 _reader_done 表达，
+        重启时清掉它再拉新线程。放弃时只置 alive=False 并退出本线程，
+        不置 _stop（stop() 仍可正常 join 回收）。
+        """
         while not self._stop.wait(1.0):
             proc_dead = self._proc is not None and self._proc.poll() is not None
-            if not (proc_dead or self.is_stale()):
+            reader_gone = self._reader_done.is_set()
+            if not (proc_dead or reader_gone or self.is_stale()):
                 continue
             if self._restarts >= self.max_restarts:
                 self.alive = False
-                self._stop.set()
                 return
             self._restarts += 1
             try:
                 if self._proc is not None:
                     self._proc.terminate()
+                # 等旧读取线程收尾（EOF 后很快退出），避免新旧线程短暂并存
+                if self._thread is not None and self._thread.is_alive():
+                    self._thread.join(timeout=2.0)
+                self._reader_done.clear()
                 self._spawn()
-                # 重启后读取线程已因 EOF 退出，需要新线程
                 self._thread = threading.Thread(target=self._read_loop,
                                                 name="hwcollector-reader", daemon=True)
                 self._thread.start()
+                self.alive = True
             except OSError:
                 self.alive = False
-                self._stop.set()
                 return
 
 

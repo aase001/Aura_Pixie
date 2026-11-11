@@ -191,6 +191,24 @@ def section_b():
         nv = snap["net.rx"]
         ok(nv.status == mh.STATUS_OK and nv.value is not None and nv.value >= 0,
            "网速非负")
+        # 断连自动重启回归：杀死侧车进程后，看守线程应在限定时间内拉起新进程并恢复出帧。
+        # 旧缺陷：读取线程 EOF 置位共享 _stop，看守线程连带退出，重启永远走不到。
+        old_proc = hub.runner._proc
+        if old_proc is not None:
+            old_proc.terminate()
+            seq_before = (hub.runner.latest_frame() or {}).get("seq", 0)
+            recovered, new_proc = False, None
+            t_end = time.time() + 15.0
+            while time.time() < t_end:
+                time.sleep(0.3)
+                new_proc = hub.runner._proc
+                frame = hub.runner.latest_frame() or {}
+                if (new_proc is not None and new_proc is not old_proc
+                        and new_proc.poll() is None
+                        and frame.get("seq", 0) > seq_before):
+                    recovered = True
+                    break
+            ok(recovered, "杀死侧车后看守线程自动重启并恢复出帧")
     # 停止后进程必须回收
     hub.stop()
     time.sleep(0.3)
