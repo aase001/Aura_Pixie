@@ -211,7 +211,7 @@ _APP_DATA_ROOT = os.environ.get("LOCALAPPDATA") or os.path.join(
     os.path.expanduser("~"), "AppData", "Local")
 APP_CONFIG_DIR = os.path.join(_APP_DATA_ROOT, "Aura_Pixie")
 CONFIG_PATH = os.path.join(APP_CONFIG_DIR, "setting.yaml")   # 统一配置文件（functions+appearance+后续块）
-SETTINGS_PATH = CONFIG_PATH
+SETTINGS_PATH = CONFIG_PATH   # 历史别名：旧代码/自检按此名引用，两者恒指向同一文件
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
 RUNNER_DIR = os.path.join(tempfile.gettempdir(), "AuraPixie")   # py 代码临时脚本目录
 
@@ -1731,7 +1731,6 @@ def paint_ring(painter: QPainter, size: int, sectors: list[dict], progress: floa
     text_color = choose_text_color(fill_color)
 
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.setFont(QFont("Microsoft YaHei UI", 8))
     for i, sec in enumerate(sectors):
         start = sector_center_deg(i, n) - (step - gap) / 2.0
         span = step - gap
@@ -4299,19 +4298,12 @@ class AuraBall(QWidget):
         # 含成对特殊标记（次级功能）时，执行「主指令」（标记前）；无标记原样执行
         parsed = parse_special_sections(code)
         if parsed["err"]:
-            err = parsed["err"]
-            run_ok = False
-        elif parsed["items"]:
-            main_code = parsed["main"]
-            if not main_code.strip():
-                return   # 仅含次级功能、主指令为空 → 只收起不执行、不闪红
-            try:
-                err = run_code(main_code)
-            except Exception as exc:  # noqa: BLE001
-                _log_crash("run_code", exc)
-                err = f"启动失败：{exc}"
-            run_ok = err is None
+            err, run_ok = parsed["err"], False
         else:
+            if parsed["items"]:
+                code = parsed["main"]
+                if not code.strip():
+                    return   # 仅含次级功能、主指令为空 → 只收起不执行、不闪红
             try:
                 err = run_code(code)
             except Exception as exc:  # noqa: BLE001
@@ -4596,14 +4588,8 @@ def main(argv: list[str]) -> int:
     cleanup_runner_dir()
 
     def _hook(exc_type, exc, tb):
-        import traceback
-        msg = "".join(traceback.format_exception(exc_type, exc, tb))
-        print(f"[未捕获异常]\n{msg}", file=sys.stderr)
-        try:
-            with open(os.path.join(BASE_DIR, "crash.log"), "a", encoding="utf-8") as fh:
-                fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} unhandled ===\n{msg}")
-        except OSError:
-            pass
+        # 与其余回调同一落盘通道（stderr + crash.log），不重复手写日志逻辑
+        _log_crash("unhandled", exc)
 
     sys.excepthook = _hook
     sys.unraisablehook = lambda unis: _log_crash("unraisable", unis.exc_value)
