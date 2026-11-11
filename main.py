@@ -662,6 +662,10 @@ def run_code(text: str) -> str | None:
             proc = _spawn(["cmd.exe", "/c", bat])
         except UnicodeEncodeError:
             # gbk 无法覆盖的字符（生僻字/emoji）兜底退化为旧通道
+            try:
+                os.remove(bat)   # 半截 bat 已无用，顺手清理（不留给 24h 残留清扫）
+            except OSError:
+                pass
             one_line = " & ".join(ln.strip() for ln in payload.splitlines() if ln.strip())
             proc = _spawn(["cmd.exe", "/c", one_line])
             _log_crash("cmd_unicode_fallback",
@@ -697,6 +701,24 @@ def run_code(text: str) -> str | None:
 
 # 本会话派发的一次性 py 脚本 [(进程, 路径)]；退出时只删已结束的，绝不等待。
 SESSION_RUNNERS: list[tuple[subprocess.Popen, str]] = []
+
+
+def prune_session_runners() -> None:
+    """回收已结束的派发子进程：移出列表并删其临时脚本。
+
+    长会话里每次点击都 append，句柄只增不减会持续累积；心跳低频调用本函数
+    清理。只动 poll() 非 None（已结束）的条目，绝不等待、绝不触碰运行中进程。
+    """
+    kept: list[tuple[subprocess.Popen, str]] = []
+    for proc, path in SESSION_RUNNERS:
+        if proc.poll() is None:
+            kept.append((proc, path))
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    SESSION_RUNNERS[:] = kept
 
 
 def cleanup_runner_dir() -> None:
@@ -755,10 +777,15 @@ def build_code_test(text: str):
                         fh.write(ln.rstrip() + "\r\n")
             argv = ["cmd.exe", "/c", bat]
         except UnicodeEncodeError:
+            try:
+                os.remove(bat)   # 半截 bat 已无用，顺手清理（与 run_code 同口径）
+            except OSError:
+                pass
             one_line = " & ".join(ln.strip() for ln in payload.splitlines()
                                   if ln.strip())
             argv = ["cmd.exe", "/c", one_line]
-        cleanup = [bat]
+            bat = None
+        cleanup = [bat] if bat else []
     elif kind == "ps":
         enc = base64.b64encode(payload.encode("utf-16-le")).decode("ascii")
         argv = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -3279,6 +3306,7 @@ class AuraBall(QWidget):
         self._last_ms = 0
         self._last_poll_ms = 0
         self._last_frame = -1
+        self._last_prune_ms = 0            # 上次回收已结束子进程句柄的时刻（低频）
         self.frames_drawn = 0
         self.polls = 0                     # 高频采样次数（自检验响应频率用）
 
@@ -3449,6 +3477,13 @@ class AuraBall(QWidget):
             self._note_motion_settle(dt_ms)
         except Exception as exc:  # noqa: BLE001
             _log_crash("motion_settle", exc)
+        # 低频回收已结束的派发子进程句柄（30s 一次，防长会话只增不减）
+        if elapsed - self._last_prune_ms >= 30000:
+            self._last_prune_ms = elapsed
+            try:
+                prune_session_runners()
+            except Exception as exc:  # noqa: BLE001
+                _log_crash("prune_runners", exc)
         self.frames_drawn += 1
         self.update()
 
