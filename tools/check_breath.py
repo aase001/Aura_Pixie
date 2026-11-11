@@ -1992,6 +1992,33 @@ def main() -> int:
                 os.remove(p)
             except OSError:
                 pass
+
+    # 大输出不死锁回归：PIPE 缓冲只有几 KB，超量子进程会阻塞在写管道上永不退出；
+    # 测试通道改临时文件后，256KB 输出必须能正常跑完并完整读回。
+    _big_code = "import sys\nsys.stdout.write('x' * 262144)"
+    _kb, _pb, argv_big, cl_big, err_big = M.build_code_test(_big_code)
+    check("大输出测试构造合法", err_big == "" and argv_big is not None,
+          f"（err={err_big!r}）", failures)
+    _big_ok, _big_len = False, -1
+    if argv_big is not None:
+        _proc_big, _out_big, _err_big = M._test_spawn(argv_big)
+        try:
+            _proc_big.wait(timeout=20)
+            with open(_out_big, "rb") as _fh:
+                _big_len = len(_fh.read())
+            _big_ok = _proc_big.returncode == 0 and _big_len == 262144
+        except Exception:   # noqa: BLE001 - 超时/读取失败都算未通过
+            _big_ok = False
+        finally:
+            if _proc_big.poll() is None:
+                _proc_big.terminate()
+            for _p in cl_big + [_out_big, _err_big]:
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
+    check("大输出（256KB）测试通道不死锁且输出完整", _big_ok,
+          f"（读回 {_big_len} 字节）", failures)
     dlg_ce.deleteLater()
 
     # 定位回归：右键「高级编辑」必须命中当前行，不能偏到上一行

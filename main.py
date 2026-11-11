@@ -782,10 +782,35 @@ def build_code_test(text: str):
     return kind, payload, argv, cleanup, ""
 
 
-def _test_spawn(argv: list[str]) -> subprocess.Popen:
-    """以测试模式启动子进程：静默 + 捕获 stdout/stderr（不阻塞 UI，返回后可轮询）。"""
-    return subprocess.Popen(argv, cwd=BASE_DIR, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
+def _test_spawn(argv: list[str]) -> tuple[subprocess.Popen, str, str]:
+    """以测试模式启动子进程：静默 + 捕获 stdout/stderr（不阻塞 UI，返回后可轮询）。
+
+    输出重定向到临时文件而非 PIPE：PIPE 缓冲只有几 KB，被测指令输出超量时
+    子进程会阻塞在写管道上永不退出（测试超时也只是停轮询，进程成后台僵尸）。
+    文件无缓冲上限，进程结束后由调用方读回内容并删除。
+    返回 (进程, stdout 文件路径, stderr 文件路径)。
+    """
+    os.makedirs(RUNNER_DIR, exist_ok=True)
+    stamp = f"{os.getpid()}_{int(time.time() * 1000)}"
+    out_path = os.path.join(RUNNER_DIR, f"tst_{stamp}.out")
+    err_path = os.path.join(RUNNER_DIR, f"tst_{stamp}.err")
+    fh_out = open(out_path, "wb")
+    fh_err = open(err_path, "wb")
+    try:
+        proc = subprocess.Popen(argv, cwd=BASE_DIR, stdout=fh_out, stderr=fh_err,
+                                creationflags=CREATE_NO_WINDOW)
+    except BaseException:
+        fh_out.close()
+        fh_err.close()
+        for p in (out_path, err_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise
+    fh_out.close()
+    fh_err.close()   # 子进程持有各自句柄副本，父进程即可关闭
+    return proc, out_path, err_path
 
 
 # ---------------------------------------------------------------- 配置读写
@@ -2061,6 +2086,7 @@ class CodeEditDialog(QDialog):
         # 避免残留临时脚本；锁防止回调竞态后关闭窗口再访问表项。
         self._proc = None
         self._cleanup = []
+        self._out_files: list[str] = []   # 测试输出临时文件（结束后读回并删除）
         self._closed = False
         self.finished.connect(self._on_finished)
 
@@ -2142,7 +2168,7 @@ class CodeEditDialog(QDialog):
             self._show_result("指令未通过校验，未执行", err)
             return
         try:
-            proc = _test_spawn(argv)
+            proc, out_path, err_path = _test_spawn(argv)
         except Exception as exc:   # noqa: BLE001 - 启动失败（解释器缺失等）
             _log_crash("code_edit_test_spawn", exc)
             for p in cleanup:
@@ -2154,6 +2180,7 @@ class CodeEditDialog(QDialog):
             return
         self._proc = proc
         self._cleanup = cleanup
+        self._out_files = [out_path, err_path]
         self.result.setPlainText("")
         self.result.setPlaceholderText("正在执行…")
         self.result.show()
@@ -2174,16 +2201,24 @@ class CodeEditDialog(QDialog):
         if proc.poll() is None:
             if time.time() >= self._deadline:
                 self._stop_polling()
+                # 进程仍在后台写输出文件：此时不删文件（避免占用冲突），
+                # 留给 cleanup_runner_dir 的 24h 残留清理
+                self._out_files = []
                 self._show_result(
                     "已超时（超过 %g 秒）" % TEST_RUN_TIMEOUT_SEC,
                     "指令仍在后台运行完成。正式执行（扇区点击）同样不等待，属正常行为。")
             return
+        # 进程已结束：从临时文件读回全部输出（无 PIPE 缓冲上限，不会死锁）
+        out_files, self._out_files = self._out_files, []
         try:
-            out, err_out = proc.communicate(timeout=2)
-        except Exception:   # noqa: BLE001 - 读取残留输出失败不致命
+            with open(out_files[0], "rb") as fh:
+                out = fh.read()
+            with open(out_files[1], "rb") as fh:
+                err_out = fh.read()
+        except (OSError, IndexError):   # 读取失败不致命
             out, err_out = b"", b""
         self._stop_polling()
-        self._cleanup_run(cleanup)
+        self._cleanup_run(cleanup + out_files)
         text_out = out.decode("utf-8", "replace").rstrip()
         text_err = err_out.decode("utf-8", "replace").rstrip()
         code = proc.returncode or 0
@@ -2257,6 +2292,14 @@ class CodeEditDialog(QDialog):
         except RuntimeError:
             pass
         self._proc = None   # 不再持有；进程若未结束会自行跑完（与正式执行一致）
+        # 输出文件：进程已结束才删；仍在跑则留给 24h 残留清理（避免占用冲突）
+        if self._out_files:
+            for p in self._out_files:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            self._out_files = []
 CODE_HELP_TEXT = (
     "【指令格式说明】\n\n"
     "指令有多种格式，先写「格式名: 」，后跟指令内容；不写格式时默认为 Python（py）。\n"
