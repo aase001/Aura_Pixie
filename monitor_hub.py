@@ -69,15 +69,11 @@ def find_sidecar() -> Optional[str]:
     env = os.environ.get("AURA_HWCOLLECTOR")
     if env and os.path.isfile(env):
         return env
-    cands = []
-    try:  # Nuitka onefile：内嵌数据解压在 __file__ 同级
-        cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), _SIDECAR_NAME))
-    except NameError:
-        pass
+    # Nuitka onefile：内嵌数据解压在 __file__ 同级；源码期在 collector/pub
     here = os.path.dirname(os.path.abspath(__file__))
-    cands += [
-        os.path.join(here, "collector", "pub", _SIDECAR_NAME),
+    cands = [
         os.path.join(here, _SIDECAR_NAME),
+        os.path.join(here, "collector", "pub", _SIDECAR_NAME),
     ]
     for p in cands:
         if os.path.isfile(p):
@@ -323,8 +319,6 @@ def _match_gpu_family(hw_name: str, hw_type: str) -> Optional[str]:
     if any(k in n for k in ("nvidia", "geforce", "rtx", "gtx",
                             "radeon", "amd rx", "arc ")) or t == "GpuNvidia" or t == "GpuAmd":
         # Intel Arc 归独显；GpuNvidia/GpuAmd 类型即独显
-        if "arc" in n:
-            return "dedicated"
         return "dedicated"
     if any(k in n for k in ("intel", "uhd", "iris", "hd graphics")) or t in ("GpuIntel",):
         return "integrated"
@@ -342,7 +336,6 @@ class _MapResult:
     fixed: dict[str, tuple[float, str]] = field(default_factory=dict)  # key -> (value, sensor)
     disks: list[dict] = field(default_factory=list)   # 每盘: {name, temp, usage_lhm}
     fans: list[dict] = field(default_factory=list)    # {slot, name, value}
-    hit_need_admin: set[str] = field(default_factory=set)  # 明确「有槽位但值为 null」的指标
 
 
 def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
@@ -464,9 +457,6 @@ def _cpu_temp_put(r: _MapResult, val) -> None:
     if val is None:
         return
     r.fixed["cpu.temp"] = (val, "CPU Package")
-
-
-_CPU_TEMP_SLOTS = ("CPU Package", "Core Max", "Core Average", "CPU Core #1")
 
 
 def map_absent_signals(sensors: list[dict]) -> dict[str, str]:
@@ -691,6 +681,15 @@ class PsutilSource:
         return res
 
 
+@dataclass
+class FanInfo:
+    slot: str            # cpu / gpu_d / mobo
+    index: int           # 同槽位内序号，多风扇顺序罗列
+    name: str            # 传感器原始名（"Fan #1"/"CPU Fan"…）
+    value: Optional[float]
+    status: str
+
+
 # ---------------------------------------------------------------------------
 # MetricsHub：聚合出口（UI 只认这一层）
 # ---------------------------------------------------------------------------
@@ -747,6 +746,8 @@ class MetricsHub:
         cache["mem.load"] = (now, mload)
         cache["mem.used"] = (now, mused)
         cache["cpu.freq_ps"] = (now, self.ps.cpu_freq_ghz())
+        # 预留口径（当前无出口）：IO 忙碌率供后续 UI「容量/IO」切换用，
+        # 用户已定硬盘使用率=容量使用率，见 disk_usage_pct
         cache["disk_busy"] = (now, self.ps.disk_busy_pct())
         with self._lock:
             self._ps_cache = cache
@@ -886,7 +887,7 @@ class MetricsHub:
             for slot in _FAN_SLOTS:
                 out[f"fan.{slot}.0"] = mk(f"fan.{slot}.0", None, "sidecar", reason)
 
-        return {k: v for k, v in out.items() if v is not None}
+        return out
 
     def get(self, key: str) -> Optional[Metric]:
         return self.snapshot().get(key)
@@ -911,6 +912,22 @@ class MetricsHub:
             })
         return out
 
+    def list_fans(self) -> list[FanInfo]:
+        """多风扇按槽位顺序罗列（cpu / gpu_d / mobo，同槽位内按出现顺序编号）。"""
+        frame = self.runner.latest_frame()
+        out: list[FanInfo] = []
+        if not frame:
+            return out
+        mr = map_frame(frame, self.runner._meta)
+        counters: dict[str, int] = {slot: 0 for slot in _FAN_SLOTS}
+        for f in mr.fans[: self.max_fans]:
+            slot = f["slot"] if f["slot"] in counters else "mobo"
+            idx = counters[slot]
+            counters[slot] += 1
+            out.append(FanInfo(slot=slot, index=idx, name=f["name"],
+                               value=f["value"], status=STATUS_OK))
+        return out
+
     # ---- 便捷格式化（UI 直接用，避免各处重复换算）----
     @staticmethod
     def fmt(m: Optional[Metric], nd: int = 1) -> str:
@@ -933,36 +950,6 @@ class MetricsHub:
         h, rem = divmod(int(secs), 3600)
         m, s = divmod(rem, 60)
         return f"{h}:{m:02d}:{s:02d}"
-
-
-# 风扇信息对象（list_fans 返回；定义后置以避免前向引用问题）
-@dataclass
-class FanInfo:
-    slot: str            # cpu / gpu_d / mobo
-    index: int           # 同槽位内序号，多风扇顺序罗列
-    name: str            # 传感器原始名（"Fan #1"/"CPU Fan"…）
-    value: Optional[float]
-    status: str
-
-
-# snapshot() 里 list_fans() 需要返回 FanInfo；用真实实现覆盖上面的占位：
-def _list_fans(self: MetricsHub) -> list[FanInfo]:
-    frame = self.runner.latest_frame()
-    out: list[FanInfo] = []
-    if not frame:
-        return out
-    mr = map_frame(frame, self.runner._meta)
-    counters: dict[str, int] = {slot: 0 for slot in _FAN_SLOTS}
-    for f in mr.fans[: self.max_fans]:
-        slot = f["slot"] if f["slot"] in counters else "mobo"
-        idx = counters[slot]
-        counters[slot] += 1
-        out.append(FanInfo(slot=slot, index=idx, name=f["name"],
-                           value=f["value"], status=STATUS_OK))
-    return out
-
-
-MetricsHub.list_fans = _list_fans  # type: ignore[method-assign]
 
 
 def _def(key: str) -> tuple[str, str, str, str]:
