@@ -399,6 +399,36 @@ def main() -> int:
         err = M.run_code("import os\n!!bad!!")
         check("语法错误拒绝执行并返回原因", err is not None and "语法错误" in err
               and set(os.listdir(tmp)) == before, f"（{err}）", failures)
+
+        # C7 句柄回收：已结束条目移出列表并删脚本；运行中条目原样保留
+        _p_done = os.path.join(tmp, "done.py")
+        with open(_p_done, "w", encoding="utf-8") as fh:
+            fh.write("pass")
+        _fake_done = M.subprocess.Popen([M.sys.executable, _p_done])
+        _fake_done.wait(timeout=10)
+        M.SESSION_RUNNERS.append((_fake_done, _p_done))
+        _live_entry = (M.subprocess.Popen([M.sys.executable, "-c",
+                                           "import time; time.sleep(8)"]),
+                       os.path.join(tmp, "live.py"))
+        M.SESSION_RUNNERS.append(_live_entry)
+        M.prune_session_runners()
+        check("句柄回收：已结束条目移除且脚本删除",
+              not os.path.exists(_p_done)
+              and all(pr is not _fake_done for pr, _ in M.SESSION_RUNNERS),
+              "", failures)
+        check("句柄回收：运行中条目保留（绝不触碰）",
+              any(pr is _live_entry[0] for pr, _ in M.SESSION_RUNNERS), "", failures)
+        _live_entry[0].terminate()
+        M.SESSION_RUNNERS[:] = [e for e in M.SESSION_RUNNERS if e is not _live_entry]
+
+        # C8 GBK 兜底：含 gbk 外字符的 cmd 走直连通道，不留半截 bat
+        _bats_before = {n for n in os.listdir(M.RUNNER_DIR) if n.endswith(".bat")}
+        _p_uni = os.path.join(tmp, "uni_out.txt")
+        err = M.run_code(f"cmd: echo \U0001F600 > {_p_uni}")
+        _bats_new = {n for n in os.listdir(M.RUNNER_DIR) if n.endswith(".bat")} - _bats_before
+        check("GBK 外字符兜底直连执行（不留半截 bat）",
+              err is None and not _bats_new and wait_file(_p_uni, app),
+              f"（err={err}, 新增bat={_bats_new or '无'}）", failures)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
