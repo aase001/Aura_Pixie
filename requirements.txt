@@ -1,0 +1,9 @@
+# Aura Pixie 运行依赖（Python 3.12，Windows 10/11）
+# 安装：pip install -r requirements.txt
+# 国内源可加：-i https://pypi.tuna.tsinghua.edu.cn/simple
+PySide6==6.12.0
+PyYAML==6.0.3
+psutil==7.2.2
+
+# 打包分发用（仅开发/打包需要，运行时可不装）
+Nuitka==4.3.1
