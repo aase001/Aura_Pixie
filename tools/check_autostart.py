@@ -192,10 +192,13 @@ st = M.autostart_state()
 check("state.task 实况为 True", st["task"] is True)
 check("state.task_action 解析正确", M._norm_cmd(st["task_action"]) == _norm_expect(M),
       f"（{st['task_action']}）")
-check("编码口径看守：/XML 回读为 UTF-16 且 Command 可解析（防 utf-8 解码回归）",
-      M._task_query_xml() is not None
+check("编码口径看守：假库 XML 为 UTF-16（与真实 schtasks 一致）且 Command 可解析",
+      ft.run(["schtasks.exe", "/Query", "/TN", _TN, "/XML"]).stdout.startswith(b"\xff\xfe")
+      and M._task_query_xml() is not None
       and "<Command>" in M._task_query_xml()
       and M._task_action() is not None)
+check("源码看守：_task_query_xml 按 utf-16 解码（防回归 utf-8 误判重建）",
+      'decode("utf-16"' in _SRC)
 check("旧 registry 字段保留但恒 None（兼容自检不报错）",
       st["registry"] is None and st["registry_value"] is None)
 check("setting.yaml 记录 enabled=true",
@@ -286,8 +289,8 @@ check("源码 _run_value 指向 main.py 绝对路径", os.path.abspath(M.__file_
 M.set_autostart(True)
 check("源码形态开启自启 → 任务命令为 pythonw + main.py",
       pyw in ft.tasks.get(_TN, ""), f"（{ft.tasks.get(_TN)}）")
-check("打包/源码两种形态自愈均不参与判定一致（源码不写正式任务）",
-      M._is_packaged() is False)
+check("源码形态 _run_value 不含打包 exe 路径（两种形态命令口径不混用）",
+      _EXE not in pv)
 
 # ----------------------------- 恢复环境 ------------------------------------
 M.subprocess = _saved["subprocess"]                 # type: ignore[assignment]

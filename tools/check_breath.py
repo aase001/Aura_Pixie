@@ -1,7 +1,7 @@
 """Aura Pixie 离屏自检（不弹可见窗）
 
-覆盖规格
-    1. 球体本体直径 100 → 110 → 100 px；光晕外扩 ≤3px
+覆盖规格（基础 11 项，V9~V13 持续扩展，断言总数以实际运行为准）
+    1. 球体本体直径 100 → 110 → 100 px；光晕外扩 ≤2×glow_px+容差
     2. 颜色 白 → #283FFE → 白；最蓝一帧实际渲染像素为 #283FFE
     3. 帧率 60 FPS 实测
     4. 悬停状态机：球内累计 ≥300ms 展开；不足不展开；离开收起；回入立即展开
@@ -9,10 +9,13 @@
     6. 触发冻结色 + 扇区统一填充 + 文字色随明度反转
     7. 代码格式标准化：py 默认 / cmd: / ps: / powershell:；语法错误拒绝执行
     8. 执行上线：三种终端真实静默执行（无害写文件验证）；点击扇区→闪光→复位
-    9. 设置保存：不退出主程序、扇区按表格顺序即时更新（备份恢复真实配置文件）
+    9. 设置保存：不退出主程序、扇区按表格顺序即时更新（全程隔离 LOCALAPPDATA，
+       不触碰真实配置）
    10. 拖拽排序：move_table_row 行搬移正确；拖后保存 → 扇区顺序随之前移
    11. 项目名规则：≤6 汉字 / 12 字母（混排按宽度单位）；输入即截断；
        弧向文字——竖轴指向球心用旋转矩阵向量点积独立验证，不靠肉眼
+   扩展：单击/双击分流与次级展开、呼吸三态、外观滑块档位制、显示缩放、
+   置顶三根因、休眠顺色、位置记忆、配置迁移、单实例定位、高级编辑窗等
 
 用法
     .venv\\Scripts\\activate
@@ -21,6 +24,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import os
 import shutil
@@ -52,7 +56,7 @@ import main as M  # noqa: E402
 _SELFTEST_SOURCE_DIR = tempfile.mkdtemp(prefix="aura_rootcfg_")
 
 BODY_ALPHA = 200
-GLOW_ALPHA = 4   # 验「光边界 ≤ +3px」必须低阈值，高阈值会截掉淡出尾巴虚报合格
+GLOW_ALPHA = 4   # 验光晕外扩边界必须低阈值，高阈值会截掉淡出尾巴虚报合格
 
 
 def ensure_fonts() -> bool:
@@ -588,9 +592,8 @@ def main() -> int:
     check("恢复幂等：未挂时 clear 无副作用",
           QApplication.overrideCursor() is None, "", failures)
     # 源码级防回归：成立点挂起 + 松开两分支恢复都在
-    import inspect as _insp_cur
-    _src_udt = _insp_cur.getsource(M.AuraBall._update_drag_target)
-    _src_rel = _insp_cur.getsource(M.AuraBall.mouseReleaseEvent)
+    _src_udt = inspect.getsource(M.AuraBall._update_drag_target)
+    _src_rel = inspect.getsource(M.AuraBall.mouseReleaseEvent)
     check("防回归：_update_drag_target 挂载点存在",
           "_set_move_cursor()" in _src_udt, "", failures)
     check("防回归：松手两分支都恢复光标（≥2 处 clear）",
@@ -972,7 +975,7 @@ def main() -> int:
         shutil.copyfile(backup, cfg)
         os.remove(backup)
         restored = yaml.safe_load(open(cfg, encoding="utf-8"))
-        check(f"functions.yaml 已原样恢复（应为 {n_before} 条）",
+        check(f"setting.yaml 已原样恢复（应为 {n_before} 条）",
               len(restored["functions"]) == n_before,
               f"（实得 {len(restored['functions'])} 条）", failures)
 
@@ -987,9 +990,7 @@ def main() -> int:
     bd2._press = {"grab": QPointF(1000, 600), "offset": QPointF(0, 0), "t0": 0.0}  # noqa: SLF001
     # 用真实拖动推进循环（等价 _on_poll 的拖动分支）：
     # 每帧推进 _progress → 应持续衰减，且收完立刻 _on_hidden（解冻呼吸+缩窗）
-    snap_done = None
     for _ in range(10):
-        bd2._elapsed_probe = 50.0
         M.AuraBall._advance_collapse_under_drag(bd2, 33.0, 50.0)  # noqa: SLF001
     check("拖动中进度持续推进（不冻结在半开）",
           bd2._progress <= 0.0 and bd2.state == "hidden",  # noqa: SLF001
@@ -1212,21 +1213,24 @@ def main() -> int:
     check("展开即冻结呼吸", bf._breath_frozen and bf._frozen_phase == 0.25,  # noqa: SLF001
           f"（frozen={bf._breath_frozen}, phase={bf._frozen_phase}）", failures)
     phase_before = bf._phase  # noqa: SLF001
-    for _ in range(10):
-        bf._phase = (bf._phase + 0.03) % 1.0  # noqa: SLF001
-        bf._on_tick() if bf._clock.isValid() else None
-    # _on_tick 依赖真实时钟，这里直接验证冻结标志下的相位锁定逻辑：
-    bf._phase = 0.5  # noqa: SLF001
-    if bf._breath_frozen:
-        bf._phase = bf._frozen_phase  # noqa: SLF001 - 复现 _on_tick 的冻结覆盖
-    check("冻结期间相位被锁在展开瞬间", bf._phase == phase_before,
+    # 走真实 _on_tick 路径：启动时钟后推进心跳，冻结覆盖必须把相位锁回展开瞬间
+    # （旧断言手工复现覆盖逻辑再自比，测的是测试自己；现改为驱动真实代码）
+    bf._clock.start()
+    bf._last_ms = 0
+    bf._last_frame = -1
+    t_end = time.perf_counter() + 0.25
+    while time.perf_counter() < t_end:
+        bf._on_tick()
+        app.processEvents()
+        time.sleep(0.005)
+    check("冻结期间相位被锁在展开瞬间（真实 _on_tick 路径）", bf._phase == phase_before,
           f"（phase={bf._phase}，期望 {phase_before}）", failures)
+    bf._clock.invalidate()
 
     # ── 首次展开闪动修复看守（真机：扩容瞬间露出后备存储的陈旧像素）──────
     # 离屏测不出合成器层面的瞬时闪动，故看守「修复动作本身还在」：扩容必须
     # 同帧 repaint()，且只在变大时做（收起是缩窗、无新增区域，多刷一次白费）。
-    import inspect as _insp_rs
-    _src_rs = _insp_rs.getsource(M.AuraBall._resize_keep_center)
+    _src_rs = inspect.getsource(M.AuraBall._resize_keep_center)
     check("扩容后同步整窗重绘（防首次展开闪出陌生窗口一角）",
           "self.repaint()" in _src_rs and "grew" in _src_rs, "", failures)
     check("重绘仅在扩容方向触发（缩窗不刷）",
@@ -1431,8 +1435,7 @@ def main() -> int:
           and hasattr(dlg_aura2, "sld_opacity") and hasattr(dlg_aura2, "sld_sleep_op"),
           f"（height={dlg_aura2.height()}）", failures)
     # V10 防回归：源码不得再出现固定高度 resize(220, 245)
-    import inspect as _inspect_aura
-    _src_aura = _inspect_aura.getsource(M.AppearanceSettingsDialog.__init__)
+    _src_aura = inspect.getsource(M.AppearanceSettingsDialog.__init__)
     check("外观窗固定高度已移除（源码无 resize(220, 245)）",
           "resize(220, 245)" not in _src_aura, "", failures)
 
@@ -1446,7 +1449,7 @@ def main() -> int:
     # 「内容增减后仍成立」，任何一条被破坏都说明定位又开始跑偏。
     check("外观窗构造末尾自算尺寸（__init__ 含 self.adjustSize()）",
           "self.adjustSize()" in _src_aura, "", failures)
-    _src_open = _inspect_aura.getsource(M.SettingsDialog._open_appearance_settings)
+    _src_open = inspect.getsource(M.SettingsDialog._open_appearance_settings)
     check("外观窗打开处不做尺寸准备（尺寸内聚在类里，不靠调用方补）",
           ".adjustSize(" not in _src_open, "", failures)
     check("外观窗定位前尺寸已到位（构造即真实尺寸，非 Qt 默认 640x480）",
@@ -1640,10 +1643,10 @@ def main() -> int:
           abs(_d1 - _d3) < 1e-9, f"（{_d1} vs {_d3}）", failures)
 
     # 字号随缩放（扇区名不能放大后显得过小）
-    _src_ring = _inspect_aura.getsource(M.paint_ring)
+    _src_ring = inspect.getsource(M.paint_ring)
     check("扇区字号乘显示缩放（源码含 label_font_px * BALL_SCALE）",
           "CONFIG[\"label_font_px\"] * BALL_SCALE" in _src_ring, "", failures)
-    _src_shape = _inspect_aura.getsource(M.shape_at)
+    _src_shape = inspect.getsource(M.shape_at)
     check("球体直径读统一因子 BALL_SCALE（与环同因子，不各自现查配置）",
           "f = BALL_SCALE" in _src_shape, "", failures)
 
@@ -1698,10 +1701,10 @@ def main() -> int:
     check("应用外观配置后立即重算几何（免重启生效）",
           abs(M.RING_OUT - _base["RING_OUT"] * 1.5) < 1e-9
           and abs(M.display_scale_factor("ball") - 1.5) < 1e-9, "", failures)
-    _src_apply = _inspect_aura.getsource(M.apply_appearance_to_config)
+    _src_apply = inspect.getsource(M.apply_appearance_to_config)
     check("源码看守：apply_appearance_to_config 内含 refresh_geometry 调用",
           "refresh_geometry(" in _src_apply, "", failures)
-    _src_load = _inspect_aura.getsource(M.main)
+    _src_load = inspect.getsource(M.main)
     check("源码看守：启动时先应用配置再建球体窗口",
           _src_load.index("apply_appearance_to_config") < _src_load.index("AuraBall()"),
           "", failures)
@@ -1743,16 +1746,18 @@ def main() -> int:
     check("非法坐标不落盘（NaN 守护）", D_pos2["window"]["pos_x"] == 1234.6,
           f"（{D_pos2['window']}）", failures)
     os.remove(pos_tmp)
-    # 启动摆放：无记录 → 右侧中间贴边（main() 逻辑复现）
+    # 启动摆放：无记录 → 右侧中间贴边。源码看守 main() 默认分支公式仍在，
+    # 再验证该公式的几何性质（外缘贴右、垂直居中）。旧断言是同式自比，恒真无效。
+    _src_main = inspect.getsource(M.main)
+    check("源码看守：无位置记录时默认摆放 = 屏幕右侧中间（公式未被改写）",
+          "sx = screen.right() - RING_OUT" in _src_main
+          and "sy = screen.center().y()" in _src_main, "", failures)
     screen_geo = M.QApplication.primaryScreen().availableGeometry()
-    _saved = M.saved_ball_position()
-    if _saved is None:
-        _dx = screen_geo.right() - M.RING_OUT
-        _dy = screen_geo.center().y()
-        check("默认位置 = 屏幕右侧中间、外缘贴右", _dx == screen_geo.right() - M.RING_OUT
-              and _dy == screen_geo.center().y(), f"（({_dx}, {_dy})）", failures)
-    else:
-        print("[跳过] 当前配置已有位置记录，默认位置断言跳过")
+    _dx = screen_geo.right() - M.RING_OUT
+    _dy = screen_geo.center().y()
+    check("默认摆放几何性质：外缘贴右且垂直居中",
+          abs((_dx + M.RING_OUT) - screen_geo.right()) < 1e-9
+          and _dy == screen_geo.center().y(), f"（({_dx}, {_dy})）", failures)
 
     # ---------- 19c 配置主位置与根目录迁移链路（隔离目录） ----------
     print("\n配置主位置与根目录迁移链路")
@@ -1823,7 +1828,7 @@ def main() -> int:
     dlg_top = M.SettingsDialog([{"name": "a", "code": "", "active": False}])
     idx_t = dlg_top.bar.indexOf(dlg_top.chk_topmost)   # noqa: SLF001
     idx_a = dlg_top.bar.indexOf(dlg_top.chk_autostart)  # noqa: SLF001
-    check("设置窗含「保持球体置顶」且位于开机自启动上方",
+    check("设置窗含「保持球体置顶」且位于开机自启动左侧",
           idx_t >= 0 and idx_t < idx_a, f"（topmost@{idx_t} autostart@{idx_a}）", failures)
     dlg_top.deleteLater()
 
@@ -1955,8 +1960,7 @@ def main() -> int:
               f"（写前 {pos_before} 写后 {pos_after}）", failures)
 
         # 22c. 源码防回归：closeEvent 不再调 save_ball_position
-        import inspect as _inspect
-        _src_close = _inspect.getsource(M.AuraBall.closeEvent)
+        _src_close = inspect.getsource(M.AuraBall.closeEvent)
         check("防回归：closeEvent 不再保存坐标",
               "save_ball_position" not in _src_close,
               "（closeEvent 仍含 save_ball_position）", failures)
@@ -2072,8 +2076,7 @@ def main() -> int:
         # 防回归：右键定位必须从全局坐标映射，禁止再出现 viewport().mapFrom(self) 二次换算
         # （旧 bug：Qt6 中 contextMenuEvent 的 pos 已是 viewport 坐标，二次换算会偏上一行；
         #   检查精确到真实调用代码，注释/说明文字里的 "mapFrom(self)" 不计）
-        import inspect as _inspect
-        _src_cm = _inspect.getsource(M.ReorderTable)
+        _src_cm = inspect.getsource(M.ReorderTable)
         check("右键定位修复不回归（源码无二次换算）",
               "self.viewport().mapFrom(self" not in _src_cm
               and "mapFromGlobal" in _src_cm,
@@ -2185,8 +2188,7 @@ py: 1 +
           "（缺少 _pending_sub_sector）", failures)
     check("状态机：_ctx_consumed 已移除（V10 右键不再消费）",
           not hasattr(ball_test, "_ctx_consumed"), "（字段仍存在）", failures)
-    import inspect as _inspect_v10
-    _src_ball = _inspect_v10.getsource(M.AuraBall)
+    _src_ball = inspect.getsource(M.AuraBall)
     check("V10 防回归：_on_right_press 已删除（源码无该函数）",
           "_on_right_press" not in _src_ball, "（源码仍含右键展开处理器）", failures)
     check("V10 防回归：单击确认窗挂 _commit_sub_expand（非旧 _commit_click）",
@@ -2224,8 +2226,7 @@ py: 1 +
     # 8. 行内编辑首行不显示修复（V9 追加）
     #    旧实现 updateEditorGeometry 向上扩展（y 减高出部分）→ 编辑第 1 行时
     #    首行内容被顶出视口不可见；现改为自单元格顶部向下展开、不越出视口。
-    import inspect as _inspect
-    _src_geo = _inspect.getsource(M.MultilineEditDelegate.updateEditorGeometry)
+    _src_geo = inspect.getsource(M.MultilineEditDelegate.updateEditorGeometry)
     check("首行修复：不再向上扩展（源码无 option.rect.y() - 表达式）",
           "- (h - option.rect.height())" not in _src_geo
           and "option.rect.y() -" not in _src_geo,
