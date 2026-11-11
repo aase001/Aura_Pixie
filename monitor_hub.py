@@ -954,10 +954,14 @@ def _def(key: str) -> tuple[str, str, str, str]:
     for row in METRIC_DEFS:
         if row[0] == key:
             return row
+    parts = key.split(".")
     for tpl, label, group, unit in _DISK_DEFS:
-        head, _, _ = tpl.partition(".")
-        if key.startswith(head + ".") and key.split(".")[1].isdigit():
-            return (key, f"{label}·盘{int(key.split('.')[1]) + 1}", group, unit)
+        # 按完整模板匹配：disk.{i}.temp / disk.{i}.usage 两个模板头都是 disk，
+        # 只比前缀会让 usage 恒命中第一个 temp 模板（标签错标成「硬盘温度」）。
+        tparts = tpl.split(".")
+        if (len(parts) == len(tparts) == 3 and parts[0] == tparts[0]
+                and parts[1].isdigit() and parts[2] == tparts[2]):
+            return (key, f"{label}·盘{int(parts[1]) + 1}", group, unit)
     if key.startswith("fan."):
         parts = key.split(".")
         slot = parts[1]

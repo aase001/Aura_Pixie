@@ -129,6 +129,8 @@ def section_a():
 
     # 动态键定义还原
     ok(mh._def("disk.1.temp")[1] == "硬盘温度·盘2", "disk.1 标签")
+    ok(mh._def("disk.0.usage")[1] == "硬盘使用率·盘1", "disk.0.usage 标签（防误标温度）")
+    ok(mh._def("disk.1.usage")[1] == "硬盘使用率·盘2", "disk.1.usage 标签")
     ok(mh._def("fan.gpu_d.0")[1] == "GPU(独显)风扇转速", "风扇标签")
 
     # 格式化
@@ -196,16 +198,18 @@ def section_b():
         old_proc = hub.runner._proc
         if old_proc is not None:
             old_proc.terminate()
-            seq_before = (hub.runner.latest_frame() or {}).get("seq", 0)
+            frame_before = hub.runner.latest_frame()
             recovered, new_proc = False, None
             t_end = time.time() + 15.0
             while time.time() < t_end:
                 time.sleep(0.3)
                 new_proc = hub.runner._proc
-                frame = hub.runner.latest_frame() or {}
+                frame = hub.runner.latest_frame()
+                # 重启后新进程 seq 从 1 重新计数，不能拿 seq 与旧进程比大小；
+                # 判据 = 新进程对象存活 + 帧对象已换新（新进程出了帧）。
                 if (new_proc is not None and new_proc is not old_proc
                         and new_proc.poll() is None
-                        and frame.get("seq", 0) > seq_before):
+                        and frame is not None and frame is not frame_before):
                     recovered = True
                     break
             ok(recovered, "杀死侧车后看守线程自动重启并恢复出帧")
