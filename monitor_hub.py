@@ -346,19 +346,25 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
     sensors = frame.get("sensors", [])
 
     # 独显可能有多块（SLI/工作站）：取 hwOrder 最小的第一块；核显同理。
+    # 先按家族选出 order 最小的目标 hw 名，映射时只采集目标卡，
+    # 其余同家族卡的传感器跳过（否则逐传感器覆盖写入会变成 last-wins 拿错卡）。
     gpu_d_order: Optional[int] = None
     gpu_i_order: Optional[int] = None
+    gpu_d_name: Optional[str] = None
+    gpu_i_name: Optional[str] = None
     fam_by_hw: dict[str, str] = {}
     for h in (meta or {}).get("hwIndex", []):
         fam = _match_gpu_family(h.get("name", ""), h.get("type", ""))
         if fam == "dedicated":
-            fam_by_hw[h["name"]] = "d"
             if gpu_d_order is None or h["order"] < gpu_d_order:
-                gpu_d_order = h["order"]
+                gpu_d_order, gpu_d_name = h["order"], h["name"]
         elif fam == "integrated":
-            fam_by_hw[h["name"]] = "i"
             if gpu_i_order is None or h["order"] < gpu_i_order:
-                gpu_i_order = h["order"]
+                gpu_i_order, gpu_i_name = h["order"], h["name"]
+    if gpu_d_name is not None:
+        fam_by_hw[gpu_d_name] = "d"
+    if gpu_i_name is not None:
+        fam_by_hw[gpu_i_name] = "i"
 
     cpu_clocks: list[float] = []
     vram_total: Optional[float] = None
@@ -390,7 +396,13 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
 
         # ---- GPU ----
         elif hwt.startswith("Gpu"):
-            fam = fam_by_hw.get(hw) or _gpu_family_from_type(hwt)
+            fam = fam_by_hw.get(hw)
+            if fam is None:
+                if meta is not None:
+                    # hwIndex 已选定目标卡：其余同家族卡整卡跳过（多独显防 last-wins）
+                    continue
+                # 无 meta（裸帧调用）退回按类型判家族，保持旧行为
+                fam = _gpu_family_from_type(hwt)
             if fam == "d":
                 if sen == "Load" and name == "GPU Core":
                     r.fixed["gpu_d.load"] = (val, name)

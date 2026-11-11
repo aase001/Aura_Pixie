@@ -106,6 +106,20 @@ def section_a():
     mr2 = mh.map_frame({"sensors": s2}, fake_meta())
     near(mr2.fixed["gpu_d.vram_load"][0], 317 / 6144 * 100, .01, "显存使用率计算兜底")
 
+    # 多独显（SLI/工作站）：取 hwOrder 最小的第一块，第二块不得覆盖（防 last-wins）
+    meta_multi = fake_meta()
+    meta_multi["hwIndex"].append({"type": "GpuNvidia", "name": "RTX 3060 #2",
+                                  "order": 8, "parent": None})
+    s_multi = fake_sensors() + [
+        {"hw": "RTX 3060 #2", "hwType": "GpuNvidia", "parent": None,
+         "sensor": "Load", "name": "GPU Core", "value": 88.0},
+        {"hw": "RTX 3060 #2", "hwType": "GpuNvidia", "parent": None,
+         "sensor": "Temperature", "name": "GPU Core", "value": 77.0},
+    ]
+    mr_multi = mh.map_frame({"sensors": s_multi}, meta_multi)
+    near(mr_multi.fixed["gpu_d.load"][0], 23.0, .01, "多独显取 order 最小首块（负载）")
+    near(mr_multi.fixed["gpu_d.temp"][0], 51.0, .01, "多独显取 order 最小首块（温度）")
+
     # 非管理员空帧：无 CPU 温度族、无存储、无任何风扇行；功耗全 0
     sig = mh.map_absent_signals([
         s for s in fake_sensors()
