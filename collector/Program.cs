@@ -20,8 +20,9 @@ using LibreHardwareMonitor.Hardware;
 //   元信息行 {"meta":true,"pid":..,"elevated":true,"dotnet":"8.0.x",
 //             "lhm":"0.9.6","hwIndex":[{"type":"Gpu","name":"..","parent":null,"order":0}]}
 //   数据行   {"ts":1730000000123,"seq":7,"sensors":[
-//              {"hw":"NVIDIA GeForce RTX 3060","hwType":"Gpu","hwOrder":1,
+//              {"hw":"NVIDIA GeForce RTX 3060","hwType":"Gpu",
 //               "parent":null,"sensor":"Temperature","name":"GPU Core","value":53.0}]}
+//   注：硬件枚举序号只在 meta 行的 hwIndex 里给出（order 字段），数据行不带 hwOrder。
 //
 // 权限：CPU 温度 / CPU 功耗 / 硬盘 SMART 温度 需要管理员权限 + PawnIO 驱动。
 //       非管理员下这些传感器静默缺失（不是报错），故 elevated 字段必须透传给上层判断。
@@ -114,11 +115,7 @@ static int IndexHw(IHardware hw, string parent, ref int order, List<object> bag)
         order = order++,
     });
     foreach (var sub in hw.SubHardware)
-    {
-        var mine = order;
-        IndexHw(sub, hw.Name, ref mine, bag);
-        order = mine;
-    }
+        IndexHw(sub, hw.Name, ref order, bag);   // ref 直传，序号跨子硬件连续递增
     return order;
 }
 
