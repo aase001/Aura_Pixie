@@ -225,7 +225,11 @@ class SidecarRunner:
 
     def is_stale(self) -> bool:
         if self._latest is None:
-            return True
+            # 尚未出帧 ≠ 断流：首帧前的硬件枚举可能超过 stale_sec（本机实测
+            # 5~20s 波动）。进程活着就还在启动宽限期内，交给 wait_first_frame
+            # 的超时窗口兜底；否则看守会把正常启动误判成断流，重启预算耗尽后
+            # 静默放弃，首帧永远等不到。进程已死才按 stale 处理（触发重启）。
+            return self._proc is None or self._proc.poll() is not None
         return (time.time() - self._last_frame_time) > self.stale_sec
 
     # -------------------------------------------------------------- 内部实现 --
@@ -852,17 +856,17 @@ class MetricsHub:
             out["disk.0.temp"] = mk("disk.0.temp", None, "sidecar", st)
             out["disk.0.usage"] = mk("disk.0.usage", None, "sidecar", st)
         for i, d in enumerate(disks):
+            # 与 GPU 各键同口径：侧车断流时旧帧值一律标 stale（展示旧值由 UI 处理），
+            # 不因「值还在」就标 ok；无值时同样落 stale/not_installed。
             st = st_sidecar if not sidecar_ok else STATUS_OK
-            out[f"disk.{i}.temp"] = mk(f"disk.{i}.temp", d["temp"], "sidecar",
-                                       st if d["temp"] is None else STATUS_OK)
+            out[f"disk.{i}.temp"] = mk(f"disk.{i}.temp", d["temp"], "sidecar", st)
             usage = d["usage_lhm"]
             src = "sidecar"
             if usage is None:
                 # SMART 无 Used Space → 按容量匹配到盘符，用分区容量占比兜底
                 usage = self.ps.disk_usage_pct(d.get("total_gb"))
                 src = "psutil"
-            out[f"disk.{i}.usage"] = mk(f"disk.{i}.usage", usage, src,
-                                        st if usage is None else STATUS_OK)
+            out[f"disk.{i}.usage"] = mk(f"disk.{i}.usage", usage, src, st)
 
         # ---- 风扇（多风扇按槽位顺序罗列）----
         fans = self.list_fans()

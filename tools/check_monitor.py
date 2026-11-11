@@ -155,6 +155,27 @@ def section_a():
     ok(mh.MetricsHub.uptime_fmt(3725) == "1:02:05", "uptime H:MM:SS")
     ok(mh.MetricsHub.uptime_fmt(90061) == "25:01:01", "uptime 跨天小时进位")
 
+    # 断流口径：侧车 stale 时旧帧里的硬盘温度/使用率一律标 stale（与 GPU 同口径）
+    hub_m = mh.MetricsHub(sidecar_path=__file__)   # 假路径：installed 但永不出帧
+    hub_m.runner._latest = {"ts": 0, "seq": 1, "sensors": fake_sensors()}
+    hub_m.runner._meta = fake_meta()
+    hub_m.runner._last_frame_time = time.time() - 100.0   # 远超 stale_sec → stale
+    snap_m = hub_m.snapshot()
+    ok(snap_m["disk.0.temp"].status == mh.STATUS_STALE, "断流时硬盘温度标 stale")
+    ok(snap_m["disk.0.usage"].status == mh.STATUS_STALE, "断流时硬盘使用率标 stale")
+    ok(snap_m["gpu_d.temp"].status == mh.STATUS_STALE, "断流时 GPU 温度标 stale（口径一致）")
+
+    # 启动宽限期：尚未出帧但进程活着 ≠ 断流（首帧前枚举可能超过 stale_sec，
+    # 旧口径会把正常启动误判成断流，重启预算耗尽后首帧永远等不到）
+    class _FakeProc:
+        def __init__(self, rc): self._rc = rc
+        def poll(self): return self._rc
+    r_grace = mh.SidecarRunner(exe_path=__file__)
+    r_grace._proc = _FakeProc(None)          # 进程存活、未出帧
+    ok(r_grace.is_stale() is False, "未出帧且进程存活 → 启动宽限期不算 stale")
+    r_grace._proc = _FakeProc(1)             # 进程已退出、未出帧
+    ok(r_grace.is_stale() is True, "未出帧且进程已退出 → stale（触发重启）")
+
 
 # ---------------------------------------------------------------------------
 # B. 真实端到端（本机制品）
