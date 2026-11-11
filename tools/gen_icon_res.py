@@ -7,7 +7,6 @@
 """
 import base64
 import os
-import sys
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(BASE, "icon2.png")

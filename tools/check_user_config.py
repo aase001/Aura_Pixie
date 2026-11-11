@@ -40,15 +40,6 @@ def _seg_label(kind: str, name: str) -> str:
     return {"main": "主指令", "sub": f"次级项「{name}」"}.get(kind, kind)
 
 
-def _validate_code_seg(text: str, label: str, failures: list[str]) -> None:
-    """单段代码格式校验（等于保存时 classify_code 的判定，不执行）。"""
-    if not text or not text.strip():
-        return   # 空段 = 占位/仅含次级功能，合法
-    _k, _p, err = M.classify_code(text)
-    if err:
-        failures.append(f"  {label}格式非法：{err}")
-
-
 def main() -> int:
     path = _config_path()
     if not os.path.isfile(path):
@@ -94,7 +85,6 @@ def main() -> int:
         segs += [("sub", it["name"], it["code"]) for it in parsed["items"]]
         if not parsed["total"]:
             segs = [("all", "整体", code)]   # 无标记：整段按一条指令校验
-        ok_seg = True
         for kind, sname, seg in segs:
             label = _seg_label(kind, sname)
             _k, _p, err = M.classify_code(seg)
@@ -102,7 +92,6 @@ def main() -> int:
                 print(f"  [OK] {label}：空段（占位，不执行）")
                 continue
             if err:
-                ok_seg = False
                 failures.append(f"「{name}」{label}格式非法：{err}")
                 print(f"  [NG] {label}格式非法：{err}")
             else:

@@ -8,7 +8,6 @@
 跑法：  python tools/check_monitor.py
 退出码： 0 全过 / 1 有失败
 """
-import json
 import os
 import sys
 import time
