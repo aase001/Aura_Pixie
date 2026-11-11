@@ -4,7 +4,7 @@
 点 Save 后整个程序消失。现在菜单回调只投递 singleShot，对话框非模态 show，
 保存走 finished 信号回调重载配置。
 
-所有配置读写被重定向到临时副本，不碰真实 functions.yaml。
+所有配置读写被重定向到临时副本，不碰真实 setting.yaml。
 
 用法
     .venv\\Scripts\\activate

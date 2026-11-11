@@ -313,7 +313,9 @@ class SidecarRunner:
 
 def _match_gpu_family(hw_name: str, hw_type: str) -> Optional[str]:
     """独显/核显家族判定。返回 "dedicated" / "integrated" / None。
-    用关键字而非精确型号名，跨机型可用；顺序敏感（Iris Xe 也含 Intel）。"""
+    用关键字而非精确型号名，跨机型可用；顺序敏感（Iris Xe 也含 Intel）。
+    ⚠ 已知限制：radeon 关键字会把 AMD APU 核显（Radeon Vega 系列）误判为
+    独显。映射表按 NVIDIA+Intel 机型标定，AMD 机型适配需真机验证后再收紧。"""
     n = (hw_name or "").lower()
     t = (hw_type or "")
     if any(k in n for k in ("nvidia", "geforce", "rtx", "gtx",
@@ -452,19 +454,20 @@ def _gpu_family_from_type(hwt: str) -> Optional[str]:
 
 
 def _cpu_temp_put(r: _MapResult, val) -> None:
-    """CPU 温度：非管理员下 LHM 仍会列出温度槽位但值为 null——这正是要区分
-    need_admin（槽位在、无权限）与 unsupported（整机没这条传感器）的信号。"""
+    """CPU 温度取值：null 直接丢弃（侧车已过滤无值传感器，此处双保险）。
+    need_admin / unsupported 的信号判定在 map_absent_signals，不在本函数。"""
     if val is None:
         return
     r.fixed["cpu.temp"] = (val, "CPU Package")
 
 
 def map_absent_signals(sensors: list[dict]) -> dict[str, str]:
-    """扫描原始帧（含 null 值无——侧车只输出有值传感器），因此这里反向判断：
-    对「需要管理员的指标」，若整帧无任何候选行 → need_admin。
+    """反向判断缺失信号：侧车只回传有值传感器（null 已被过滤），所以
+    「整帧无某类候选行」本身就是信号——对需要管理员的指标标 need_admin，
+    对平台不暴露的指标（如风扇）标 unsupported。
     返回 key -> STATUS_NEED_ADMIN/STATUS_UNSUPPORTED 提示。
-    注意：侧车只回传有值传感器，null 已被过滤；因此「CPU 有 Temperature 行但非
-    Package 族」也按 need_admin 处理（非管理员时 CPU 温度整族消失）。"""
+    注意：非管理员时 CPU 温度整族消失，故只要没有 Temperature 行即按
+    need_admin 处理，不区分具体槽位名。"""
     out: dict[str, str] = {}
     has_cpu_temp = any(s["hwType"] == "Cpu" and s["sensor"] == "Temperature" for s in sensors)
     has_cpu_clock = any(s["hwType"] == "Cpu" and s["sensor"] == "Clock" and
@@ -607,7 +610,7 @@ class PsutilSource:
             cap, parts = 0.0, []
             for part in self._partitions:
                 mount = part.device.rstrip("\\").rstrip("/")  # "C:"
-                if any(mount.upper() == l.upper() for l in letters):
+                if any(mount.upper() == letter.upper() for letter in letters):
                     cap += part.total / 1e9  # 十进制 GB，与 SMART Total Space 同口径
                     parts.append(mount)
             if parts:
@@ -698,7 +701,9 @@ class MetricsHub:
     """采集聚合层。线程模型：侧车读取线程更新最新帧（SidecarRunner 内部锁），
     本类不轮询；snapshot()/get() 在调用线程把最新帧映射成 Metric（映射成本
     ~200 行 dict，微秒级）。psutil 速率类指标由后台 poller 线程按 poll_ms 固定
-    节拍差分，保证窗口准确。"""
+    节拍差分，保证窗口准确。
+    注：get()/list_disks()/list_fans() 各自重复映射同一帧，微秒级可接受；
+    监视 UI 接入时改为一帧映射一次复用。"""
 
     def __init__(self, sidecar_path: Optional[str] = None,
                  interval_ms: int = 1000, poll_ms: int = 1000,

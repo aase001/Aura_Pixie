@@ -4,7 +4,7 @@
     · 呼吸圆球：基础 100×100px → 浮动 110×110px
     · 颜色循环：起始色 → 过渡色 →（末尾色 →）起始色，周期 = 各段渐变时长之和
       （V10 起废弃固定 20s；球体呼吸可关，关闭时恒渲染起始色、大小静止）
-    · 光晕：球边缘外 +3px
+    · 光晕：halo 半径 = 球半径 + 2×glow_px（默认外扩 6px，虚化淡出）
     · 帧率：60 FPS（15ms 心跳 + 帧点节流）
     · 悬停：鼠标在球体 100×100 范围内累计 ≥300ms → 扇形外框展开
     · 扇形等分：= 激活功能模块数，最少 2、最多 9；总数不限
@@ -23,7 +23,8 @@
 
 运行
     .venv\\Scripts\\activate
-    python main.py
+    python main.py               # V11 起会先申请 UAC 提权
+    python main.py --no-elevate  # 免提权（开发/调试专用，温度类指标不可用）
     python main.py --selftest
 """
 
@@ -2109,7 +2110,7 @@ class CodeEditDialog(QDialog):
         self.resize(640, 480)
         self.setModal(True)
         # 异步测试状态：正在轮询的子进程与预删除文件（进程结束后清理），
-        # 避免残留临时脚本；锁防止回调竞态后关闭窗口再访问表项。
+        # 避免残留临时脚本；_closed 标志防止关窗后回调再访问表项。
         self._proc = None
         self._cleanup = []
         self._out_files: list[str] = []   # 测试输出临时文件（结束后读回并删除）
@@ -2310,7 +2311,7 @@ class CodeEditDialog(QDialog):
         self.accept()
 
     def _on_finished(self, _result: int) -> None:
-        """窗口关闭（保存/取消/×）：停止轮询与进程句柄持有，留给录播进程后台自行结束。"""
+        """窗口关闭（保存/取消/×）：停止轮询与进程句柄持有，测试子进程留后台自行结束。"""
         self._closed = True
         try:
             if getattr(self, "_poll_timer", None) is not None:
@@ -2520,7 +2521,7 @@ class SettingsDialog(QDialog):
                                       "（登录时触发、以管理员权限运行）")
         self.chk_autostart.setChecked(autostart_enabled())
         bar.addWidget(self.chk_autostart)
-        self.bar = bar   # 布局引用：自检断言「置顶复选框位于开机自启动上方」用
+        self.bar = bar   # 布局引用：自检断言「置顶复选框位于开机自启动左侧」用
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.table)
@@ -2534,7 +2535,7 @@ class SettingsDialog(QDialog):
 
         去重：编辑窗已打开则置前，不做新建；先定位再模态 exec（与外观窗一致，
         编辑期间设置窗不可操作）；保存（Accepted）后把编辑内容写回第 2 列单元格；
-        取消不做任何更改。行号越界直接忽略（拖拽/删除后 emoji 场景防御）。
+        取消不做任何更改。行号越界直接忽略（拖拽/删除后行号失效的边缘场景防御）。
         """
         try:
             if self._code_dlg is not None and self._code_dlg.isVisible():
@@ -3791,7 +3792,7 @@ class AuraBall(QWidget):
     # ------------------------------------------------------------ 动效休眠
     def _enter_sleep(self) -> None:
         """进入休眠：按系统深浅色设定顺色渲染（浅色→黑，深色→白），
-        呼吸暂停 + 整个窗口透明度降到 10%。
+        呼吸暂停 + 整个窗口透明度降到 sleep_opacity（可配 5~20%，默认 10%）。
 
         扇形若展开则立即回收（休眠时几乎不可见，直接收起避免半展开卡住）。
         必须把 _progress 清零——否则 paintEvent 里 _progress > 0.0 仍成立，
@@ -3857,7 +3858,8 @@ class AuraBall(QWidget):
 
     def _note_idle(self, dt_ms: float, interacting: bool) -> None:
         """无操作计时：对球体有任何交互（悬停/点击/拖拽）则清零；否则累计，
-        达到 idle_sec 秒（10~600，默认 60）进入休眠。休眠中不重复计时。"""
+        达到 idle_sec 秒（界面 30~600，默认 60；10 为配置兼容下限）进入休眠。
+        休眠中不重复计时。"""
         if interacting:
             self._idle_ms = 0.0
             return
@@ -4264,7 +4266,7 @@ class AuraBall(QWidget):
             _log_crash("mouseDoubleClickEvent", exc)
 
     def _finish_drag(self) -> None:
-        """松手后决定去向：越界 → 回到最近合法位；边缘 50px 内 → 吸附贴边；否则就地停。
+        """松手后决定去向：越界 → 回到最近合法位；边缘 200px 内 → 吸附贴边；否则就地停。
 
         判定用「扇形外边缘」而不是球边缘：这样吸附后打开扇形，整环仍完整可见。
         """
@@ -4273,7 +4275,7 @@ class AuraBall(QWidget):
         st = self._edge_state()
         if st["gap"] < 0.0:                       # 负距离：已越界，回最近吸附位
             to = self._snap_target(st)
-        elif st["gap"] <= CONFIG["snap_margin"]:  # ≤50px：非线性靠边吸附
+        elif st["gap"] <= CONFIG["snap_margin"]:  # ≤snap_margin(200px)：非线性靠边吸附
             to = self._snap_target(st)
         else:
             to = QPointF(self._center)            # 就地停，不吸
@@ -4336,7 +4338,7 @@ class AuraBall(QWidget):
             elif chosen is act_reload:
                 self.reload_config()
             elif chosen is act_disappear:
-                # 消失：立即触发休眠（呼吸暂停 + 透明度 10%），点击球体即唤起
+                # 消失：立即触发休眠（呼吸暂停 + 透明度降至休眠值），点击球体即唤起
                 if self._asleep:
                     self._wake()
                 else:
