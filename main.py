@@ -1270,7 +1270,8 @@ def _schtasks(argv: list[str]) -> subprocess.CompletedProcess:
 
             xml = (f"<Task><Actions><Exec><Command>{esc(cmd)}</Command>"
                    f"<Arguments>{esc(rest)}</Arguments></Exec></Actions></Task>")
-            return _DryRunResult(0, xml.encode("utf-8"))
+            # 与真实 schtasks /XML 同口径：UTF-16LE 带 BOM（防编码口径回归）
+            return _DryRunResult(0, xml.encode("utf-16"))
         return _DryRunResult()
     return subprocess.run([_schtasks_exe(), *argv], capture_output=True,
                           creationflags=CREATE_NO_WINDOW, timeout=15)
@@ -1287,7 +1288,10 @@ def _task_query_xml() -> str | None:
     try:
         r = _schtasks(["/Query", "/TN", _TASK_NAME, "/XML"])
         if r.returncode == 0:
-            return r.stdout.decode("utf-8", errors="replace")
+            # schtasks /XML 实际输出 UTF-16LE 带 BOM（首行 encoding="UTF-16"）；
+            # 按 utf-8 解码会把 <Command> 拆成字节间夹 NUL 的乱码，_task_action
+            # 恒解析失败 → 自愈每次启动误判漂移重建任务。utf-16 由 BOM 定序。
+            return r.stdout.decode("utf-16", errors="replace")
     except (OSError, subprocess.SubprocessError) as exc:
         _log_crash("task_query", exc)
     return None

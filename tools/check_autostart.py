@@ -88,9 +88,11 @@ class FakeTasks:
                 def esc(s: str) -> str:
                     return (s.replace("&", "&amp;").replace("<", "&lt;")
                              .replace(">", "&gt;").replace('"', "&quot;"))
+                # 与真实 schtasks /XML 同口径：UTF-16LE 带 BOM。
+                # 曾按 utf-8 输出，掩盖了主程序 utf-8 解码的真实编码 bug。
                 r.stdout = (f"<Task><Actions><Exec><Command>{esc(cmd)}</Command>"
                             f"<Arguments>{esc(rest)}</Arguments></Exec></Actions>"
-                            "</Task>").encode("utf-8")
+                            "</Task>").encode("utf-16")
         return r
 
 
@@ -190,6 +192,10 @@ st = M.autostart_state()
 check("state.task 实况为 True", st["task"] is True)
 check("state.task_action 解析正确", M._norm_cmd(st["task_action"]) == _norm_expect(M),
       f"（{st['task_action']}）")
+check("编码口径看守：/XML 回读为 UTF-16 且 Command 可解析（防 utf-8 解码回归）",
+      M._task_query_xml() is not None
+      and "<Command>" in M._task_query_xml()
+      and M._task_action() is not None)
 check("旧 registry 字段保留但恒 None（兼容自检不报错）",
       st["registry"] is None and st["registry_value"] is None)
 check("setting.yaml 记录 enabled=true",
