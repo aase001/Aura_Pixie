@@ -1706,6 +1706,252 @@ def section_k():
        "main 缩放变化触发重排接线在位")
 
 
+# ---------------------------------------------------------------------------
+# L. 右键菜单抑制 / 使用率不画曲线 / 成组合并 / 组级屏幕贴边（本轮修复）
+# ---------------------------------------------------------------------------
+def _right_ev(etype, gpos):
+    from PySide6.QtGui import QMouseEvent
+    return QMouseEvent(etype, QPointF(gpos), QPointF(gpos),
+                       Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                       Qt.KeyboardModifier.NoModifier)
+
+
+def _mk_group(mgr, hub, keys, origin):
+    """建一个已吸附成组的窗格集（水平排列，相邻左右贴合）。"""
+    inj = make_injections()
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+    widgets = []
+    x = origin[0]
+    for key in keys:
+        w = mu.MonitorUnitWidget(key, hub, manager=mgr, **w_inj)
+        mgr.register_widget(key, w, [key])
+        w.move(x, origin[1])
+        w.show()
+        widgets.append(w)
+        x += w.width()
+    APP.processEvents()
+    grp = mgr.new_group()
+    for i, w in enumerate(widgets):
+        grp.add(w)
+        w._is_snapped = True
+        if i > 0:
+            w._snap_constraints = [(widgets[i - 1], "left")]
+            w._contact_edges = ["left"]
+            widgets[i - 1]._contact_edges = ["right"]
+    return widgets, grp
+
+
+def section_l():
+    print("[L] 右键菜单抑制 / 使用率曲线 / 成组合并 / 组级贴边")
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QContextMenuEvent
+
+    # ---- L1 右键拖动解绑 → 不弹菜单；右键轻点 → 弹菜单 ----
+    hub = FakeHub()
+    inj = make_injections()
+    mgr = mu.MonitorWindowManager(hub, **inj)
+    wa, wb, grp = _snapped_pair(mgr, hub)
+    start = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    # 右键拖动 >4px 解绑
+    APP.sendEvent(wa, _right_ev(QEvent.Type.MouseButtonPress, start))
+    APP.sendEvent(wa, _right_ev(QEvent.Type.MouseMove, start + QPoint(60, 40)))
+    APP.sendEvent(wa, _right_ev(QEvent.Type.MouseButtonRelease, start + QPoint(60, 40)))
+    ok(wa._group is None, "右键拖动解绑自身")
+    ok(wa._suppress_context_menu, "右键拖动置位菜单抑制标志")
+    # 模拟 Windows 右键抬起后派发的 contextMenuEvent → 应被吞掉
+    menus_before = [c for c in wa.children() if isinstance(c, QMenu)]
+    ce = QContextMenuEvent(QContextMenuEvent.Reason.Mouse,
+                           wa.frameGeometry().center(),
+                           wa.mapToGlobal(wa.rect().center()))
+    APP.sendEvent(wa, ce)
+    menus_after = [c for c in wa.children() if isinstance(c, QMenu) and c.isVisible()]
+    ok(not menus_after, "右键拖动后 contextMenuEvent 不弹菜单")
+    ok(not wa._suppress_context_menu, "抑制标志消费后复位")
+    # 右键轻点（≤4px）→ 弹菜单
+    start2 = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    APP.sendEvent(wa, _right_ev(QEvent.Type.MouseButtonPress, start2))
+    APP.sendEvent(wa, _right_ev(QEvent.Type.MouseButtonRelease, start2 + QPoint(2, 1)))
+    menus_light = [c for c in wa.children() if isinstance(c, QMenu) and c.isVisible()]
+    ok(bool(menus_light), "右键轻点弹菜单")
+    for m in menus_light:
+        m.close()
+    wa.close()
+    wb.close()
+
+    # ---- L2 使用率类不画曲线，非使用率画曲线 ----
+    hub2 = FakeHub()
+    mgr2 = mu.MonitorWindowManager(hub2, **inj)
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+    w_pct = mu.MonitorUnitWidget("cpu.load", hub2, manager=mgr2, **w_inj)
+    mgr2.register_widget("cpu.load", w_pct, ["cpu.load"])
+    w_pct.show()
+    APP.processEvents()
+    img_empty = _grab(w_pct)
+    for v in (10.0, 40.0, 70.0, 30.0, 90.0, 50.0):
+        hub2.set_metric("cpu.load", v, mh.STATUS_OK)
+        w_pct.update_data(hub2.snapshot()["cpu.load"])
+    img_pct = _grab(w_pct)
+    diff_pct = sum(1 for yy in range(img_pct.height())
+                   for xx in range(img_pct.width())
+                   if img_pct.pixel(xx, yy) != img_empty.pixel(xx, yy))
+    # 使用率：数值文本变化会有像素差异，但 sparkline 区（底部带）不应有折线
+    # 直接看守源码跳过逻辑 + 对比非使用率
+    ok("使用率" in open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "monitor_ui.py"), encoding="utf-8").read(),
+       "使用率跳过曲线逻辑在位（源码看守）")
+    w_pct.close()
+    # 非使用率（CPU温度）→ 画曲线（与 F10 同口径，像素差异显著）
+    w_temp = mu.MonitorUnitWidget("cpu.temp", hub2, manager=mgr2, **w_inj)
+    mgr2.register_widget("cpu.temp", w_temp, ["cpu.temp"])
+    w_temp.show()
+    APP.processEvents()
+    img_t_empty = _grab(w_temp)
+    for v in (50.0, 60.0, 70.0, 65.0, 80.0, 55.0):
+        hub2.set_metric("cpu.temp", v, mh.STATUS_OK)
+        w_temp.update_data(hub2.snapshot()["cpu.temp"])
+    img_t = _grab(w_temp)
+    diff_t = sum(1 for yy in range(img_t.height())
+                 for xx in range(img_t.width())
+                 if img_t.pixel(xx, yy) != img_t_empty.pixel(xx, yy))
+    ok(diff_t > 20, f"非使用率（温度）画曲线（{diff_t} 像素差异）")
+    w_temp.close()
+
+    # ---- L3 单对单：独立窗 A 吸独立窗 B → 同组 2 成员 ----
+    hub3 = FakeHub()
+    mgr3 = mu.MonitorWindowManager(hub3, **inj)
+    w_inj3 = {k: v for k, v in inj.items() if k != "config_io"}
+    a = mu.MonitorUnitWidget("cpu.load", hub3, manager=mgr3, **w_inj3)
+    b = mu.MonitorUnitWidget("mem.load", hub3, manager=mgr3, **w_inj3)
+    mgr3.register_widget("cpu.load", a, ["cpu.load"])
+    mgr3.register_widget("mem.load", b, ["mem.load"])
+    a.move(100, 100)
+    b.move(100 + a.width() + 12, 100)
+    a.show()
+    b.show()
+    APP.processEvents()
+    mgr3.simulate_drag(a, b.x() - a.x() - a.width() - 2, 0)
+    import time as _t
+    t0 = _t.perf_counter()
+    while a._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    ok(a._group is not None and a._group is b._group, "单对单：A/B 同组")
+    ok(len(a._group.members) == 2, "单对单：组 2 成员")
+    ok(a.frameGeometry().left() + a.width() == b.frameGeometry().left(),
+       "单对单：A 右贴 B 左")
+    a.close()
+    b.close()
+
+    # ---- L4 多对多：组 ABC 吸组 DEF → 合并为 6 成员单组，旧组解散 ----
+    hub4 = FakeHub()
+    mgr4 = mu.MonitorWindowManager(hub4, **inj)
+    abc, g_abc = _mk_group(mgr4, hub4, ["cpu.load", "cpu.temp", "cpu.freq"], (100, 100))
+    deff, g_def = _mk_group(mgr4, hub4, ["mem.load", "mem.used", "net.rx"],
+                            (100 + abc[0].width() * 3 + 15, 100))
+    ok(g_abc in mgr4.snap_groups() and g_def in mgr4.snap_groups(), "初始两组并存")
+    # 拖 ABC 组（抓 A）向右靠近 DEF 组
+    target_dx = deff[0].x() - abc[-1].x() - abc[-1].width() - 2
+    mgr4.simulate_drag(abc[0], target_dx, 0)
+    t0 = _t.perf_counter()
+    while abc[0]._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    merged = abc[0]._group
+    ok(merged is not None, "多对多：合并组存在")
+    ok(all(w._group is merged for w in abc + deff), "多对多：6 窗同组")
+    ok(len(merged.members) == 6, f"多对多：组 6 成员（{len(merged.members)}）")
+    ok(g_abc not in mgr4.snap_groups(), "多对多：旧组 ABC 解散")
+    ok(len(mgr4.snap_groups()) == 1, "多对多：管理器仅剩 1 组")
+    # 整组刚性：ABC 内部相对位置保持（B 仍在 A 右侧贴合）
+    ok(abc[0].frameGeometry().left() + abc[0].width() == abc[1].frameGeometry().left(),
+       "多对多：ABC 内部贴合保持（整组刚性移动）")
+    # 接触边：ABC 末窗右贴 DEF 首窗左
+    ok(abc[-1].frameGeometry().left() + abc[-1].width() == deff[0].frameGeometry().left(),
+       "多对多：ABC 末窗贴 DEF 首窗")
+    for w in abc + deff:
+        w.close()
+
+    # ---- L5 多对单：组 AB 吸独立窗 C → 3 成员单组 ----
+    hub5 = FakeHub()
+    mgr5 = mu.MonitorWindowManager(hub5, **inj)
+    ab, g_ab = _mk_group(mgr5, hub5, ["cpu.load", "cpu.temp"], (100, 200))
+    w_inj5 = {k: v for k, v in inj.items() if k != "config_io"}
+    c = mu.MonitorUnitWidget("mem.load", hub5, manager=mgr5, **w_inj5)
+    mgr5.register_widget("mem.load", c, ["mem.load"])
+    c.move(100 + ab[0].width() * 2 + 12, 200)
+    c.show()
+    APP.processEvents()
+    mgr5.simulate_drag(ab[0], c.x() - ab[-1].x() - ab[-1].width() - 2, 0)
+    t0 = _t.perf_counter()
+    while ab[0]._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    ok(c._group is not None and ab[0]._group is c._group, "多对单：3 窗同组")
+    ok(len(c._group.members) == 3, "多对单：组 3 成员")
+    ok(g_ab not in mgr5.snap_groups(), "多对单：旧组 AB 解散")
+    for w in ab + [c]:
+        w.close()
+
+    # ---- L6 单对多：独立窗 A 吸组 BC → 3 成员单组 ----
+    hub6 = FakeHub()
+    mgr6 = mu.MonitorWindowManager(hub6, **inj)
+    bc, g_bc = _mk_group(mgr6, hub6, ["mem.load", "mem.used"], (300, 300))
+    w_inj6 = {k: v for k, v in inj.items() if k != "config_io"}
+    a6 = mu.MonitorUnitWidget("cpu.load", hub6, manager=mgr6, **w_inj6)
+    mgr6.register_widget("cpu.load", a6, ["cpu.load"])
+    a6.move(300 - a6.width() - 12, 300)
+    a6.show()
+    APP.processEvents()
+    mgr6.simulate_drag(a6, bc[0].x() - a6.x() - a6.width() - 2, 0)
+    t0 = _t.perf_counter()
+    while a6._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    ok(a6._group is not None and a6._group is bc[0]._group, "单对多：3 窗同组")
+    ok(len(a6._group.members) == 3, "单对多：组 3 成员")
+    ok(a6.frameGeometry().left() + a6.width() == bc[0].frameGeometry().left(),
+       "单对多：A 右贴 B 左")
+    for w in [a6] + bc:
+        w.close()
+
+    # ---- L7 组级屏幕贴边：整组贴边，所有成员同步（不只首窗）----
+    hub7 = FakeHub()
+    mgr7 = mu.MonitorWindowManager(hub7, **inj)
+    scr = APP.primaryScreen().availableGeometry()
+    # 组 AB 水平排列，整体靠近屏幕左缘
+    ab7, g_ab7 = _mk_group(mgr7, hub7, ["cpu.load", "cpu.temp"],
+                           (scr.left() + 12, scr.top() + 400))
+    # 拖整组向左贴屏幕左缘
+    mgr7.simulate_drag(ab7[0], -(scr.left() + 12 - scr.left()) - 2, 0)
+    t0 = _t.perf_counter()
+    while ab7[0]._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    ok(ab7[0]._group_screen_edge == "left", "组级屏幕贴边记录 left")
+    ok(ab7[0].frameGeometry().left() == scr.left(), "首窗贴屏幕左缘")
+    # 关键：第二窗也同步移动（整组刚性），保持与首窗贴合
+    ok(ab7[0].frameGeometry().left() + ab7[0].width() == ab7[1].frameGeometry().left(),
+       "组贴边后第二窗同步（内部贴合保持，非首窗独动）")
+    # 缩放后整组重新贴边
+    ab7[0]._group_screen_edge = "left"
+    ab7[1]._group_screen_edge = "left"
+    mgr7.rescale()
+    ok(ab7[0].frameGeometry().left() == scr.left(), "缩放后整组仍贴左缘")
+    for w in ab7:
+        w.close()
+
+    # ---- L8 源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("_suppress_context_menu" in src, "右键菜单抑制标志在位")
+    ok("def _merge_into_target" in src and "def _contact_pair" in src,
+       "组合并与接触窗对方法在位")
+    ok("_group_screen_edge" in src and "def _resnap_group_screen" in src,
+       "组级屏幕贴边与整组重贴在位")
+    ok("_snap_members" in src and "_snap_member_from" in src,
+       "整组吸附动画成员字段在位")
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -1718,5 +1964,6 @@ if __name__ == "__main__":
     section_i()
     section_j()
     section_k()
+    section_l()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

@@ -393,10 +393,14 @@ class MonitorUnitWidget(QWidget):
         self._snap_pending = None     # 落位后入组目标（widget 或 "screen"）
         self._snap_screen_edge_pending = None  # 落位后屏幕贴合边（缩放重贴用）
         self._snap_constraints: list = []  # [(目标窗, 贴合边)] 缩放重排用
+        self._snap_members: list = []  # 整组吸附动画成员（含自身）
+        self._snap_member_from: dict = {}  # 成员 id → 动画起始位置
         # 阶段 4：右键拖动解绑 / 轻点菜单
         self._right_dragging = False
         self._right_drag_started = False
         self._right_press_global = QPoint()
+        self._suppress_context_menu = False  # 右键拖动解绑后抑制菜单（仅轻点弹）
+        self._group_screen_edge = None  # 组级屏幕贴边记录（整组贴边，缩放重贴用）
         self._settings_callback: Optional[Callable] = None  # 打开设置（注入）
         # 布局几何缓存（update_layout 重算，paintEvent 消费；缩放每次现查）
         self._col_w = (0, 0, 0)       # A 名称 / B 数值 / C 单位 列宽
@@ -685,6 +689,10 @@ class MonitorUnitWidget(QWidget):
             # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽
             band_h = spark_h / n
             top = y_base + i * band_h
+            # 使用率类（含动态硬盘使用率）波动极小，曲线近乎一条横线无信息量，
+            # 不绘制（用户拍板）；数据层 history 照常记录，仅渲染跳过
+            if "使用率" in row.label:
+                continue
             hist = list(row.history)
             if len(hist) < 2:
                 continue
@@ -827,6 +835,7 @@ class MonitorUnitWidget(QWidget):
                 self._right_press_global = event.globalPosition().toPoint()
                 self._right_dragging = True
                 self._right_drag_started = False
+                self._suppress_context_menu = False
                 event.accept()
             else:
                 super().mousePressEvent(event)
@@ -842,6 +851,7 @@ class MonitorUnitWidget(QWidget):
                     if (gp - self._right_press_global).manhattanLength() < DRAG_THRESHOLD_PX:
                         return
                     self._right_drag_started = True
+                    self._suppress_context_menu = True  # 拖动解绑 → 抑制右键菜单
                     if self._group is not None:
                         self.detach_from_group()
                 # 解绑后独立窗跟手移动（无弹簧）
@@ -893,22 +903,33 @@ class MonitorUnitWidget(QWidget):
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.mouseReleaseEvent", e)
 
+    def _drag_group_rect(self) -> QRect:
+        """被拖移动单元的包围盒：成组=组包围盒（整组刚性移动），独立=自身。"""
+        if self._group is not None:
+            return self._group.bounding_rect()
+        return self.frameGeometry()
+
     def _update_preview(self, cursor_global: QPoint) -> None:
-        """移动中检测：对其它独立窗/组包围盒四边与屏幕可用区四边算最小边距。
+        """移动中检测：以「被拖组包围盒」对其它独立窗/组包围盒四边与屏幕边算边距。
 
         <20px 记录预览目标/边/贴合位 + 画幽灵轮廓；≥20px 清预览。
-        移动中绝不改变位置去吸附。
+        移动中绝不改变位置去吸附。目标按组去重（多对多磁吸不重复候选）。
         """
-        my_rect = self.frameGeometry()
+        my_rect = self._drag_group_rect()
         best = None   # (dist, target, edge, snap_rect)
-        # 其它独立窗 / 组（排除自身与自身所在组）
+        seen_groups: set = set()
+        # 其它独立窗 / 组（排除自身与自身所在组；同组只取一个代表）
         for other in self.manager._widgets.values():
             if other is self or not other.isVisible():
                 continue
             if self._group is not None and other._group is self._group:
                 continue
-            target_rect = (other._group.bounding_rect()
-                           if other._group is not None else other.frameGeometry())
+            og = other._group
+            if og is not None:
+                if id(og) in seen_groups:
+                    continue
+                seen_groups.add(id(og))
+            target_rect = og.bounding_rect() if og is not None else other.frameGeometry()
             cand = self._edge_candidates(my_rect, target_rect)
             for dist, edge, sr in cand:
                 if best is None or dist < best[0]:
@@ -988,10 +1009,18 @@ class MonitorUnitWidget(QWidget):
         self.manager.hide_ghost()
 
     def _finish_drag(self) -> None:
-        """松手：有预览目标 → 280ms 缓入缓出滑到贴合位；无目标 → 原地停留。"""
+        """松手：有预览目标 → 整组 280ms 缓入缓出滑到贴合位；无目标 → 原地停留。
+
+        动画按「组包围盒左上角」从当前位置滑到预览贴合位，组内成员记录各自
+        起始位置，每帧按同一 delta 刚性平移（多对多磁吸整组同步，不丢成员）。
+        """
         if self._preview_target is not None and self._preview_rect is not None:
-            self._snap_from = self.pos()
+            grp_rect = self._drag_group_rect()
+            self._snap_from = grp_rect.topLeft()
             self._snap_to = self._preview_rect.topLeft()
+            self._snap_members = (list(self._group.members)
+                                  if self._group is not None else [self])
+            self._snap_member_from = {id(w): w.pos() for w in self._snap_members}
             self._snap_pending = self._preview_target
             self._snap_edge_pending = self._preview_edge
             self._snap_screen_edge_pending = (
@@ -1008,54 +1037,131 @@ class MonitorUnitWidget(QWidget):
             t = min(1.0, self._snap_clock.elapsed() / SNAP_ANIM_MS)
             # 缓入缓出（smoothstep）：两端慢、中段快
             e = t * t * (3 - 2 * t)
-            x = round(self._snap_from.x() + (self._snap_to.x() - self._snap_from.x()) * e)
-            y = round(self._snap_from.y() + (self._snap_to.y() - self._snap_from.y()) * e)
-            self.move(x, y)
+            gx = round(self._snap_from.x() + (self._snap_to.x() - self._snap_from.x()) * e)
+            gy = round(self._snap_from.y() + (self._snap_to.y() - self._snap_from.y()) * e)
+            delta = QPoint(gx, gy) - self._snap_from
+            # 整组刚性平移：每个成员从各自起始位 + 同一 delta
+            for w in getattr(self, "_snap_members", [self]):
+                base = self._snap_member_from.get(id(w))
+                if base is not None:
+                    w.move(base + delta)
             if t >= 1.0:
                 self._snap_anim_timer.stop()
                 self._snap_animating = False
-                self.move(self._snap_to)
+                final_delta = self._snap_to - self._snap_from
+                for w in getattr(self, "_snap_members", [self]):
+                    base = self._snap_member_from.get(id(w))
+                    if base is not None:
+                        w.move(base + final_delta)
                 self._land_snap()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui._on_snap_anim", e)
 
     def _land_snap(self) -> None:
-        """落位后加入目标组 / 贴屏幕边，_is_snapped=True、关光晕、画融合虚线。
+        """落位：整组合并到目标组 / 整组贴屏幕边，_is_snapped=True、关光晕。
 
-        同时把贴合关系记成结构化约束 _snap_constraints（目标窗+贴合边）：
-        显示缩放改变窗格尺寸后，管理器据此重新对齐（防磁吸错位）。
+        成组逻辑（单对单/单对多/多对单/多对多统一）：被拖移动单元（独立窗或
+        整组）与目标单元（独立窗或整组）合并为一个组——目标组为存续组，被拖
+        组成员全部并入、旧组解散；接触边按落位几何在实际接触的两个窗之间重算，
+        结构化约束 _snap_constraints 记在该接触窗对上（缩放重排据此对齐）。
+        屏幕边吸附：整组贴边，组级 _group_screen_edge 记录（缩放整组重贴）。
         """
         target = self._snap_pending
         edge = getattr(self, "_snap_edge_pending", None)
         screen_edge = getattr(self, "_snap_screen_edge_pending", None)
         self._snap_pending = None
         self._snap_screen_edge_pending = None
-        self._contact_edges = [edge] if edge else []
+        moving = list(self._snap_members) if self._snap_members else [self]
         if target == "screen":
-            # 屏幕边吸附 = 贴边停留并记 screen_edge，不入窗间组
-            self._screen_edge = screen_edge or edge
-            self._is_snapped = True
-        elif isinstance(target, MonitorUnitWidget):
-            self._screen_edge = None
-            grp = target._group
-            if grp is None:
-                grp = self.manager.new_group()
-                grp.add(target)
-                target._is_snapped = True
-                target._contact_edges = [self._opposite_edge(edge)]
-            grp.add(self)
-            self._is_snapped = True
-            # 结构化贴合约束：self 的 edge 边贴 target 的对边（缩放重排用）
-            if edge:
-                if not hasattr(self, "_snap_constraints"):
-                    self._snap_constraints = []
-                self._snap_constraints = [
-                    c for c in self._snap_constraints if c[0] is not target]
-                self._snap_constraints.append((target, edge))
+            # 整组贴屏幕边：组级记录，所有成员共享同一贴边（缩放整组重贴）
+            se = screen_edge or edge
+            for w in moving:
+                w._screen_edge = se
+                w._is_snapped = True
+                w._contact_edges = []
+            if self._group is not None:
+                self._group_screen_edge = se
+            self._clear_preview()
+            for w in moving:
+                w.update()
+            return
+        if isinstance(target, MonitorUnitWidget):
+            for w in moving:
+                w._screen_edge = None
+            self._merge_into_target(target, edge, moving)
         self._clear_preview()
-        self.update()
-        if target is not None and isinstance(target, MonitorUnitWidget):
+        for w in moving:
+            w.update()
+        if isinstance(target, MonitorUnitWidget):
             target.update()
+
+    def _merge_into_target(self, target, edge, moving) -> None:
+        """把被拖移动单元（moving）并入目标 target 所在组，旧组解散。
+
+        存续组优先取目标组（目标不动，被拖组滑过来贴合）；目标独立则新建组。
+        接触窗对：被拖组里最靠近目标边的窗 vs 目标组里最靠近被拖组的窗，
+        约束记在该窗对上（而非笼统记 self/target，多对多才不会错）。
+        """
+        mgr = self.manager
+        target_grp = target._group
+        # keep_grp：目标组优先；目标独立 → 新建组并先纳入目标
+        if target_grp is None:
+            keep_grp = mgr.new_group()
+            keep_grp.add(target)
+            target._is_snapped = True
+        else:
+            keep_grp = target_grp
+        # 被拖组成员全部并入存续组（含 self）；旧组若不同则解散
+        for w in moving:
+            if w._group is not None and w._group is not keep_grp:
+                old = w._group
+                old.remove(w)
+                if len(old.members) <= 1:
+                    for last in list(old.members):
+                        old.remove(last)
+                        last._group = None
+                    mgr.dissolve_group(old)
+            keep_grp.add(w)
+            w._is_snapped = True
+            w._group_screen_edge = None
+        # 目标组成员清组级屏幕贴边（已并入窗间组）
+        for w in keep_grp.members:
+            w._group_screen_edge = None
+        # 接触窗对：按落位几何找实际贴合的两个窗
+        a, b = self._contact_pair(moving, list(keep_grp.members), edge)
+        if a is not None and b is not None and edge:
+            a._contact_edges = [edge]
+            b._contact_edges = [self._opposite_edge(edge)]
+            a._snap_constraints = [c for c in a._snap_constraints if c[0] is not b]
+            a._snap_constraints.append((b, edge))
+        # 其余成员接触边清空（仅接触窗对画融合虚线）
+        for w in keep_grp.members:
+            if w is not a and w is not b:
+                w._contact_edges = []
+
+    @staticmethod
+    def _contact_pair(moving, target_members, edge):
+        """按贴合边找实际接触的两个窗：被拖侧最靠边窗 vs 目标侧最靠边窗。"""
+        if not moving or not target_members:
+            return (None, None)
+        if edge in ("left", "right"):
+            # 水平贴合：被拖侧取垂直方向与目标重叠最多者，目标侧同理
+            def v_overlap(w, others):
+                r = w.frameGeometry()
+                return sum(max(0, min(r.bottom(), o.frameGeometry().bottom())
+                               - max(r.top(), o.frameGeometry().top()))
+                           for o in others)
+            a = max(moving, key=lambda w: v_overlap(w, target_members))
+            b = max(target_members, key=lambda w: v_overlap(w, moving))
+        else:
+            def h_overlap(w, others):
+                r = w.frameGeometry()
+                return sum(max(0, min(r.right(), o.frameGeometry().right())
+                               - max(r.left(), o.frameGeometry().left()))
+                           for o in others)
+            a = max(moving, key=lambda w: h_overlap(w, target_members))
+            b = max(target_members, key=lambda w: h_overlap(w, moving))
+        return (a, b)
 
     @staticmethod
     def _opposite_edge(edge: Optional[str]) -> Optional[str]:
@@ -1110,6 +1216,7 @@ class MonitorUnitWidget(QWidget):
             self._is_snapped = False
             self._contact_edges = []
             self._screen_edge = None
+            self._group_screen_edge = None
             self._snap_constraints = []   # 解绑即清贴合约束（缩放重排不再引用）
             # 组剩余==1 → 解散组，剩余成员必须复位（漏这步会永久残留融合态）
             if len(grp.members) == 1:
@@ -1118,6 +1225,7 @@ class MonitorUnitWidget(QWidget):
                 last._is_snapped = False
                 last._contact_edges = []
                 last._screen_edge = None
+                last._group_screen_edge = None
                 last._snap_constraints = []
                 last.update()
                 self.manager.dissolve_group(grp)
@@ -1153,8 +1261,16 @@ class MonitorUnitWidget(QWidget):
             self.log_fn("monitor_ui._open_settings", e)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        """右键菜单走最小菜单（不整体屏蔽；与右键轻点同入口）。"""
+        """右键菜单走最小菜单（不整体屏蔽；与右键轻点同入口）。
+
+        右键拖动解绑后 Qt 仍会派发本事件（Windows 右键抬起触发）——见抑制
+        标志即吞掉，避免解绑同时弹菜单影响观感；仅右键轻点（位移≤4px）才弹。
+        """
         try:
+            if self._suppress_context_menu:
+                self._suppress_context_menu = False
+                event.accept()
+                return
             self._show_min_menu(event.globalPos())
             event.accept()
         except Exception as e:  # noqa: BLE001
@@ -1404,7 +1520,19 @@ class MonitorWindowManager:
                         w.move(*pos)
                         placed.add(id(w))
                         queue.append(w)
-            # 屏幕边吸附：尺寸变化后重新贴边（交叉轴坐标保持）
+            # 组级屏幕贴边：整组按包围盒重新贴边（所有成员同一 delta 刚性平移）
+            done_groups: set = set()
+            for grp in list(self._groups):
+                members = [w for w in grp.members if w.isVisible()]
+                if not members:
+                    continue
+                edge = next((w._group_screen_edge for w in members
+                             if w._group_screen_edge), None)
+                if not edge or id(grp) in done_groups:
+                    continue
+                done_groups.add(id(grp))
+                self._resnap_group_screen(members, edge)
+            # 独立窗屏幕贴边：尺寸变化后重新贴边（交叉轴坐标保持）
             for w in widgets:
                 if not w.isVisible() or w._group is not None:
                     continue
@@ -1426,6 +1554,28 @@ class MonitorWindowManager:
                     w.move(r.left(), avail.top() + avail.height() - r.height())
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.rescale", e)
+
+    @staticmethod
+    def _resnap_group_screen(members, edge) -> None:
+        """整组按包围盒重新贴屏幕边：算包围盒目标位 → 全员同一 delta 平移。"""
+        rect = QRect()
+        for w in members:
+            rect = rect.united(w.frameGeometry())
+        screen = QGuiApplication.screenAt(rect.center())
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        if edge == "left":
+            target = QPoint(avail.left(), rect.top())
+        elif edge == "right":
+            target = QPoint(avail.left() + avail.width() - rect.width(), rect.top())
+        elif edge == "top":
+            target = QPoint(rect.left(), avail.top())
+        else:   # bottom
+            target = QPoint(rect.left(), avail.top() + avail.height() - rect.height())
+        delta = target - rect.topLeft()
+        for w in members:
+            w.move(w.pos() + delta)
 
     @staticmethod
     def _constraint_between(a, b):
