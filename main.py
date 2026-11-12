@@ -217,39 +217,61 @@ def _apply_titlebar_theme(widget: QWidget) -> None:
         pass
 
 
-class _TitlebarThemeFilter(QObject):
-    """全局事件过滤器：顶层窗口显示时按系统深浅色着色标题栏（V16.2）。
+def theme_window(widget: QWidget) -> None:
+    """单个窗口主题补全（V16.2 统一机制，新窗口自动继承的兜底）。
 
-    监听 Show/WinIdChange，覆盖全部设置窗与对话框（含监视设置窗）；
-    球体是无边框窗无标题栏，着色无副作用。
+    应用级 apply_app_theme 已让全部窗口继承 Fusion 样式与调色板；此处仅在
+    窗口显示时补 DWM 标题栏着色（标题栏归系统画，调色板管不到）。若窗口被
+    单独 setPalette 覆盖过，这里不强行重置客户区，避免破坏有意自定义。
+    """
+    _apply_titlebar_theme(widget)
+
+
+class _WindowThemeFilter(QObject):
+    """全局窗口主题过滤器（V16.2 统一机制）：顶层窗口显示时自动补主题。
+
+    监听 Show/WinIdChange，对全部顶层窗口（含未来新增的设置窗/对话框）
+    自动调 theme_window 补 DWM 标题栏——新窗口零配置继承，无需各自写主题。
+    球体是无边框窗无标题栏，着色无副作用。客户区底色/文字由应用级
+    Fusion 样式 + themed_palette 统一继承，不在此逐窗重复设置。
     """
 
     def eventFilter(self, obj, event):  # noqa: N802
         try:
             if (isinstance(obj, QWidget) and obj.isWindow()
                     and event.type() in (QEvent.Type.Show, QEvent.Type.WinIdChange)):
-                _apply_titlebar_theme(obj)
+                theme_window(obj)
         except Exception:   # noqa: BLE001 - 过滤器异常不阻断事件
             pass
         return False
 
 
-def install_titlebar_theme(app) -> None:
-    """安装标题栏主题过滤器（应用级，全部窗口生效）；实例模块级保引用。"""
+def install_window_theme(app) -> None:
+    """安装全局窗口主题过滤器（应用级，全部窗口生效）；实例模块级保引用。"""
     _titlebar_filter_keep.clear()
-    flt = _TitlebarThemeFilter(app)
+    flt = _WindowThemeFilter(app)
     app.installEventFilter(flt)
     _titlebar_filter_keep.append(flt)
 
 
+# 兼容旧名（自检/历史调用）：标题栏主题安装即统一窗口主题安装
+install_titlebar_theme = install_window_theme
+
+
 def apply_app_theme(app) -> None:
-    """应用级深浅色主题统一入口（V16.2 修复主题割裂）。
+    """应用级深浅色主题统一入口（V16.2 统一机制，新窗口直接复用）。
 
     根因：windows11 原生样式把窗口底色/部分控件交给系统主题绘制，只吃
     调色板里的文字色 → 「文字变了、底色没变、复选框半变」的割裂状态。
     修复：切 Fusion 样式（100% 由调色板驱动）+ colorScheme 与判定一致 +
-    白底黑字/黑底白字调色板 + DWM 标题栏着色，一次到位全部窗口生效。
-    复用球体休眠同款 system_dark_mode() 判定，不另起逻辑。
+    白底黑字/黑底白字调色板 + 全局窗口主题过滤器（DWM 标题栏），一次到位。
+
+    统一约定（新增窗口必读）：
+      · 颜色唯一真源 = theme_colors()，判定唯一真源 = system_dark_mode()；
+      · 客户区底色/文字/控件由本入口的 Fusion + themed_palette 全局继承，
+        新窗口不要再各自 setPalette/setStyle/硬编码底色；
+      · 标题栏由 install_window_theme 的全局过滤器自动补，新窗口零配置；
+      · 仅「有意的语义色」（如高级编辑窗橙色危险警示）可局部硬编码。
     """
     dark = system_dark_mode()
     fusion = QStyleFactory.create("Fusion")
@@ -258,7 +280,7 @@ def apply_app_theme(app) -> None:
     app.styleHints().setColorScheme(
         Qt.ColorScheme.Dark if dark else Qt.ColorScheme.Light)
     app.setPalette(themed_palette())
-    install_titlebar_theme(app)
+    install_window_theme(app)
 
 
 def install_chinese_buttons(app) -> None:
@@ -503,22 +525,40 @@ def system_dark_mode() -> bool:
     return False
 
 
+def theme_colors(dark: bool | None = None) -> dict:
+    """统一主题色板——全部窗口/控件颜色的唯一真源（V16.2 统一机制）。
+
+    判定唯一真源 = system_dark_mode()（球体休眠顺色同款），不另起逻辑。
+    调色板、表格编辑器样式、设备名小字、标题栏等一律从本函数取色，
+    新增窗口/控件需要主题色时也调这里，禁止各处硬编码底色/文字色。
+    返回键：window/base/text/button/disabled/highlight/border/secondary。
+    """
+    if dark is None:
+        dark = system_dark_mode()
+    if dark:
+        return {
+            "window": "#1E1E1E", "base": "#2D2D2D", "text": "#FFFFFF",
+            "button": "#3A3A3A", "disabled": "#7A7A7A", "highlight": "#0078D4",
+            "border": "#5A5A5A", "secondary": "rgba(255,255,255,0.6)",
+        }
+    return {
+        "window": "#FFFFFF", "base": "#FFFFFF", "text": "#000000",
+        "button": "#F0F0F0", "disabled": "#9A9A9A", "highlight": "#0078D4",
+        "border": "#767676", "secondary": "rgba(0,0,0,0.55)",
+    }
+
+
 def themed_palette() -> QPalette:
     """按系统深浅色生成调色板：浅色=白底黑字、深色=黑底白字（V16.2 用户拍板）。
 
-    复用球体休眠顺色同款 system_dark_mode() 判定，不另起逻辑。
+    颜色取自统一色板 theme_colors()（唯一真源），判定走 system_dark_mode()。
     应用级 setPalette 后全部设置窗与控件继承，去掉系统默认灰底。
     """
-    dark = system_dark_mode()
+    tc = theme_colors()
     pal = QPalette()
-    if dark:
-        window, base, text = QColor("#1E1E1E"), QColor("#2D2D2D"), QColor("#FFFFFF")
-        button, disabled = QColor("#3A3A3A"), QColor("#7A7A7A")
-        highlight = QColor("#0078D4")
-    else:
-        window, base, text = QColor("#FFFFFF"), QColor("#FFFFFF"), QColor("#000000")
-        button, disabled = QColor("#F0F0F0"), QColor("#9A9A9A")
-        highlight = QColor("#0078D4")
+    window, base, text = QColor(tc["window"]), QColor(tc["base"]), QColor(tc["text"])
+    button, disabled = QColor(tc["button"]), QColor(tc["disabled"])
+    highlight = QColor(tc["highlight"])
     C = QPalette.ColorRole
     G = QPalette.ColorGroup
     pal.setColor(C.Window, window)
@@ -2806,32 +2846,17 @@ class SettingsDialog(QDialog):
             self._code_dlg = None
 
     def _apply_table_editor_theme(self) -> None:
-        """输入框编辑时按系统深浅色模式着色：浅色=白底黑字，深色=黑底白字。
+        """输入框编辑时按系统深浅色着色：浅色=白底黑字，深色=黑底白字。
 
-        同时给编辑器不透明背景，避免底层单元格文字透出形成重影。
+        颜色取统一色板 theme_colors()、判定走 system_dark_mode()（V16.2 统一
+        机制，不再用调色板明度自行判定）。给编辑器不透明背景避免重影。
         """
-        palette = QApplication.instance().palette()
-        dark = palette.color(QPalette.ColorRole.Window).lightness() < 128
-        if dark:
-            self.table.setStyleSheet("""
-                QLineEdit {
-                    background-color: #1f1f1f;
-                    color: #ffffff;
-                    border: 1px solid #5a5a5a;
-                    padding: 2px;
-                }
-                QLineEdit:focus { border: 1px solid #4da3ff; }
-            """)
-        else:
-            self.table.setStyleSheet("""
-                QLineEdit {
-                    background-color: #ffffff;
-                    color: #000000;
-                    border: 1px solid #767676;
-                    padding: 2px;
-                }
-                QLineEdit:focus { border: 1px solid #0078d4; }
-            """)
+        tc = theme_colors()
+        self.table.setStyleSheet(
+            "QLineEdit {"
+            f" background-color: {tc['base']}; color: {tc['text']};"
+            f" border: 1px solid {tc['border']}; padding: 2px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {tc['highlight']}; }}")
 
     def _on_item_changed(self, item) -> None:
         # 第二列（项目名）输入即截断到宽度上限：6 汉字 / 12 字母。
@@ -5443,12 +5468,11 @@ class MonitorSettingsDialog(QDialog):
 
     @staticmethod
     def _hw_style() -> str:
-        """设备名小字颜色：跟随系统深浅色用半透明文字色（V16.2）。
+        """设备名小字颜色：取统一色板次级文字色（V16.2 统一机制）。
 
         浅底→半透明黑、深底→半透明白，比固定 gray 在纯白/纯黑底上更清晰。
         """
-        rgba = "rgba(255,255,255,0.6)" if system_dark_mode() else "rgba(0,0,0,0.55)"
-        return f"color: {rgba};"
+        return f"color: {theme_colors()['secondary']};"
 
     def _add_hw_label(self, key: str, parent) -> None:
         """参数复选框正下方加设备名小字 QLabel（仅有设备名的参数）。"""

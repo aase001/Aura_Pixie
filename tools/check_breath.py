@@ -1160,6 +1160,25 @@ def main() -> int:
           f"（实得 {_QApp.instance().style().objectName()}）", failures)
     check("统一主题入口 apply_app_theme 在位",
           callable(getattr(M, "apply_app_theme", None)), "", failures)
+    # 统一色板 theme_colors（V16.2 颜色唯一真源）：调色板须从它派生（改坏会红）
+    check("统一色板 theme_colors 在位且键齐全",
+          callable(getattr(M, "theme_colors", None))
+          and {"window", "base", "text", "button", "disabled",
+               "highlight", "border", "secondary"} <= set(M.theme_colors()),
+          "", failures)
+    _tcl = M.theme_colors(dark=False)
+    _tcd = M.theme_colors(dark=True)
+    check("统一色板浅色白底黑字 / 深色黑底白字",
+          _tcl["window"] == "#FFFFFF" and _tcl["text"] == "#000000"
+          and _tcd["text"] == "#FFFFFF"
+          and M.QColor(_tcd["window"]).lightness() < 128, "", failures)
+    check("调色板从统一色板派生（颜色一致）",
+          M.themed_palette().color(_C.Window).name().upper()
+          == M.theme_colors()["window"].upper(), "", failures)
+    # 统一窗口主题机制：新窗口零配置继承（过滤器 + theme_window 在位）
+    check("统一窗口主题机制在位（theme_window/install_window_theme）",
+          callable(getattr(M, "theme_window", None))
+          and callable(getattr(M, "install_window_theme", None)), "", failures)
     # 标题栏深浅色（V16.2）：DWM 着色函数 + 全局过滤器在位（改坏会红）
     check("标题栏着色函数与过滤器安装函数在位",
           callable(getattr(M, "_apply_titlebar_theme", None))
