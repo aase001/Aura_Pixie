@@ -1133,15 +1133,16 @@ def main() -> int:
     check("应用级窗口图标已设置（对话框继承）",
           not _QApp.instance().windowIcon().isNull(), "", failures)
     # 主题调色板：浅色=白底黑字、深色=黑底白字（复用 system_dark_mode 判定）
-    _pal_l = M.themed_palette()
+    # 两条都 monkeypatch 固定模式验证，与测试机实际深浅无关（改坏会红）
     _C = M.QPalette.ColorRole
-    check("themed_palette 浅色白底黑字",
-          _pal_l.color(_C.Window).name().upper() == "#FFFFFF"
-          and _pal_l.color(_C.WindowText).name().upper() == "#000000",
-          "", failures)
-    # 强制深色判定验证黑底白字（monkeypatch 系统判定，改坏会红）
     _orig_dark = M.system_dark_mode
     try:
+        M.system_dark_mode = lambda: False
+        _pal_l = M.themed_palette()
+        check("themed_palette 浅色白底黑字",
+              _pal_l.color(_C.Window).name().upper() == "#FFFFFF"
+              and _pal_l.color(_C.WindowText).name().upper() == "#000000",
+              "", failures)
         M.system_dark_mode = lambda: True
         _pal_d = M.themed_palette()
         check("themed_palette 深色黑底白字",
@@ -1179,6 +1180,28 @@ def main() -> int:
     check("统一窗口主题机制在位（theme_window/install_window_theme）",
           callable(getattr(M, "theme_window", None))
           and callable(getattr(M, "install_window_theme", None)), "", failures)
+    # 运行时主题切换（V16.2）：监视器 + 重应用刷新在位（改坏会红）
+    check("运行时主题监视与刷新函数在位",
+          callable(getattr(M, "install_theme_watcher", None))
+          and callable(getattr(M, "_on_system_theme_changed", None))
+          and callable(getattr(M, "_refresh_windows_theme", None)), "", failures)
+    M.install_theme_watcher(_QApp.instance())
+    check("主题监视器已安装（保引用非空）",
+          len(M._theme_watcher_keep) >= 1, "", failures)
+    # 模拟系统切深色 → 回调应整体重应用为黑底白字（改坏会红）
+    _orig_dark2 = M.system_dark_mode
+    _orig_applied = M._applied_dark
+    try:
+        M.system_dark_mode = lambda: True
+        M._applied_dark = False   # 假装当前已应用浅色
+        M._on_system_theme_changed(_QApp.instance())
+        check("系统切深色 → 主题重应用为黑底",
+              _QApp.instance().palette().color(_C.Window).lightness() < 128
+              and M._applied_dark is True, "", failures)
+    finally:
+        M.system_dark_mode = _orig_dark2
+        M._applied_dark = _orig_applied
+        M.apply_app_theme(_QApp.instance())   # 还原真实主题
     # 标题栏深浅色（V16.2）：DWM 着色函数 + 全局过滤器在位（改坏会红）
     check("标题栏着色函数与过滤器安装函数在位",
           callable(getattr(M, "_apply_titlebar_theme", None))

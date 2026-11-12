@@ -258,21 +258,46 @@ def install_window_theme(app) -> None:
 install_titlebar_theme = install_window_theme
 
 
+_theme_watcher_keep: list = []   # 主题变更监视器须长期持有（同翻译器保引用）
+_applied_dark: bool | None = None   # 上次已应用的深浅模式（变更检测基准）
+
+
+def _refresh_windows_theme(app) -> None:
+    """主题切换后刷新全部已开窗口（V16.2 运行时刷新）。
+
+    标题栏逐窗重着色（DWM 不随调色板自动变）；动态样式（设备名小字、
+    表格编辑器）按新主题重算——它们用样式表硬编码了颜色，调色板变了
+    样式表不会自动跟。新窗口若需主题切换刷新，在此按类型补一句即可。
+    """
+    for w in app.topLevelWidgets():
+        if not w.isVisible():
+            continue
+        _apply_titlebar_theme(w)
+        if isinstance(w, MonitorSettingsDialog):
+            for lab in w._hw_labels.values():
+                lab.setStyleSheet(w._hw_style())
+        elif isinstance(w, SettingsDialog):
+            w._apply_table_editor_theme()
+
+
 def apply_app_theme(app) -> None:
-    """应用级深浅色主题统一入口（V16.2 统一机制，新窗口直接复用）。
+    """应用级深浅色主题统一入口（V16.2 统一机制，新窗口直接复用，可重入）。
 
     根因：windows11 原生样式把窗口底色/部分控件交给系统主题绘制，只吃
     调色板里的文字色 → 「文字变了、底色没变、复选框半变」的割裂状态。
     修复：切 Fusion 样式（100% 由调色板驱动）+ colorScheme 与判定一致 +
     白底黑字/黑底白字调色板 + 全局窗口主题过滤器（DWM 标题栏），一次到位。
+    可重入：运行中系统深浅色切换时由监视器再次调用，整体重应用 + 刷新已开窗口。
 
     统一约定（新增窗口必读）：
       · 颜色唯一真源 = theme_colors()，判定唯一真源 = system_dark_mode()；
       · 客户区底色/文字/控件由本入口的 Fusion + themed_palette 全局继承，
         新窗口不要再各自 setPalette/setStyle/硬编码底色；
       · 标题栏由 install_window_theme 的全局过滤器自动补，新窗口零配置；
+      · 动态样式表（硬编码色）须在 _refresh_windows_theme 登记切换刷新；
       · 仅「有意的语义色」（如高级编辑窗橙色危险警示）可局部硬编码。
     """
+    global _applied_dark
     dark = system_dark_mode()
     fusion = QStyleFactory.create("Fusion")
     if fusion is not None:
@@ -281,6 +306,37 @@ def apply_app_theme(app) -> None:
         Qt.ColorScheme.Dark if dark else Qt.ColorScheme.Light)
     app.setPalette(themed_palette())
     install_window_theme(app)
+    _applied_dark = dark
+    _refresh_windows_theme(app)
+
+
+def _on_system_theme_changed(app) -> None:
+    """系统深浅色变化回调：与已应用模式不同才整体重应用（防抖去重）。"""
+    try:
+        if system_dark_mode() != _applied_dark:
+            apply_app_theme(app)
+    except Exception:   # noqa: BLE001 - 主题刷新失败不阻断主流程
+        pass
+
+
+def install_theme_watcher(app) -> None:
+    """安装运行时主题监视（V16.2）：系统深浅色切换 → 整体重应用主题。
+
+    双保险：① Qt styleHints.colorSchemeChanged 信号（系统模式变化即触发）；
+    ② 2s 低频轮询兜底（信号不触发的环境，读注册表比对已应用模式）。
+    监视器/定时器模块级保引用，防 GC。
+    """
+    _theme_watcher_keep.clear()
+    try:
+        app.styleHints().colorSchemeChanged.connect(
+            lambda _scheme: _on_system_theme_changed(app))
+    except Exception:   # noqa: BLE001 - 信号不可用时仅靠轮询兜底
+        pass
+    timer = QTimer(app)
+    timer.setInterval(2000)
+    timer.timeout.connect(lambda: _on_system_theme_changed(app))
+    timer.start()
+    _theme_watcher_keep.append(timer)
 
 
 def install_chinese_buttons(app) -> None:
@@ -5864,6 +5920,8 @@ def main(argv: list[str]) -> int:
     # 应用级深浅色主题（V16.2）：Fusion 样式 + 白底黑字/黑底白字 + DWM 标题栏，
     # 统一入口修复原生样式主题割裂，全部设置窗与控件继承
     apply_app_theme(app)
+    # 运行时主题监视（V16.2）：系统深浅色切换 → 整体重应用 + 刷新已开窗口
+    install_theme_watcher(app)
     # 标准对话框按钮中文（确定/取消/关闭/是/否）：装在 QApplication 之后、
     # 任何窗口之前，覆盖全部 QMessageBox 与未就地 setText 的按钮盒。
     install_chinese_buttons(app)
