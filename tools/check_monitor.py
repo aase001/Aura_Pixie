@@ -54,6 +54,7 @@ def fake_sensors():
         S("RTX 3060", "GpuNvidia", "SmallData", "GPU Memory Total", 6144.0),
         S("UHD Graphics", "GpuIntel", "Load", "D3D 3D", 1.9),
         S("UHD Graphics", "GpuIntel", "SmallData", "D3D Shared Memory Used", 624.55),
+        S("UHD Graphics", "GpuIntel", "SmallData", "D3D Shared Memory Total", 48890.79),
         S("PM991a 512GB", "Storage", "Temperature", "Composite Temperature", 42.0),
         S("PM991a 512GB", "Storage", "Load", "Used Space", 38.6),
         S("ZHITAI 2TB", "Storage", "Temperature", "Composite Temperature", 40.0),
@@ -92,6 +93,8 @@ def section_a():
     ok(mr.hw_names.get("gpu_i") == "UHD Graphics", "核显硬件名采集")
     near(mr.fixed["gpu_i.load"][0], 1.9, .01, "核显 D3D 3D")
     near(mr.fixed["gpu_i.shared"][0], 624.55 / 1024, .001, "共享内存 MB→GB")
+    near(mr.shared_total, 48890.79 / 1024, .001, "共享内存总量 MB→GB（V16.2 比例配色）")
+    near(mr.gpus_d[0]["vram_total"], 6144 / 1024, .001, "独显显存总量 MB→GB")
     ok(len(mr.disks) == 2 and mr.disks[0]["name"] == "PM991a 512GB", "多硬盘按枚举顺序")
     near(mr.disks[0]["usage_lhm"], 38.6, .01, "盘1 容量使用率(SMART)")
     ok(mr.disks[1]["usage_lhm"] is None and mr.disks[1]["total_gb"] == 2048.4,

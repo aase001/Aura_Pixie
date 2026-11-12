@@ -96,6 +96,7 @@ class Metric:
     source: str = ""         # "sidecar" / "psutil" / "psutil+sidecar"
     ts: float = 0.0          # time.time() 采样时刻
     hardware: str = ""       # 硬件名称（CPU/GPU/硬盘窗格小字标注；无则空）
+    total: Optional[float] = None  # 容量总量（与 value 同单位；用量类按比例配色用，V16.2）
 
     @property
     def available(self) -> bool:
@@ -345,6 +346,7 @@ def _match_gpu_family(hw_name: str, hw_type: str) -> Optional[str]:
 class _MapResult:
     """一帧传感器映射后的中间结果（供 MetricsHub 合并）。"""
     fixed: dict[str, tuple[float, str]] = field(default_factory=dict)  # key -> (value, sensor)
+    shared_total: Optional[float] = None  # 核显共享内存总量 GB（D3D Shared Memory Total，V16.2）
     disks: list[dict] = field(default_factory=list)   # 每盘: {name, temp, usage_lhm, total_gb}
     gpus_d: list[dict] = field(default_factory=list)  # 每独显: {name, load, temp, vram_load, vram_used}
     fans: list[dict] = field(default_factory=list)    # {slot, name, value, hw}
@@ -446,6 +448,8 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
                     r.fixed["gpu_i.load"] = (val, name)
                 elif sen == "SmallData" and name == "D3D Shared Memory Used":
                     r.fixed["gpu_i.shared"] = (val / 1024.0, name)  # MB→GB
+                elif sen == "SmallData" and name == "D3D Shared Memory Total":
+                    r.shared_total = val / 1024.0   # MB→GB（用量按比例配色，V16.2）
 
         # ---- 硬盘：顺序 = 侧车枚举顺序（hwIndex 已给 order）----
         elif hwt == "Storage":
@@ -608,11 +612,12 @@ class PsutilSource:
         f = psutil.cpu_freq()
         return (f.current / 1000.0) if f and f.current else None
 
-    def mem(self) -> tuple[Optional[float], Optional[float]]:
+    def mem(self) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        """(使用率%, 已用GB, 总量GB)；总量供用量类按比例配色（V16.2）。"""
         if not psutil:
-            return None, None
+            return None, None, None
         vm = psutil.virtual_memory()
-        return vm.percent, vm.used / (1024 ** 3)
+        return vm.percent, vm.used / (1024 ** 3), vm.total / (1024 ** 3)
 
     def disk_usage_pct(self, total_gb: Optional[float] = None) -> Optional[float]:
         """按容量把 LHM 盘匹配到物理盘，返回该物理盘已挂载分区的最大已用占比。
@@ -779,9 +784,10 @@ class MetricsHub:
         cache["net.rx"] = (now, rx)
         cache["sys.uptime"] = (now, self.ps.uptime())
         cache["cpu.load"] = (now, self.ps.cpu_load())
-        mload, mused = self.ps.mem()
+        mload, mused, mtotal = self.ps.mem()
         cache["mem.load"] = (now, mload)
         cache["mem.used"] = (now, mused)
+        cache["mem.total"] = (now, mtotal)
         cache["cpu.freq_ps"] = (now, self.ps.cpu_freq_ghz())
         # 预留口径（当前无出口）：IO 忙碌率供后续 UI「容量/IO」切换用，
         # 用户已定硬盘使用率=容量使用率，见 disk_usage_pct
@@ -890,6 +896,8 @@ class MetricsHub:
         v, t = self._ps("mem.used")
         out["mem.used"] = mk("mem.used", v, "psutil",
                              STATUS_OK if v is not None else STATUS_STALE)
+        # 总量注入（V16.2 用量按比例配色）：64G 用 16G 不再误落红段
+        out["mem.used"].total = self._ps("mem.total")[0]
 
         for key in ("gpu_i.load", "gpu_i.shared"):
             if key in mr.fixed and sidecar_ok:
@@ -899,6 +907,8 @@ class MetricsHub:
             else:
                 # 侧车正常但无该槽位 → 本机没有对应 GPU（如无核显机型）
                 out[key] = mk(key, None, "sidecar", STATUS_UNSUPPORTED)
+        # 共享内存总量（D3D Shared Memory Total，V16.2 按比例配色）
+        out["gpu_i.shared"].total = mr.shared_total
 
         # ---- 独显（全量枚举，参照硬盘）：每卡 4 参数 gpu_d.{i}.* ----
         gpus_d = mr.gpus_d
@@ -913,6 +923,8 @@ class MetricsHub:
             for suffix in ("load", "temp", "vram_load", "vram_used"):
                 k = f"gpu_d.{i}.{suffix}"
                 out[k] = mk(k, g.get(suffix), "sidecar", st)
+            # 显存总量（GPU Memory Total，V16.2 按比例配色）
+            out[f"gpu_d.{i}.vram_used"].total = g.get("vram_total")
 
         for key in ("net.tx", "net.rx"):
             v, t = self._ps(key)

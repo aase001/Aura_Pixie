@@ -36,7 +36,7 @@ from dataclasses import fields  # noqa: E402
 
 from PySide6.QtCore import QPointF, QRect, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
-from PySide6.QtGui import QFontDatabase, QImage  # noqa: E402
+from PySide6.QtGui import QFontDatabase, QImage, QColor  # noqa: E402
 
 import monitor_hub as mh  # noqa: E402
 import monitor_ui as mu  # noqa: E402
@@ -291,8 +291,9 @@ def section_b():
     m = hub.snapshot()["cpu.load"]
     ok(isinstance(m, mh.Metric), "注入产物是真实 Metric 类型")
     ok({f.name for f in fields(m)} ==
-       {"key", "label", "group", "value", "unit", "status", "source", "ts", "hardware"},
-       "Metric 九字段齐全（含 hardware）")
+       {"key", "label", "group", "value", "unit", "status", "source", "ts",
+        "hardware", "total"},
+       "Metric 十字段齐全（含 hardware/total，V16.2）")
     ok(m.label == "CPU使用率" and m.group == "cpu" and m.unit == "%",
        "label/group/unit 取自白名单定义（不自造名称）")
     ok(m.source == "fake" and m.ts > 0, "source/ts 有值")
@@ -2319,10 +2320,89 @@ def section_n():
     ok("gpu_d.load" not in merged["units"], "旧独显键不残留")
     ok("gpu_d.0.temp" in merged["layout"], "旧独显布局迁移到卡0")
 
+    # ---- N7 用量类按比例配色（V16.2：64G 用 16G 不再闪红）----
+    ok(mu.is_usage_ratio_key("mem.used"), "内存用量属比例配色键")
+    ok(mu.is_usage_ratio_key("gpu_i.shared"), "共享内存用量属比例配色键")
+    ok(mu.is_usage_ratio_key("gpu_d.0.vram_used"), "独显显存用量属比例配色键")
+    ok(mu.is_usage_ratio_key("gpu_d.2.vram_used"), "多卡显存用量属比例配色键")
+    ok(not mu.is_usage_ratio_key("mem.load"), "内存使用率不走比例（本身百分比）")
+    ok(not mu.is_usage_ratio_key("cpu.temp"), "温度不走比例")
+    ok(mu.usage_ratio(16.0, 64.0) == 25.0, "16/64G → 25%")
+    ok(mu.usage_ratio(16.0, None) is None, "总量缺失 → None")
+    ok(mu.usage_ratio(None, 64.0) is None, "无读数 → None")
+    ok(mu.usage_ratio(16.0, 0.0) is None, "总量非正 → None")
+    w7, hub7, mgr7 = _make_widget()
+    mgr7.register_widget("mem.used", w7, ["mem.used"])
+    w7.show()
+    APP.processEvents()
+    # 16/64G=25% → 绿段，不触发高负载呼吸（旧 GB 固定段 16 落红会闪）
+    m7 = mh.Metric("mem.used", "内存用量", "mem", 16.0, "GB",
+                   mh.STATUS_OK, total=64.0)
+    w7.update_data(m7)
+    r7 = w7._rows[0]
+    ok(r7.total == 64.0, "总量经 update_data 同步行")
+    exp_green = mu.get_color_for_value(25.0, mu.default_thresholds("mem.used", "%"))
+    ok(w7._semantic_color(r7).name().upper() == exp_green.name().upper(),
+       "16/64G 按 25% 走绿段（非旧 GB 段红）")
+    ok(w7._semantic_color(r7).name().upper() != mu.SEM_RED.upper(),
+       "16/64G 不误落红段")
+    ok(w7._row_alpha(r7) == 1.0, "16/64G 不触发高负载呼吸")
+    ok(not w7._breathing, "16/64G 呼吸聚合不启动")
+    ok(r7.history[-1] == 16.0, "history 记 canonical GB（非比例值）")
+    ok(w7._value_text(r7) == "16.0", "显示值保持 GB（非百分比）")
+    ok(w7._display_unit(r7) == "GB", "显示单位保持 GB")
+    # 56/64G=87.5% → 红段 + 呼吸（比例口径仍正确报高负载）
+    m7b = mh.Metric("mem.used", "内存用量", "mem", 56.0, "GB",
+                    mh.STATUS_OK, total=64.0)
+    w7.update_data(m7b)
+    ok(w7._row_alpha(r7) < 1.0 or w7._breathing, "56/64G=87.5% 触发高负载呼吸")
+    exp_red = mu.get_color_for_value(87.5, mu.default_thresholds("mem.used", "%"))
+    ok(w7._semantic_color(r7).name().upper() == exp_red.name().upper(),
+       "56/64G 按 87.5% 走红段")
+    # 总量缺失 → 中性色不闪红（宁缺勿错）
+    m7c = mh.Metric("mem.used", "内存用量", "mem", 16.0, "GB",
+                    mh.STATUS_OK, total=None)
+    w7.update_data(m7c)
+    ok(w7._semantic_color(r7).name().upper() == QColor(150, 150, 150).name().upper(),
+       "总量缺失走中性色")
+    ok(w7._row_alpha(r7) == 1.0, "总量缺失不呼吸")
+    # 共享内存/显存用量同口径
+    mgr7.register_widget("gpu_i.shared", w7, ["gpu_i.shared"])
+    m7d = mh.Metric("gpu_i.shared", "共享内存用量", "gpu_i", 0.6, "GB",
+                    mh.STATUS_OK, total=47.7)
+    w7.update_data(m7d)
+    r7s = next(r for r in w7._rows if r.key == "gpu_i.shared")
+    exp_s = mu.get_color_for_value(0.6 / 47.7 * 100,
+                                   mu.default_thresholds("gpu_i.shared", "%"))
+    ok(w7._semantic_color(r7s).name().upper() == exp_s.name().upper(),
+       "共享内存用量按比例配色")
+    mgr7.register_widget("gpu_d.0.vram_used", w7, ["gpu_d.0.vram_used"])
+    m7e = mh.Metric("gpu_d.0.vram_used", "GPU显存用量", "gpu_d", 1.0, "GB",
+                    mh.STATUS_OK, total=6.0)
+    w7.update_data(m7e)
+    r7v = next(r for r in w7._rows if r.key == "gpu_d.0.vram_used")
+    exp_v = mu.get_color_for_value(1.0 / 6.0 * 100,
+                                   mu.default_thresholds("gpu_d.0.vram_used", "%"))
+    ok(w7._semantic_color(r7v).name().upper() == exp_v.name().upper(),
+       "独显显存用量按比例配色")
+    # 用户自定义 threshold 仍按 GB 原值（预留口径不走比例）
+    w7.set_thresholds({"mem.used": [{"min": 0, "max": 8, "color": mu.SEM_GREEN},
+                                    {"min": 8, "max": 16, "color": mu.SEM_YELLOW},
+                                    {"min": 16, "max": 32, "color": mu.SEM_RED}]})
+    w7.update_data(m7)   # 16GB total=64，自定义段 16 落黄→红边界
+    ok(w7._semantic_color(r7).name().upper() != exp_green.name().upper(),
+       "自定义阈值按 GB 原值生效（不走比例）")
+    w7.close()
+
     # ---- N6 源码看守（改坏会红）----
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
     ok("def _display_unit" in src and "KB/s" in src, "网速 KB 自适应在位")
+    ok("def is_usage_ratio_key" in src and "def usage_ratio" in src,
+       "用量比例配色函数在位（源码看守）")
+    hub_src7 = open(os.path.join(root, "monitor_hub.py"), encoding="utf-8").read()
+    ok("D3D Shared Memory Total" in hub_src7 and "mem.total" in hub_src7,
+       "总量采集在位（共享内存/内存，源码看守）")
     ok("row.hardware" in src and "AlignRight" in src, "硬件名小字右对齐绘制在位")
     ok("_notify_new_gpus_d" in src, "独显新卡发现在位")
     hub_src = open(os.path.join(root, "monitor_hub.py"), encoding="utf-8").read()

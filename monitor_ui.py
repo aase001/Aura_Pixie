@@ -265,6 +265,27 @@ def in_top_segment(value: Optional[float], thresholds: list) -> bool:
     return value >= top["min"]
 
 
+# V16.2：用量类（GB）按 用量/总量 比例决定绿黄红——64G 内存用 16G 不再误闪红。
+# 显示值/单位/history 保持 canonical GB（照网速 KB 先例），仅配色与呼吸判定换算。
+_USAGE_RATIO_KEYS = ("mem.used", "gpu_i.shared")
+
+
+def is_usage_ratio_key(key: str) -> bool:
+    """是否用量类键（内存用量/共享内存用量/独显显存用量）。"""
+    if key in _USAGE_RATIO_KEYS:
+        return True
+    parts = key.split(".")
+    return (len(parts) == 3 and parts[0] == "gpu_d"
+            and parts[1].isdigit() and parts[2] == "vram_used")
+
+
+def usage_ratio(value: Optional[float], total: Optional[float]) -> Optional[float]:
+    """用量÷总量×100；任一缺失或总量非正 → None（配色走中性，不闪红）。"""
+    if value is None or total is None or total <= 0:
+        return None
+    return value / total * 100.0
+
+
 def breath_alpha(elapsed_ms: float) -> float:
     """高负载呼吸 alpha：1Hz 正弦 0.3↔1.0，相位取自真实经过时间。"""
     phase = 2.0 * math.pi * BREATH_HZ * (elapsed_ms / 1000.0)
@@ -321,6 +342,7 @@ class UnitRow:
     unit: str
     status: str
     hardware: str = ""   # 硬件名（CPU/GPU/硬盘窗格小字，与参数名右对齐）
+    total: Optional[float] = None  # 容量总量（与 value 同单位；用量类按比例配色，V16.2）
     history: deque = field(
         default_factory=lambda: deque(maxlen=SPARKLINE_POINTS))
 
@@ -823,14 +845,37 @@ class MonitorUnitWidget(QWidget):
             return segs
         return default_thresholds(row.key, row.unit)
 
+    def _color_value(self, row: UnitRow) -> Optional[float]:
+        """配色判定值：用量类（有总量）换算成百分比，其余用 canonical 原值。
+
+        V16.2：内存/共享内存/显存用量按 用量÷总量×100 走百分比三段
+        （0~60 绿/60~85 黄/85~100 红）；总量缺失返回 None → 中性色不闪红。
+        用户自定义 threshold 仍按 GB 原值生效（预留口径，不走比例）。
+        """
+        if is_usage_ratio_key(row.key) and not self._thresholds.get(row.key):
+            return usage_ratio(row.value, row.total)
+        return row.value
+
     def _semantic_color(self, row: UnitRow) -> QColor:
+        if is_usage_ratio_key(row.key) and not self._thresholds.get(row.key):
+            ratio = usage_ratio(row.value, row.total)
+            if ratio is None:
+                return QColor(150, 150, 150)   # 总量缺失：中性色，不误闪红
+            return get_color_for_value(ratio, default_thresholds(row.key, "%"))
         return get_color_for_value(row.value, self.thresholds_for(row))
 
     def _row_alpha(self, row: UnitRow) -> float:
         """高负载呼吸：进入最高阈值段 → 1Hz 正弦 0.3↔1.0；否则恒 1.0。
 
         只影响前景（数值/sparkline），不影响背景。离开阈值段立即恢复。
+        用量类按百分比段判定（与配色同口径，V16.2）。
         """
+        if is_usage_ratio_key(row.key) and not self._thresholds.get(row.key):
+            ratio = usage_ratio(row.value, row.total)
+            if ratio is not None and in_top_segment(
+                    ratio, default_thresholds(row.key, "%")):
+                return breath_alpha(self._breath_clock.elapsed())
+            return 1.0
         if in_top_segment(row.value, self.thresholds_for(row)):
             return breath_alpha(self._breath_clock.elapsed())
         return 1.0
@@ -853,6 +898,7 @@ class MonitorUnitWidget(QWidget):
             row.label = metric.label or row.label
             row.unit = metric.unit or row.unit
             row.hardware = getattr(metric, "hardware", "") or row.hardware
+            row.total = getattr(metric, "total", None)   # 用量类按比例配色（V16.2）
             # history：可用记值，否则 None（断线；网速记 canonical MB/s）
             row.history.append(metric.value if row.available else None)
             self._refresh_breathing()
@@ -872,9 +918,17 @@ class MonitorUnitWidget(QWidget):
             self.log_fn("monitor_ui.update_data", e)
 
     def _refresh_breathing(self) -> None:
-        """任一行进入最高阈值段 → 启动呼吸时钟与动画定时器；全离开 → 停。"""
-        any_top = any(in_top_segment(r.value, self.thresholds_for(r))
-                      for r in self._rows if r.available)
+        """任一行进入最高阈值段 → 启动呼吸时钟与动画定时器；全离开 → 停。
+
+        用量类按 用量÷总量 百分比段判定（与 _row_alpha 同口径，V16.2）。
+        """
+        def _top(r) -> bool:
+            if is_usage_ratio_key(r.key) and not self._thresholds.get(r.key):
+                ratio = usage_ratio(r.value, r.total)
+                return ratio is not None and in_top_segment(
+                    ratio, default_thresholds(r.key, "%"))
+            return in_top_segment(r.value, self.thresholds_for(r))
+        any_top = any(_top(r) for r in self._rows if r.available)
         if any_top and not self._breathing:
             self._breath_clock.start()
             self._breathing = True
