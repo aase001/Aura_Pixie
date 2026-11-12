@@ -5318,7 +5318,7 @@ class MonitorSettingsDialog(QDialog):
             return
         lab = QLabel("—", parent)
         f = lab.font()
-        f.setPixelSize(max(1, f.pixelSize() - 3))   # 最小字号（比参数名小一档）
+        f.setPixelSize(max(1, f.pixelSize() - 2))   # 比参数名小两号（太小会渲染成灰线）
         lab.setFont(f)
         lab.setStyleSheet("color: gray;")
         lab.setContentsMargins(20, 0, 0, 2)   # 与复选框文字左缘大致对齐
@@ -5421,7 +5421,7 @@ class MonitorSettingsDialog(QDialog):
                 if self._hw_capable(key):
                     lab = QLabel("—", self)
                     f = lab.font()
-                    f.setPixelSize(max(1, f.pixelSize() - 3))
+                    f.setPixelSize(max(1, f.pixelSize() - 2))
                     lab.setFont(f)
                     lab.setStyleSheet("color: gray;")
                     lab.setContentsMargins(20, 0, 0, 2)
@@ -5465,7 +5465,7 @@ class MonitorSettingsDialog(QDialog):
                 if self._hw_capable(key):
                     lab = QLabel("—", self)
                     f = lab.font()
-                    f.setPixelSize(max(1, f.pixelSize() - 3))
+                    f.setPixelSize(max(1, f.pixelSize() - 2))
                     lab.setFont(f)
                     lab.setStyleSheet("color: gray;")
                     lab.setContentsMargins(20, 0, 0, 2)
