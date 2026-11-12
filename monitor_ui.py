@@ -320,6 +320,7 @@ class UnitRow:
     value: Optional[float]
     unit: str
     status: str
+    hardware: str = ""   # 硬件名（CPU/GPU/硬盘窗格小字，与参数名右对齐）
     history: deque = field(
         default_factory=lambda: deque(maxlen=SPARKLINE_POINTS))
 
@@ -339,13 +340,15 @@ def default_monitor_config() -> dict:
     sparkline_points 历史点数（60 ≈ 1 分钟）
     idle_stop_sec   连续无监视窗多少秒后停采（0=永不停采）
     units           {参数key: {enabled, threshold:[{min,max,color}...]}}
-                    固定 14 项 + 风扇三槽位 + 硬盘0 兜底项；默认全不勾选。
-                    动态硬盘键（disk.1+）运行时按实例展开，勾选状态落盘保留。
+                    固定 10 项 + 独显卡0 四参 + 风扇三槽位 + 硬盘0 兜底项；
+                    默认全不勾选。动态键（gpu_d.1+ / disk.1+）运行时按实例展开，
+                    勾选状态落盘保留。
     layout          {参数key: {x, y, group_id}}（位置与吸附组记忆）
     """
     units = {key: {"enabled": False, "threshold": []}
              for key, _label, _group, _unit in mh.METRIC_DEFS}
-    for key in ("fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0",
+    for key in ("gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+                "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0",
                 "disk.0.temp", "disk.0.usage"):
         units[key] = {"enabled": False, "threshold": []}
     return {
@@ -513,13 +516,17 @@ class MonitorUnitWidget(QWidget):
             cur_label = max((fm.horizontalAdvance(r.label) for r in rows), default=0)
             cur_value = max((fm.horizontalAdvance(self._value_text(r)) for r in rows),
                             default=0)
-            cur_unit = max((fm.horizontalAdvance(r.unit) for r in rows), default=0)
+            cur_unit = max((fm.horizontalAdvance(self._display_unit(r)) for r in rows),
+                           default=0)
             label_samples = [label for _k, label, _g, _u in mh.METRIC_DEFS]
             label_samples += [mh._def(k)[1] for k in
-                              ("disk.0.temp", "disk.0.usage",
+                              ("gpu_d.0.load", "gpu_d.0.temp",
+                               "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+                               "disk.0.temp", "disk.0.usage",
                                "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")]
             value_samples = list(_SAMPLE_VALUES)
-            unit_samples = [u for _k, _l, _g, u in mh.METRIC_DEFS] + ["℃", "%", "RPM"]
+            unit_samples = ([u for _k, _l, _g, u in mh.METRIC_DEFS]
+                            + ["℃", "%", "RPM", "KB/s"])
             res_label = max((fm.horizontalAdvance(t) for t in label_samples), default=0)
             res_value = max((fm.horizontalAdvance(t) for t in value_samples), default=0)
             res_unit = max((fm.horizontalAdvance(t) for t in unit_samples), default=0)
@@ -589,9 +596,22 @@ class MonitorUnitWidget(QWidget):
         （修复：旧实现用 fmt 带单位串，B 列宽按初始 "--" 量宽后不再重算，
         真实数据右对齐被裁剪只剩尾部单位——数值消失根因。）
         """
+        # 网速 KB 自适应（用户拍板）：采样 <1MB/s → 数值×1024 显示 KB；
+        # 历史缓冲与阈值色仍按 MB/s canonical 口径，仅显示层换算
+        v = row.value
+        if (row.key in ("net.tx", "net.rx") and v is not None
+                and 0 < v < 1.0):
+            v = v * 1024.0
         m = mh.Metric(key=row.key, label=row.label, group="",
-                      value=row.value, unit=row.unit, status=row.status)
+                      value=v, unit=row.unit, status=row.status)
         return mh.MetricsHub.fmt_value(m)
+
+    def _display_unit(self, row: UnitRow) -> str:
+        """C 列单位文本：网速 <1MB/s 时显示 KB/s，其余按白名单单位。"""
+        if (row.key in ("net.tx", "net.rx") and row.value is not None
+                and 0 < row.value < 1.0):
+            return "KB/s"
+        return row.unit
 
     def set_rows(self, rows: list) -> None:
         """动态行增删（多盘/风扇）：替换行集 → 重算高度 → adjustSize。"""
@@ -689,11 +709,11 @@ class MonitorUnitWidget(QWidget):
             p.drawText(QRectF(x_value, y, w_value, self._row_h),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        self._value_text(row))
-            # C 列：单位（左对齐）
+            # C 列：单位（左对齐；网速 KB 自适应）
             p.setPen(tc)
             p.drawText(QRectF(x_unit, y, w_unit, self._row_h),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       row.unit)
+                       self._display_unit(row))
             # 状态小字（数值行下方叠加绘制，不额外占窗格高度——固定 40px 口径）
             st_text = STATUS_TEXT.get(row.status, "")
             if not row.available and st_text:
@@ -705,6 +725,17 @@ class MonitorUnitWidget(QWidget):
                                   w_value + gap + w_unit, self._status_h),
                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                            st_text)
+            # 硬件名小字（CPU/GPU/硬盘）：与参数名右对齐、画在参数名正下方
+            # （用户拍板）；字号同状态小字，颜色走深白浅黑（text_color）
+            if row.hardware:
+                p.setFont(small)
+                hc = QColor(tc)
+                hc.setAlphaF(0.75)
+                p.setPen(hc)
+                p.drawText(QRectF(x_label, y + self._row_h - 2,
+                                  w_label, self._status_h),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           row.hardware)
             y += self._row_h + row_gap
         # sparkline 区域：文本行下方，每行一条折线
         self._paint_sparklines(p, body, s)
@@ -801,13 +832,18 @@ class MonitorUnitWidget(QWidget):
             row = next((r for r in self._rows if r.key == metric.key), None)
             if row is None:
                 return
+            old_unit = self._display_unit(row)
             row.value = metric.value
             row.status = metric.status
             row.label = metric.label or row.label
             row.unit = metric.unit or row.unit
-            # history：可用记值，否则 None（断线）
+            row.hardware = getattr(metric, "hardware", "") or row.hardware
+            # history：可用记值，否则 None（断线；网速记 canonical MB/s）
             row.history.append(metric.value if row.available else None)
             self._refresh_breathing()
+            # 网速 KB↔MB 切换 → 单位列宽变化，重算布局（其余数据跳动不重算）
+            if self._display_unit(row) != old_unit:
+                self.update_layout()
             # 固定基准窗格：列宽已按白名单+样本预留，数据跳动不改变尺寸
             # （旧「变宽即重算撑宽」已废弃——窗格随数据长大是用户反馈的问题）。
             # 仅当内容真实宽度超基准 → 管理器把全部窗格统一扩宽（一改变就全改变）
@@ -1395,6 +1431,8 @@ class MonitorWindowManager:
         # 阶段 A：新盘发现回调（参数级窗格下由 main 决定是否建窗）
         self.on_new_disk_keys: Optional[Callable] = None
         self._known_disk_keys: set = set()
+        self.on_new_gpu_d_keys: Optional[Callable] = None
+        self._known_gpu_d_keys: set = set()
         # 全局扩宽档（用户拍板：任一窗格内容超基准宽 → 所有窗格统一扩宽，
         # 避免大小不一；只升不降，会话内保持统一宽度）
         self._width_expanded = False
@@ -1448,6 +1486,8 @@ class MonitorWindowManager:
             snap = self.hub.snapshot()          # 一帧一映射
             disks = self.hub.list_disks(snapshot=snap)
             self._notify_new_disks(disks)
+            gpus_d = self.hub.list_gpus_d(snapshot=snap)
+            self._notify_new_gpus_d(gpus_d)
             for w in self._widgets.values():
                 if not w.isVisible():
                     continue
@@ -1473,6 +1513,19 @@ class MonitorWindowManager:
             self._known_disk_keys = keys
             if self.on_new_disk_keys is not None:
                 self.on_new_disk_keys(sorted(new))
+
+    def _notify_new_gpus_d(self, gpus_d: list) -> None:
+        """独显全量枚举：发现新卡键 → 回调 main（参照新盘发现，一参数一窗格）。"""
+        keys = set()
+        for g in gpus_d:
+            i = g["index"]
+            for suffix in ("load", "temp", "vram_load", "vram_used"):
+                keys.add(f"gpu_d.{i}.{suffix}")
+        new = keys - self._known_gpu_d_keys
+        if new:
+            self._known_gpu_d_keys = keys
+            if self.on_new_gpu_d_keys is not None:
+                self.on_new_gpu_d_keys(sorted(new))
 
     # ---- 阶段 3：磁吸 ----
     def new_group(self) -> SnapGroup:

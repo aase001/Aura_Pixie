@@ -113,6 +113,9 @@ class FakeHub:
             if k == key:
                 return label, group, unit
         parts = key.split(".")
+        if parts[0] == "gpu_d" and len(parts) == 3:
+            d = mh._def(key)   # 独显全量枚举动态键（复用真实定义还原）
+            return d[1], d[2], d[3]
         if parts[0] == "disk" and len(parts) == 3:
             label = "硬盘温度" if parts[2] == "temp" else "硬盘使用率"
             return f"{label}·盘{int(parts[1]) + 1}", "disk", (
@@ -144,6 +147,16 @@ class FakeHub:
                                  if snap.get(f"disk.{i}.temp") else None),
                         "usage_pct": m.value if m else None,
                         "usage_src": m.source if m else ""})
+            i += 1
+        return out
+
+    def list_gpus_d(self, snapshot=None):
+        snap = snapshot if snapshot is not None else self.snapshot()
+        out = []
+        i = 0
+        while any(f"gpu_d.{i}.{s}" in snap
+                  for s in ("load", "temp", "vram_load", "vram_used")):
+            out.append({"index": i, "name": f"FakeGPU{i}"})
             i += 1
         return out
 
@@ -229,9 +242,10 @@ def section_a():
     ok(cfg["layout"] == {}, "默认 layout 空")
     ok(cfg["enabled"] is False, "监视总开关默认不勾选")
     _fixed = {k for k, *_ in mh.METRIC_DEFS}
-    _dyn = {"fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
+    _dyn = {"gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+            "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
     ok(set(cfg["units"]) == _fixed | _dyn,
-       "units 键全集=白名单固定键+风扇三槽+硬盘0（参数键化）")
+       "units 键全集=白名单固定键+独显卡0+风扇三槽+硬盘0（参数键化）")
     ok("sys.uptime" not in cfg["units"], "运行时间已废弃不列入")
     ok(all(u["enabled"] is False and u["threshold"] == []
            for u in cfg["units"].values()), "units 默认全不勾选+空阈值段")
@@ -278,8 +292,8 @@ def section_b():
     m = hub.snapshot()["cpu.load"]
     ok(isinstance(m, mh.Metric), "注入产物是真实 Metric 类型")
     ok({f.name for f in fields(m)} ==
-       {"key", "label", "group", "value", "unit", "status", "source", "ts"},
-       "Metric 八字段齐全")
+       {"key", "label", "group", "value", "unit", "status", "source", "ts", "hardware"},
+       "Metric 九字段齐全（含 hardware）")
     ok(m.label == "CPU使用率" and m.group == "cpu" and m.unit == "%",
        "label/group/unit 取自白名单定义（不自造名称）")
     ok(m.source == "fake" and m.ts > 0, "source/ts 有值")
@@ -399,6 +413,7 @@ def section_c():
 
     # 白名单键全集与后端定义一致（UI 不得私增/删指标）+ 动态默认键
     _expect = {k for k, *_ in mh.METRIC_DEFS} | {
+        "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
         "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
     ok(set(mu.default_monitor_config()["units"]) == _expect,
        "配置 units 与 METRIC_DEFS+动态默认键同步（加键须两侧同改）")
@@ -1273,6 +1288,7 @@ def section_i():
        and d["monitor"]["idle_stop_sec"] == 300,
        "monitor 默认拉取/闲置参数")
     _expect = {k for k, *_ in mh.METRIC_DEFS} | {
+        "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
         "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
     ok(set(d["monitor"]["units"]) == _expect,
        "monitor units 键全集=白名单+动态默认键")
@@ -1453,6 +1469,7 @@ def section_j():
         ok(dlg.chk_enable.text() == "启用资源监视", "总开关文案")
         ok(not dlg.chk_enable.isChecked(), "总开关默认不勾选")
         _expect = {k for k, *_ in mh.METRIC_DEFS} | {
+            "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
             "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
         ok(set(dlg._param_checks) == _expect,
            f"参数复选框齐全（{len(dlg._param_checks)} 项）")
@@ -2094,6 +2111,128 @@ def section_m():
        "main 外观应用链路主题刷新接线在位")
 
 
+# ---------------------------------------------------------------------------
+# N. 网速 KB 自适应 / 独显全量枚举 / 硬件名小字（本轮功能）
+# ---------------------------------------------------------------------------
+def section_n():
+    print("[N] 网速KB自适应 / 独显全量枚举 / 硬件名小字")
+    import main as M
+
+    # ---- N1 网速 KB 自适应：数值×1024、单位 KB/s ----
+    w, hub, mgr = _make_widget()
+    mgr.register_widget("net.rx", w, ["net.rx"])
+    w.show()
+    APP.processEvents()
+    row = w._rows[0]
+    # <1MB/s → KB
+    hub.set_metric("net.rx", 0.5, mh.STATUS_OK)
+    w.update_data(hub.snapshot()["net.rx"])
+    ok(w._value_text(row) == "512.0", f"0.5MB/s → 512.0 KB（{w._value_text(row)}）")
+    ok(w._display_unit(row) == "KB/s", "0.5MB/s 单位 KB/s")
+    # ≥1MB/s → MB
+    hub.set_metric("net.rx", 2.5, mh.STATUS_OK)
+    w.update_data(hub.snapshot()["net.rx"])
+    ok(w._value_text(row) == "2.5", "2.5MB/s 数值不变")
+    ok(w._display_unit(row) == "MB/s", "2.5MB/s 单位 MB/s")
+    # 边界 1.0 → MB
+    hub.set_metric("net.rx", 1.0, mh.STATUS_OK)
+    w.update_data(hub.snapshot()["net.rx"])
+    ok(w._display_unit(row) == "MB/s", "1.0MB/s 边界走 MB")
+    # 0 → MB（0 不切 KB）
+    hub.set_metric("net.rx", 0.0, mh.STATUS_OK)
+    w.update_data(hub.snapshot()["net.rx"])
+    ok(w._display_unit(row) == "MB/s", "0MB/s 不切 KB")
+    # 无读数 → 单位仍 MB/s，数值 --
+    hub.set_metric("net.rx", None, mh.STATUS_STALE)
+    w.update_data(hub.snapshot()["net.rx"])
+    ok(w._value_text(row) == "--", "无读数数值 --")
+    ok(w._display_unit(row) == "MB/s", "无读数单位 MB/s")
+    # history 记 canonical MB/s（不受 KB 显示影响）
+    hub.set_metric("net.rx", 0.5, mh.STATUS_OK)
+    w.update_data(hub.snapshot()["net.rx"])
+    ok(row.history[-1] == 0.5, "history 记 canonical MB/s（0.5 非 512）")
+    # 阈值色按 canonical MB/s（0.5）插值，而非 KB 显示值（512 会落红段）
+    exp_color = mu.get_color_for_value(0.5, mu.default_thresholds("net.rx", "MB/s"))
+    ok(w._semantic_color(row).name().upper() == exp_color.name().upper(),
+       "网速阈值色按 MB/s 插值（非 KB 显示值）")
+    ok(w._semantic_color(row).name().upper() != mu.SEM_RED.upper(),
+       "0.5MB/s 不误落红段（证明未用 KB 值算色）")
+    w.close()
+
+    # ---- N2 独显全量枚举：动态键定义 + 多卡标签 ----
+    ok(mh._def("gpu_d.0.load")[1] == "GPU(独显)使用率", "独显卡0标签不带后缀")
+    ok(mh._def("gpu_d.1.load")[1] == "GPU(独显)使用率·卡2", "独显卡1标签带卡号")
+    ok(mh._def("gpu_d.0.vram_used")[3] == "GB", "独显显存用量单位 GB")
+    ok(mh._def("gpu_d.2.temp")[1] == "GPU(独显)温度·卡3", "独显卡2温度标签")
+    # 快照多卡产出
+    hub2 = FakeHub()
+    for i in range(2):
+        for s, v in (("load", 10.0 + i), ("temp", 50.0 + i),
+                     ("vram_load", 5.0 + i), ("vram_used", 1.0 + i)):
+            hub2.set_metric(f"gpu_d.{i}.{s}", v, mh.STATUS_OK)
+    snap = hub2.snapshot()
+    ok("gpu_d.0.load" in snap and "gpu_d.1.load" in snap, "快照产出两卡动态键")
+    gpus = hub2.list_gpus_d(snapshot=snap)
+    ok(len(gpus) == 2, "list_gpus_d 枚举两卡")
+
+    # ---- N3 独显新卡发现回调 ----
+    w3, hub3, mgr3 = _make_widget()
+    mgr3.register_widget("gpu_d.0.load", w3, ["gpu_d.0.load"])
+    w3.show()
+    APP.processEvents()
+    discovered = []
+    mgr3.on_new_gpu_d_keys = lambda keys: discovered.extend(keys)
+    hub3.set_metric("gpu_d.0.load", 10.0, mh.STATUS_OK)
+    hub3.set_metric("gpu_d.1.load", 20.0, mh.STATUS_OK)
+    mgr3.tick()
+    ok("gpu_d.1.load" in discovered, f"新独显卡键经回调通知（{discovered}）")
+    discovered.clear()
+    mgr3.tick()
+    ok(discovered == [], "无新卡不重复回调")
+    w3.close()
+
+    # ---- N4 硬件名小字：数据更新同步 + 渲染路径 ----
+    w4, hub4, mgr4 = _make_widget()
+    mgr4.register_widget("cpu.temp", w4, ["cpu.temp"])
+    w4.show()
+    APP.processEvents()
+    m_hw = mh.Metric("cpu.temp", "CPU温度", "cpu", 63.0, "℃",
+                     mh.STATUS_OK, hardware="i7-11800H")
+    w4.update_data(m_hw)
+    ok(w4._rows[0].hardware == "i7-11800H", "硬件名经 update_data 同步行")
+    # 渲染不崩（硬件名小字绘制路径）
+    img = _grab(w4)
+    ok(img.width() > 0, "含硬件名窗格正常渲染")
+    w4.close()
+
+    # ---- N5 旧独显键迁移 ----
+    ok(M._migrate_gpu_d_key("gpu_d.load") == "gpu_d.0.load", "旧键 gpu_d.load 迁移卡0")
+    ok(M._migrate_gpu_d_key("gpu_d.vram_used") == "gpu_d.0.vram_used", "旧显存键迁移")
+    ok(M._migrate_gpu_d_key("gpu_d.0.load") == "gpu_d.0.load", "新键原样保留")
+    ok(M._migrate_gpu_d_key("cpu.load") == "cpu.load", "非独显键不动")
+    # 合并旧配置 units/layout 迁移
+    old_cfg = {"units": {"gpu_d.load": {"enabled": True, "threshold": []}},
+               "layout": {"gpu_d.temp": {"x": 1, "y": 2, "group_id": None}}}
+    merged = M._merge_monitor_block(None, old_cfg)
+    ok(merged["units"].get("gpu_d.0.load", {}).get("enabled") is True,
+       "旧配置独显勾选迁移到卡0")
+    ok("gpu_d.load" not in merged["units"], "旧独显键不残留")
+    ok("gpu_d.0.temp" in merged["layout"], "旧独显布局迁移到卡0")
+
+    # ---- N6 源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("def _display_unit" in src and "KB/s" in src, "网速 KB 自适应在位")
+    ok("row.hardware" in src and "AlignRight" in src, "硬件名小字右对齐绘制在位")
+    ok("_notify_new_gpus_d" in src, "独显新卡发现在位")
+    hub_src = open(os.path.join(root, "monitor_hub.py"), encoding="utf-8").read()
+    ok("gpus_d" in hub_src and "def list_gpus_d" in hub_src, "独显全量枚举接口在位")
+    ok("hw_names" in hub_src, "硬件名采集在位")
+    main_src = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+    ok("_monitor_gpu_d_keys" in main_src and "_migrate_gpu_d_key" in main_src,
+       "main 独显动态键与迁移接线在位")
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -2108,5 +2247,6 @@ if __name__ == "__main__":
     section_k()
     section_l()
     section_m()
+    section_n()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

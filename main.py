@@ -1042,12 +1042,25 @@ def _merge_monitor_block(base_blk, src_blk: dict) -> dict:
         units = merged.get("units") or {}
         for key, val in src_blk["units"].items():
             if isinstance(val, dict):
+                key = _migrate_gpu_d_key(key)   # 旧固定键 → 卡0动态键
                 units[key] = {**(units.get(key) or {"enabled": False, "threshold": []}),
                               **val}
         merged["units"] = units
     if isinstance(src_blk.get("layout"), dict):
-        merged["layout"] = dict(src_blk["layout"])
+        merged["layout"] = {_migrate_gpu_d_key(k): v
+                            for k, v in src_blk["layout"].items()}
     return merged
+
+
+def _migrate_gpu_d_key(key: str) -> str:
+    """旧独显固定键 gpu_d.X → 卡0动态键 gpu_d.0.X（全量枚举改造兼容）。
+
+    仅迁移两段式旧键（gpu_d.load 等）；已是三段式动态键（gpu_d.0.load）原样返回。
+    """
+    parts = key.split(".")
+    if len(parts) == 2 and parts[0] == "gpu_d" and parts[1] in _GPU_D_SUFFIXES:
+        return f"gpu_d.0.{parts[1]}"
+    return key
 
 
 def merge_settings_with_defaults(src: dict) -> dict:
@@ -4621,10 +4634,27 @@ _MONITOR_SCALE_APPLIED = None  # 上次已生效的监视缩放因子（变化�
 
 # 监视单元分组（unit_key → 行键集）：按指标白名单分组，每组一个迷你窗
 # 参数级窗格清单（一参数一窗格；用户拍板：废弃 sys.uptime，无值参数也罗列）。
-# 固定 14 项 + 动态键（硬盘按实例展开 disk.{i}.temp/usage，风扇三槽位）。
+# 固定 10 项 + 动态键（独显 gpu_d.{i}.* 全量枚举、硬盘 disk.{i}.temp/usage、风扇三槽位）。
 # 窗格键 = 指标 key；设置窗复选框与配置 units 均按此键。
 _MONITOR_PARAM_KEYS = tuple(k for k, _label, _group, _unit in monitor_hub.METRIC_DEFS)
 _MONITOR_FAN_KEYS = ("fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")
+_GPU_D_SUFFIXES = ("load", "temp", "vram_load", "vram_used")
+
+
+def _monitor_gpu_d_keys(snapshot: dict | None = None) -> list:
+    """动态独显参数键：按快照中实际卡数展开（每卡 4 参数，参照硬盘）。"""
+    keys = []
+    i = 0
+    while True:
+        card = [f"gpu_d.{i}.{s}" for s in _GPU_D_SUFFIXES]
+        if snapshot is not None:
+            if not any(k in snapshot for k in card):
+                break
+        elif i >= 8:   # 无快照时按上限兜底
+            break
+        keys += card
+        i += 1
+    return keys
 
 
 def _monitor_disk_keys(snapshot: dict | None = None) -> list:
@@ -4694,6 +4724,7 @@ def _ensure_monitor_manager():
                    "save_layout": save_monitor_layout},
     )
     _MONITOR_MGR.on_new_disk_keys = _monitor_on_new_disk_keys
+    _MONITOR_MGR.on_new_gpu_d_keys = _monitor_on_new_gpu_d_keys
     # 闲置停采定时器：每秒检查是否连续 idle_stop_sec 无监视窗
     _MONITOR_IDLE_TIMER = QTimer()
     _MONITOR_IDLE_TIMER.setInterval(1000)
@@ -4724,18 +4755,19 @@ def open_monitor() -> None:
 
 
 def _monitor_all_param_keys(cfg: dict) -> list:
-    """设置窗/同步用的参数全集：固定 14 项 + 配置内动态键 + 快照盘数展开。"""
+    """设置窗/同步用的参数全集：固定 10 项 + 配置内动态键 + 快照盘数/卡数展开。"""
     keys = list(_MONITOR_PARAM_KEYS)
     units = cfg.get("units") or {}
-    # 配置里已有的动态键（硬盘/风扇）保留——换机/多盘勾选状态不丢
+    # 配置里已有的动态键（独显/硬盘/风扇）保留——换机/多卡多盘勾选状态不丢
     for k in units:
-        if k not in keys and (k.startswith("disk.") or k.startswith("fan.")):
+        if k not in keys and (k.startswith("gpu_d.") or k.startswith("disk.")
+                              or k.startswith("fan.")):
             keys.append(k)
-    # 快照中实际盘数展开（采集运行中才能发现新盘）
+    # 快照中实际盘数/卡数展开（采集运行中才能发现新盘/新卡）
     if _MONITOR_HUB is not None:
         try:
             snap = _MONITOR_HUB.snapshot()
-            for k in _monitor_disk_keys(snap):
+            for k in _monitor_disk_keys(snap) + _monitor_gpu_d_keys(snap):
                 if k not in keys:
                     keys.append(k)
         except Exception:  # noqa: BLE001
@@ -4823,6 +4855,19 @@ def _monitor_on_new_disk_keys(new_keys: list) -> None:
             _MONITOR_SETTINGS_DLG.refresh_disk_params()
     except Exception as exc:  # noqa: BLE001
         _log_crash("monitor_new_disk", exc)
+
+
+def _monitor_on_new_gpu_d_keys(new_keys: list) -> None:
+    """采集中发现新独显卡：刷新设置窗参数清单 + 按配置同步窗格（参照新盘）。"""
+    try:
+        cfg = load_monitor_config()
+        if not cfg.get("enabled"):
+            return
+        _monitor_sync_windows(cfg)
+        if _MONITOR_SETTINGS_DLG is not None and _MONITOR_SETTINGS_DLG.isVisible():
+            _MONITOR_SETTINGS_DLG.refresh_gpu_d_params()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_new_gpu_d", exc)
 
 
 def _monitor_backfill_history() -> None:
@@ -4974,7 +5019,7 @@ class MonitorSettingsDialog(QDialog):
             ("CPU", [k for k in _MONITOR_PARAM_KEYS if k.startswith("cpu.")]),
             ("内存", [k for k in _MONITOR_PARAM_KEYS if k.startswith("mem.")]),
             ("GPU(核显)", [k for k in _MONITOR_PARAM_KEYS if k.startswith("gpu_i.")]),
-            ("GPU(独显)", [k for k in _MONITOR_PARAM_KEYS if k.startswith("gpu_d.")]),
+            ("GPU(独显)", self._gpu_d_keys_for_ui()),
             ("硬盘", self._disk_keys_for_ui()),
             ("风扇", list(_MONITOR_FAN_KEYS)),
             ("网络", [k for k in _MONITOR_PARAM_KEYS if k.startswith("net.")]),
@@ -5029,6 +5074,24 @@ class MonitorSettingsDialog(QDialog):
                 keys.append(k)
         return sorted(keys)
 
+    def _gpu_d_keys_for_ui(self) -> list:
+        """独显参数键：配置已有 + 快照实际卡数（至少卡0，全量枚举参照硬盘）。"""
+        keys = []
+        for k in (self._cfg.get("units") or {}):
+            if k.startswith("gpu_d.") and k not in keys:
+                keys.append(k)
+        if _MONITOR_HUB is not None:
+            try:
+                for k in _monitor_gpu_d_keys(_MONITOR_HUB.snapshot()):
+                    if k not in keys:
+                        keys.append(k)
+            except Exception:  # noqa: BLE001
+                pass
+        for k in (f"gpu_d.0.{s}" for s in _GPU_D_SUFFIXES):
+            if k not in keys:
+                keys.append(k)
+        return sorted(keys)
+
     @staticmethod
     def _param_label(key: str) -> str:
         """参数显示名：固定键取白名单中文名；动态键带盘号/槽位。"""
@@ -5068,6 +5131,22 @@ class MonitorSettingsDialog(QDialog):
                 chk.setEnabled(self.chk_enable.isChecked())
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_refresh_disk_params", exc)
+
+    def refresh_gpu_d_params(self) -> None:
+        """采集中发现新独显卡 → 把新卡参数补进复选框清单（保留已有勾选）。"""
+        try:
+            for key in self._gpu_d_keys_for_ui():
+                if key in self._param_checks:
+                    continue
+                chk = QCheckBox(self._param_label(key), self)
+                chk.setToolTip(key)
+                chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
+                self._param_checks[key] = chk
+                idx = self._param_layout.count() - 1  # stretch 之前
+                self._param_layout.insertWidget(idx, chk)
+                chk.setEnabled(self.chk_enable.isChecked())
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_refresh_gpu_d_params", exc)
 
     def _on_enable_toggled(self, on: bool) -> None:
         self._update_param_enabled()

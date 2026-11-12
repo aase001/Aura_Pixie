@@ -83,10 +83,13 @@ def section_a():
     near(mr.fixed["cpu.freq"][0], 4.2076, .001, "cpu.freq=逐核最大 MHz→GHz")
     near(mr.fixed["mem.load"][0], 17.0, .01, "mem.load 用 Total Memory 非 Virtual")
     near(mr.fixed["mem.used"][0], 10.85, .01, "mem.used GB")
-    near(mr.fixed["gpu_d.load"][0], 23.0, .01, "独显负载")
-    near(mr.fixed["gpu_d.temp"][0], 51.0, .01, "独显温度")
-    near(mr.fixed["gpu_d.vram_used"][0], 317 / 1024, .001, "独显显存 MB→GB")
-    near(mr.fixed["gpu_d.vram_load"][0], 5.16, .01, "独显显存使用率")
+    ok(len(mr.gpus_d) == 1 and mr.gpus_d[0]["name"] == "RTX 3060", "独显全量枚举单卡")
+    near(mr.gpus_d[0]["load"], 23.0, .01, "独显负载")
+    near(mr.gpus_d[0]["temp"], 51.0, .01, "独显温度")
+    near(mr.gpus_d[0]["vram_used"], 317 / 1024, .001, "独显显存 MB→GB")
+    near(mr.gpus_d[0]["vram_load"], 5.16, .01, "独显显存使用率")
+    ok(mr.hw_names.get("cpu") == "i7-11800H", "CPU 硬件名采集")
+    ok(mr.hw_names.get("gpu_i") == "UHD Graphics", "核显硬件名采集")
     near(mr.fixed["gpu_i.load"][0], 1.9, .01, "核显 D3D 3D")
     near(mr.fixed["gpu_i.shared"][0], 624.55 / 1024, .001, "共享内存 MB→GB")
     ok(len(mr.disks) == 2 and mr.disks[0]["name"] == "PM991a 512GB", "多硬盘按枚举顺序")
@@ -103,9 +106,9 @@ def section_a():
     s2 = [x for x in fake_sensors() if not (x["hwType"] == "GpuNvidia"
                                             and x["sensor"] == "Load" and x["name"] == "GPU Memory")]
     mr2 = mh.map_frame({"sensors": s2}, fake_meta())
-    near(mr2.fixed["gpu_d.vram_load"][0], 317 / 6144 * 100, .01, "显存使用率计算兜底")
+    near(mr2.gpus_d[0]["vram_load"], 317 / 6144 * 100, .01, "显存使用率计算兜底")
 
-    # 多独显（SLI/工作站）：取 hwOrder 最小的第一块，第二块不得覆盖（防 last-wins）
+    # 多独显（SLI/工作站）：全量枚举两卡，按 order 排序逐卡采集（防 last-wins 串值）
     meta_multi = fake_meta()
     meta_multi["hwIndex"].append({"type": "GpuNvidia", "name": "RTX 3060 #2",
                                   "order": 8, "parent": None})
@@ -116,8 +119,12 @@ def section_a():
          "sensor": "Temperature", "name": "GPU Core", "value": 77.0},
     ]
     mr_multi = mh.map_frame({"sensors": s_multi}, meta_multi)
-    near(mr_multi.fixed["gpu_d.load"][0], 23.0, .01, "多独显取 order 最小首块（负载）")
-    near(mr_multi.fixed["gpu_d.temp"][0], 51.0, .01, "多独显取 order 最小首块（温度）")
+    ok(len(mr_multi.gpus_d) == 2, "多独显全量枚举两卡")
+    near(mr_multi.gpus_d[0]["load"], 23.0, .01, "卡0（order 最小）负载不串值")
+    near(mr_multi.gpus_d[0]["temp"], 51.0, .01, "卡0 温度不串值")
+    near(mr_multi.gpus_d[1]["load"], 88.0, .01, "卡1 负载独立采集")
+    near(mr_multi.gpus_d[1]["temp"], 77.0, .01, "卡1 温度独立采集")
+    ok(mr_multi.gpus_d[1]["name"] == "RTX 3060 #2", "卡1 硬件名")
 
     # 核显误判回归：CPU 名含 "intel"（11th Gen Intel Core）且 order 小于真核显，
     # 不得抢占目标核显导致 gpu_i.* 整卡被跳过（真实机型 i7-11800H + UHD 实证）。
@@ -139,7 +146,7 @@ def section_a():
     mr_igpu = mh.map_frame({"sensors": s_igpu}, meta_igpu)
     near(mr_igpu.fixed["gpu_i.load"][0], 1.9, .01, "CPU 含 intel 不抢占核显（负载）")
     near(mr_igpu.fixed["gpu_i.shared"][0], 550 / 1024, .001, "CPU 含 intel 不抢占核显（共享内存）")
-    near(mr_igpu.fixed["gpu_d.load"][0], 31.0, .01, "独显不受核显修复影响")
+    near(mr_igpu.gpus_d[0]["load"], 31.0, .01, "独显不受核显修复影响")
 
     # 非管理员空帧：无 CPU 温度族、无存储、无任何风扇行；功耗全 0
     sig = mh.map_absent_signals([
@@ -190,7 +197,7 @@ def section_a():
     snap_m = hub_m.snapshot()
     ok(snap_m["disk.0.temp"].status == mh.STATUS_STALE, "断流时硬盘温度标 stale")
     ok(snap_m["disk.0.usage"].status == mh.STATUS_STALE, "断流时硬盘使用率标 stale")
-    ok(snap_m["gpu_d.temp"].status == mh.STATUS_STALE, "断流时 GPU 温度标 stale（口径一致）")
+    ok(snap_m["gpu_d.0.temp"].status == mh.STATUS_STALE, "断流时 GPU 温度标 stale（口径一致）")
 
     # 启动宽限期：尚未出帧但进程活着 ≠ 断流（首帧前枚举可能超过 stale_sec，
     # 旧口径会把正常启动误判成断流，重启预算耗尽后首帧永远等不到）
@@ -224,10 +231,18 @@ def section_b():
         keys = set(snap)
         for k in ("cpu.load", "cpu.freq", "cpu.temp", "cpu.power",
                   "mem.load", "mem.used", "gpu_i.load", "gpu_i.shared",
-                  "gpu_d.load", "gpu_d.temp", "gpu_d.vram_load", "gpu_d.vram_used",
+                  "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
                   "net.tx", "net.rx"):
             ok(k in keys, f"快照含 {k}")
         ok("sys.uptime" not in keys, "运行时间已废弃：快照不再产出该键")
+        ok("gpu_d.load" not in keys, "旧独显固定键已废弃（改动态枚举）")
+        # 独显全量枚举接口 + 硬件名注入
+        gpus_d = hub.list_gpus_d(snapshot=snap)
+        ok(isinstance(gpus_d, list), "list_gpus_d 返回列表")
+        ok(snap["cpu.load"].hardware != "", "CPU 指标注入硬件名")
+        if gpus_d:
+            ok(snap["gpu_d.0.load"].hardware == gpus_d[0]["name"],
+               "独显指标注入硬件名")
         ok(snap["cpu.load"].status == mh.STATUS_OK and 0 <= snap["cpu.load"].value <= 100,
            "cpu.load 合理")
         near_v = snap["mem.used"].value

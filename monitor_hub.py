@@ -95,6 +95,7 @@ class Metric:
     status: str              # STATUS_* 之一
     source: str = ""         # "sidecar" / "psutil" / "psutil+sidecar"
     ts: float = 0.0          # time.time() 采样时刻
+    hardware: str = ""       # 硬件名称（CPU/GPU/硬盘窗格小字标注；无则空）
 
     @property
     def available(self) -> bool:
@@ -114,15 +115,18 @@ METRIC_DEFS: list[tuple[str, str, str, str]] = [
     ("mem.used",        "内存用量",            "mem",   "GB"),
     ("gpu_i.load",      "GPU(核显)使用率",     "gpu_i", "%"),
     ("gpu_i.shared",    "共享内存用量",        "gpu_i", "GB"),
-    ("gpu_d.load",      "GPU(独显)使用率",     "gpu_d", "%"),
-    ("gpu_d.temp",      "GPU(独显)温度",       "gpu_d", "℃"),
-    ("gpu_d.vram_load", "GPU(独显)显存使用率", "gpu_d", "%"),
-    ("gpu_d.vram_used", "GPU(独显)显存用量",   "gpu_d", "GB"),
     ("net.tx",          "网络发送速率",        "net",   "MB/s"),
     ("net.rx",          "网络接收速率",        "net",   "MB/s"),
-    # 动态键（按实例数量展开）：disk.{i}.temp / disk.{i}.usage / fan.{slot}.{i}
+    # 动态键（按实例数量展开）：gpu_d.{i}.* / disk.{i}.temp / disk.{i}.usage / fan.{slot}.{i}
 ]
 
+# 独显全量枚举（用户拍板，参照硬盘）：每块独显 4 参数，多卡直接加设置项进组
+_GPU_D_DEFS = [("gpu_d.{i}.load",      "GPU(独显)使用率",     "gpu_d", "%"),
+               ("gpu_d.{i}.temp",      "GPU(独显)温度",       "gpu_d", "℃"),
+               ("gpu_d.{i}.vram_load", "GPU(独显)显存使用率", "gpu_d", "%"),
+               ("gpu_d.{i}.vram_used", "GPU(独显)显存用量",   "gpu_d", "GB")]
+_GPU_D_SUFFIX = {"load": "使用率", "temp": "温度",
+                 "vram_load": "显存使用率", "vram_used": "显存用量"}
 _DISK_DEFS = [("disk.{i}.temp", "硬盘温度", "disk", "℃"),
               ("disk.{i}.usage", "硬盘使用率", "disk", "%")]
 _FAN_DEFS = [("fan.{slot}.{i}", "风扇转速", "fan", "RPM")]
@@ -341,21 +345,22 @@ def _match_gpu_family(hw_name: str, hw_type: str) -> Optional[str]:
 class _MapResult:
     """一帧传感器映射后的中间结果（供 MetricsHub 合并）。"""
     fixed: dict[str, tuple[float, str]] = field(default_factory=dict)  # key -> (value, sensor)
-    disks: list[dict] = field(default_factory=list)   # 每盘: {name, temp, usage_lhm}
-    fans: list[dict] = field(default_factory=list)    # {slot, name, value}
+    disks: list[dict] = field(default_factory=list)   # 每盘: {name, temp, usage_lhm, total_gb}
+    gpus_d: list[dict] = field(default_factory=list)  # 每独显: {name, load, temp, vram_load, vram_used}
+    fans: list[dict] = field(default_factory=list)    # {slot, name, value, hw}
+    hw_names: dict = field(default_factory=dict)      # 硬件名: cpu / gpu_i / disk.{i}（窗格小字）
 
 
 def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
     r = _MapResult()
     sensors = frame.get("sensors", [])
 
-    # 独显可能有多块（SLI/工作站）：取 hwOrder 最小的第一块；核显同理。
-    # 先按家族选出 order 最小的目标 hw 名，映射时只采集目标卡，
-    # 其余同家族卡的传感器跳过（否则逐传感器覆盖写入会变成 last-wins 拿错卡）。
-    gpu_d_order: Optional[int] = None
+    # 独显全量枚举（用户拍板，参照硬盘）：所有独显按 hwOrder 排序逐卡采集，
+    # 产出 gpu_d.{i}.* 动态键；核显仍取 order 最小首块（gpu_i.* 固定键）。
+    # fam_by_hw：hw 名 → "d"/"i"，映射时据此分流；非目标硬件跳过防 last-wins。
     gpu_i_order: Optional[int] = None
-    gpu_d_name: Optional[str] = None
     gpu_i_name: Optional[str] = None
+    d_cards: list[tuple[int, str]] = []   # (order, name) 全部独显
     fam_by_hw: dict[str, str] = {}
     for h in (meta or {}).get("hwIndex", []):
         # 仅 GPU 类型硬件参与独显/核显判定：CPU 名含 "intel"（如 11th Gen
@@ -365,18 +370,20 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
             continue
         fam = _match_gpu_family(h.get("name", ""), h.get("type", ""))
         if fam == "dedicated":
-            if gpu_d_order is None or h["order"] < gpu_d_order:
-                gpu_d_order, gpu_d_name = h["order"], h["name"]
+            d_cards.append((h["order"], h["name"]))
         elif fam == "integrated":
             if gpu_i_order is None or h["order"] < gpu_i_order:
                 gpu_i_order, gpu_i_name = h["order"], h["name"]
-    if gpu_d_name is not None:
-        fam_by_hw[gpu_d_name] = "d"
+    d_cards.sort(key=lambda x: x[0])
+    d_index_by_name: dict[str, int] = {}
+    for i, (_o, nm) in enumerate(d_cards):
+        fam_by_hw[nm] = "d"
+        d_index_by_name[nm] = i
     if gpu_i_name is not None:
         fam_by_hw[gpu_i_name] = "i"
+        r.hw_names["gpu_i"] = gpu_i_name
 
     cpu_clocks: list[float] = []
-    vram_total: Optional[float] = None
 
     for s in sensors:
         hw, hwt, sen, name = s.get("hw", ""), s.get("hwType", ""), s.get("sensor", ""), s.get("name", "")
@@ -384,6 +391,7 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
 
         # ---- CPU ----
         if hwt == "Cpu":
+            r.hw_names["cpu"] = hw   # 硬件名（窗格小字标注）
             if sen == "Load" and name == "CPU Total":
                 r.fixed["cpu.load"] = (val, "CPU Total")
             elif sen == "Temperature" and name == "CPU Package":
@@ -413,16 +421,26 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
                 # 无 meta（裸帧调用）退回按类型判家族，保持旧行为
                 fam = _gpu_family_from_type(hwt)
             if fam == "d":
+                # 逐卡采集（全量枚举）：按 hw 名定位卡序号，写入该卡 dict
+                idx = d_index_by_name.get(hw)
+                if idx is None:
+                    continue
+                while len(r.gpus_d) <= idx:
+                    r.gpus_d.append({"name": "", "load": None, "temp": None,
+                                     "vram_load": None, "vram_used": None,
+                                     "vram_total": None})
+                g = r.gpus_d[idx]
+                g["name"] = hw
                 if sen == "Load" and name == "GPU Core":
-                    r.fixed["gpu_d.load"] = (val, name)
+                    g["load"] = val
                 elif sen == "Temperature" and name == "GPU Core":
-                    r.fixed["gpu_d.temp"] = (val, name)
+                    g["temp"] = val
                 elif sen == "Load" and name == "GPU Memory":
-                    r.fixed["gpu_d.vram_load"] = (val, name)
+                    g["vram_load"] = val
                 elif sen == "SmallData" and name == "GPU Memory Used":
-                    r.fixed["gpu_d.vram_used"] = (val / 1024.0, name)  # MB→GB
+                    g["vram_used"] = val / 1024.0   # MB→GB
                 elif sen == "SmallData" and name == "GPU Memory Total":
-                    vram_total = val / 1024.0
+                    g["vram_total"] = val / 1024.0
             elif fam == "i":
                 if sen == "Load" and name == "D3D 3D":
                     r.fixed["gpu_i.load"] = (val, name)
@@ -447,10 +465,10 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
     if cpu_clocks:
         r.fixed["cpu.freq"] = (max(cpu_clocks) / 1000.0, "CPU Core Max MHz")
 
-    # 显存使用率缺失时用 Used/Total 兜底（AMD 卡常见只给绝对值）
-    if "gpu_d.vram_load" not in r.fixed and "gpu_d.vram_used" in r.fixed and vram_total:
-        used = r.fixed["gpu_d.vram_used"][0]
-        r.fixed["gpu_d.vram_load"] = (used / vram_total * 100.0, "vram calc")
+    # 显存使用率缺失时用 Used/Total 兜底（AMD 卡常见只给绝对值）——逐卡独立计算
+    for g in r.gpus_d:
+        if g["vram_load"] is None and g["vram_used"] is not None and g["vram_total"]:
+            g["vram_load"] = g["vram_used"] / g["vram_total"] * 100.0
 
     return r
 
@@ -873,15 +891,28 @@ class MetricsHub:
         out["mem.used"] = mk("mem.used", v, "psutil",
                              STATUS_OK if v is not None else STATUS_STALE)
 
-        for key in ("gpu_i.load", "gpu_i.shared", "gpu_d.load", "gpu_d.temp",
-                    "gpu_d.vram_load", "gpu_d.vram_used"):
+        for key in ("gpu_i.load", "gpu_i.shared"):
             if key in mr.fixed and sidecar_ok:
                 out[key] = mk(key, mr.fixed[key][0], "sidecar")
             elif not sidecar_ok:
                 out[key] = mk(key, None, "sidecar", st_sidecar)
             else:
-                # 侧车正常但无该槽位 → 本机没有对应 GPU（如无独显机型）
+                # 侧车正常但无该槽位 → 本机没有对应 GPU（如无核显机型）
                 out[key] = mk(key, None, "sidecar", STATUS_UNSUPPORTED)
+
+        # ---- 独显（全量枚举，参照硬盘）：每卡 4 参数 gpu_d.{i}.* ----
+        gpus_d = mr.gpus_d
+        if not gpus_d:
+            # 无独显：产出卡0占位（无值也罗列，换机可用），状态同侧车口径
+            st = st_sidecar if not sidecar_ok else STATUS_UNSUPPORTED
+            for suffix in ("load", "temp", "vram_load", "vram_used"):
+                k = f"gpu_d.0.{suffix}"
+                out[k] = mk(k, None, "sidecar", st)
+        for i, g in enumerate(gpus_d):
+            st = st_sidecar if not sidecar_ok else STATUS_OK
+            for suffix in ("load", "temp", "vram_load", "vram_used"):
+                k = f"gpu_d.{i}.{suffix}"
+                out[k] = mk(k, g.get(suffix), "sidecar", st)
 
         for key in ("net.tx", "net.rx"):
             v, t = self._ps(key)
@@ -929,6 +960,21 @@ class MetricsHub:
             for slot in _FAN_SLOTS:
                 out[f"fan.{slot}.0"] = mk(f"fan.{slot}.0", None, "sidecar", reason)
 
+        # ---- 硬件名称注入（CPU/GPU/硬盘窗格小字标注；深白浅黑由 UI 渲染）----
+        for k, m in out.items():
+            if k.startswith("cpu."):
+                m.hardware = mr.hw_names.get("cpu", "")
+            elif k.startswith("gpu_i."):
+                m.hardware = mr.hw_names.get("gpu_i", "")
+            elif k.startswith("gpu_d."):
+                gi = k.split(".")[1]
+                if gi.isdigit() and int(gi) < len(mr.gpus_d):
+                    m.hardware = mr.gpus_d[int(gi)].get("name", "")
+            elif k.startswith("disk."):
+                di = k.split(".")[1]
+                if di.isdigit() and int(di) < len(mr.disks):
+                    m.hardware = mr.disks[int(di)].get("name", "")
+
         return out
 
     def get(self, key: str) -> Optional[Metric]:
@@ -953,6 +999,14 @@ class MetricsHub:
                 "usage_src": m.source if m else "",
             })
         return out
+
+    def list_gpus_d(self, snapshot: Optional[dict] = None) -> list[dict]:
+        """[{index, name}]，独显全量枚举，顺序=侧车 hwIndex order（参照 list_disks）。"""
+        frame = self.runner.latest_frame()
+        if not frame:
+            return []
+        mr = map_frame(frame, self.runner._meta)
+        return [{"index": i, "name": g["name"]} for i, g in enumerate(mr.gpus_d)]
 
     def list_fans(self) -> list[FanInfo]:
         """多风扇按槽位顺序罗列（cpu / gpu_d / mobo，同槽位内按出现顺序编号）。"""
@@ -1013,6 +1067,16 @@ def _def(key: str) -> tuple[str, str, str, str]:
         if row[0] == key:
             return row
     parts = key.split(".")
+    # 独显动态键 gpu_d.{i}.{suffix}：单卡（i=0）标签不带后缀（避免长标签
+    # 触发全局扩宽），多卡第 2 张起带「·卡N」区分（全量枚举，参照硬盘）。
+    if (len(parts) == 3 and parts[0] == "gpu_d" and parts[1].isdigit()
+            and parts[2] in _GPU_D_SUFFIX):
+        i = int(parts[1])
+        label = "GPU(独显)" + _GPU_D_SUFFIX[parts[2]]
+        if i > 0:
+            label += f"·卡{i + 1}"
+        unit = {"load": "%", "temp": "℃", "vram_load": "%", "vram_used": "GB"}[parts[2]]
+        return (key, label, "gpu_d", unit)
     for tpl, label, group, unit in _DISK_DEFS:
         # 按完整模板匹配：disk.{i}.temp / disk.{i}.usage 两个模板头都是 disk，
         # 只比前缀会让 usage 恒命中第一个 temp 模板（标签错标成「硬盘温度」）。
@@ -1052,13 +1116,16 @@ if __name__ == "__main__":
     up = hub.uptime()
     print(f"系统运行时间: {up[1]}")
     order = ["cpu.load", "cpu.freq", "cpu.temp", "cpu.power",
-             "mem.load", "mem.used",
-             "gpu_i.load", "gpu_i.shared",
-             "gpu_d.load", "gpu_d.temp", "gpu_d.vram_load", "gpu_d.vram_used",
+             "mem.load", "mem.used", "gpu_i.load", "gpu_i.shared",
              "net.tx", "net.rx"]
     for k in order:
         m = snap.get(k)
-        print(f"{m.label:<16} {MetricsHub.fmt(m):>12}   [{m.status}]")
+        print(f"{m.label:<16} {MetricsHub.fmt(m):>12}   [{m.status}]  {m.hardware}")
+    for g in hub.list_gpus_d():
+        for suffix in ("load", "temp", "vram_load", "vram_used"):
+            m = snap.get(f"gpu_d.{g['index']}.{suffix}")
+            if m:
+                print(f"{m.label:<16} {MetricsHub.fmt(m):>12}   [{m.status}]  {m.hardware}")
     for d in hub.list_disks():
         print(f"硬盘#{d['index'] + 1} {d['name'][:28]:<28} 温度={d['temp']}℃ "
               f"使用率={d['usage_pct']}%({d['usage_src']})")
