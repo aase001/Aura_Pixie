@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""monitor_ui 阶段 0 自检（离屏，无真实硬件/侧车依赖）。
+"""monitor_ui 阶段 0+1 自检（离屏，无真实硬件/侧车依赖）。
 
-四节：
+五节：
   A. 契约与骨架——注入接口、UnitRow、配置块默认、空壳冒烟
   B. 假 hub——字段与真实 Metric 完全一致、五态/序列可脚本化注入、
      snapshot 计数、list_disks 传帧复用、与真实 hub 输出交叉验证
   C. 源码看守——禁 import main、禁 QPropertyAnimation、禁 primaryScreen、
      禁 get(key) 拉取、禁 exec() 嵌套（改坏会红）
   D. 环境看守——offscreen 平台、QApplication 先于字体加载
+  E. 阶段 1 渲染与布局——窗口标志、三列内容驱动、缩放、光晕像素、动态行高
 
 跑法：  python tools/check_monitor_ui.py
 退出码： 0 全过 / 1 有失败
@@ -23,8 +24,9 @@ import time  # noqa: E402
 from collections import deque  # noqa: E402
 from dataclasses import fields  # noqa: E402
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
-from PySide6.QtGui import QFontDatabase  # noqa: E402
+from PySide6.QtGui import QFontDatabase, QImage  # noqa: E402
 
 import monitor_hub as mh  # noqa: E402
 import monitor_ui as mu  # noqa: E402
@@ -232,9 +234,8 @@ def section_a():
     ok(w.scale_getter() == 1.0 and w.topmost_getter() is False,
        "注入回调可调用")
 
-    # 空壳方法一律 NotImplementedError（阶段边界看守）
-    raises_not_implemented(lambda: w.update_layout(), "update_layout 未实现")
-    raises_not_implemented(lambda: w.set_rows([]), "set_rows 未实现")
+    # 未实现方法一律 NotImplementedError（阶段边界看守；
+    # update_layout/set_rows 阶段 1 已实现，改由 E 节真实验证）
     raises_not_implemented(lambda: w.update_data(None), "update_data 未实现")
     raises_not_implemented(
         lambda: w.simulate_data_update("cpu.load", 1.0, mh.STATUS_OK),
@@ -398,10 +399,217 @@ def section_d():
     ok(_FONT_ID != -1, "msyh.ttc 字体加载成功（先 app 后字体，坑 4）")
 
 
+# ---------------------------------------------------------------------------
+# E. 阶段 1：渲染与动态布局
+# ---------------------------------------------------------------------------
+def _make_widget(unit_key="cpu", scale=1.0, topmost=False, theme=None):
+    inj = make_injections()
+    inj["scale_getter"] = lambda: scale
+    inj["topmost_getter"] = lambda: topmost
+    if theme is not None:
+        inj["theme"] = theme
+    hub = FakeHub()
+    mgr = mu.MonitorWindowManager(hub, **inj)
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+    w = mu.MonitorUnitWidget(unit_key, hub, manager=mgr, **w_inj)
+    return w, hub, mgr
+
+
+def _row(key, label, value, unit, status=mh.STATUS_OK):
+    return mu.UnitRow(key=key, label=label, value=value, unit=unit, status=status)
+
+
+def _grab(w):
+    """离屏 grab 渲染结果（真实 paintEvent 像素）。"""
+    return w.grab().toImage()
+
+
+def _alpha(img, x, y):
+    return (img.pixel(x, y) >> 24) & 0xFF
+
+
+def section_e():
+    print("[E] 阶段 1 渲染与动态布局")
+    from PySide6.QtGui import QFontMetrics
+
+    # ---- E1 窗口标志与属性 ----
+    w, hub, mgr = _make_widget()
+    flags = w.windowFlags()
+    ok(bool(flags & Qt.WindowType.FramelessWindowHint), "FramelessWindowHint 标志")
+    ok(bool(flags & Qt.WindowType.Tool), "Tool 标志（防任务栏按钮）")
+    ok(w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground),
+       "WA_TranslucentBackground")
+    ok(w.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground),
+       "WA_NoSystemBackground")
+    ok(not bool(flags & Qt.WindowType.WindowStaysOnTopHint),
+       "topmost_getter=False → 不置顶")
+    w2, _, _ = _make_widget(topmost=True)
+    ok(bool(w2.windowFlags() & Qt.WindowType.WindowStaysOnTopHint),
+       "topmost_getter=True → 置顶（随注入不写死）")
+    w2.close()
+
+    # ---- E2 内容驱动尺寸（非写死、show 前非假 640x480）----
+    rows = [_row("cpu.load", "CPU使用率", 42.0, "%"),
+            _row("cpu.temp", "CPU温度", 63.2, "℃")]
+    w.set_rows(rows)
+    ok((w.width(), w.height()) != (640, 480),
+       f"show 前尺寸非假 640x480（{w.width()}x{w.height()}）")
+    ok((w.width(), w.height()) != (200, 40), "尺寸非写死 200x40")
+    # 宽度 = 三列内容最大宽 + 2 列间距 + 2 padding（独立用 QFontMetrics 复算）
+    fm = QFontMetrics(w._font())
+    s = 1.0
+    exp_w_label = max(fm.horizontalAdvance(r.label) for r in rows)
+    exp_w_value = max(fm.horizontalAdvance(w._value_text(r)) for r in rows)
+    exp_w_unit = max(fm.horizontalAdvance(r.unit) for r in rows)
+    exp_w = (exp_w_label + exp_w_value + exp_w_unit
+             + 2 * round(mu.COL_GAP * s) + 2 * round(mu.PAD_X * s))
+    ok(w.width() == exp_w, f"宽=三列内容最大宽推导（{w.width()} vs {exp_w}）")
+    ok(w._col_w == (exp_w_label, exp_w_value, exp_w_unit),
+       "列宽缓存=各列内容最大宽")
+
+    # ---- E3 内容变化 → 宽度变化 ----
+    w_short, _, _ = _make_widget()
+    w_short.set_rows([_row("cpu.load", "CPU", 1.0, "%")])
+    w_long, _, _ = _make_widget()
+    w_long.set_rows([_row("gpu_d.vram_load", "GPU(独显)显存使用率", 88.8, "%")])
+    ok(w_long.width() > w_short.width(),
+       f"长内容宽 > 短内容宽（{w_long.width()} > {w_short.width()}）")
+    w_short.close()
+    w_long.close()
+
+    # ---- E4 缩放：绝对像素量乘缩放，行为参数不乘 ----
+    w_s1, _, _ = _make_widget(scale=1.0)
+    w_s1.set_rows(rows)
+    w_s2, _, _ = _make_widget(scale=2.0)
+    w_s2.set_rows(rows)
+    ok(w_s2.width() > w_s1.width(), f"2x 缩放宽更大（{w_s2.width()} > {w_s1.width()}）")
+    ok(w_s2.height() > w_s1.height(), "2x 缩放高更大")
+    ok(w_s2._font().pixelSize() == round(mu.FONT_PX * 2.0),
+       "字号随缩放（2x）")
+    # 缩放现查：同一窗改 scale_getter 后 paint 触发重算（不缓存第二真源）
+    scale_box = {"v": 1.0}
+    w_dyn, _, _ = _make_widget()
+    w_dyn.scale_getter = lambda: scale_box["v"]
+    w_dyn.set_rows(rows)
+    w_before = w_dyn.width()
+    scale_box["v"] = 2.0
+    _grab(w_dyn)  # paintEvent 检测缩放变化 → update_layout
+    ok(w_dyn.width() > w_before,
+       f"缩放现查重算（{w_before} → {w_dyn.width()}）")
+    w_dyn.close()
+    w_s1.close()
+    w_s2.close()
+
+    # ---- E5 动态行增删 → 高度重算 ----
+    w_d, _, _ = _make_widget()
+    w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃")])
+    h1 = w_d.height()
+    w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃"),
+                  _row("disk.0.usage", "硬盘使用率·盘1", 38.6, "%"),
+                  _row("disk.1.temp", "硬盘温度·盘2", 40.0, "℃")])
+    h3 = w_d.height()
+    ok(h3 > h1, f"3 行高 > 1 行高（{h3} > {h1}）")
+    w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃")])
+    ok(w_d.height() == h1, "减行回到原高")
+    w_d.close()
+
+    # ---- E6 光晕像素：独立态有退晕、吸附态关闭 ----
+    # 深色主题，光晕=主题过渡色。grab 真实渲染。
+    theme_dark = {"color_start": "#FFFFFF", "color_mid": "#283FFE",
+                  "color_end": "#FFFFFF", "system_dark_mode": True}
+    w_h, _, _ = _make_widget(theme=theme_dark)
+    w_h.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
+    img = _grab(w_h)
+    W, H = img.width(), img.height()
+    halo = round(mu.HALO_PX * 1.0)
+    # 四角最外像素：光晕退晕最外层，alpha 应很低（接近 0）
+    corner_a = _alpha(img, 0, 0)
+    # 本体外围光晕带中点（上边中央，距外缘 halo/2）：应有非零 alpha
+    halo_mid_a = _alpha(img, W // 2, max(1, halo // 2))
+    # 本体中心：不透明底色
+    center_a = _alpha(img, W // 2, H // 2)
+    ok(center_a > 150, f"本体中心近不透明（alpha={center_a}）")
+    ok(0 < halo_mid_a < center_a,
+       f"光晕带 alpha 介于透明与本体间（{halo_mid_a}）")
+    ok(corner_a < halo_mid_a,
+       f"光晕由外向内渐增（角 {corner_a} < 带中 {halo_mid_a}）")
+    # 吸附态：光晕关闭 → 外围光晕带 alpha 显著下降
+    w_h._is_snapped = True
+    img_snap = _grab(w_h)
+    halo_mid_a_snap = _alpha(img_snap, W // 2, max(1, halo // 2))
+    ok(halo_mid_a_snap < halo_mid_a,
+       f"吸附态光晕关闭（{halo_mid_a_snap} < {halo_mid_a}）")
+    ok(_alpha(img_snap, W // 2, H // 2) > 150, "吸附态本体仍在")
+    w_h.close()
+
+    # ---- E7 光晕颜色随主题（非深色收边）----
+    # 浅色主题光晕应偏浅底，深色主题偏深底；本体色随深浅色切换
+    ok(mu.body_color({"system_dark_mode": True}).lightness() < 128,
+       "深色系统 → 深底")
+    ok(mu.body_color({"system_dark_mode": False}).lightness() > 128,
+       "浅色系统 → 浅底")
+    ok(mu.text_color({"system_dark_mode": True}).lightness() > 128,
+       "深色系统 → 浅字")
+    ok(mu.text_color({"system_dark_mode": False}).lightness() < 128,
+       "浅色系统 → 深字（白字不可见问题）")
+    ok(mu.halo_color({"color_mid": "#FF0000"}).name().upper() == "#FF0000",
+       "光晕基色=主题过渡色")
+
+    # ---- E8 数值格式化走 hub.fmt（不自造换算）----
+    w_f, _, _ = _make_widget()
+    r_up = _row("sys.uptime", "系统运行时间", 3725.0, "s")
+    ok(w_f._value_text(r_up) == "1:02:05", "uptime 走 fmt（H:MM:SS）")
+    r_na = _row("cpu.temp", "CPU温度", None, "℃", mh.STATUS_NEED_ADMIN)
+    ok(w_f._value_text(r_na) == "需管理员", "need_admin 走 fmt 文案")
+    r_fan = _row("fan.cpu.0", "CPU风扇转速", 2400.0, "RPM")
+    ok(w_f._value_text(r_fan) == "2400 RPM", "风扇整数 RPM 走 fmt")
+    w_f.close()
+
+    # ---- E9 崩溃兜底：回调异常经 log_fn 不裸抛 ----
+    logged = []
+    w_log, _, _ = _make_widget()
+    w_log.log_fn = lambda where, exc: logged.append(where)
+    w_log.scale_getter = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    w_log.update_layout()  # 内部异常应被兜住
+    ok(any("update_layout" in x for x in logged),
+       f"update_layout 异常经 log_fn（{logged}）")
+    w_log.close()
+
+    # ---- E10 show_at 调 place_fn 再 show ----
+    placed = []
+    w_p, _, _ = _make_widget()
+    w_p.place_fn = lambda widget, anchor: placed.append((widget, anchor))
+    w_p.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
+    w_p.show_at("ANCHOR")
+    ok(len(placed) == 1 and placed[0][1] == "ANCHOR",
+       "show_at 调 place_fn(widget, anchor)")
+    ok(w_p.isVisible(), "show_at 后窗口可见")
+    w_p.close()
+
+    # ---- E11 变高方向同帧 repaint（源码看守，坑 53）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("self.repaint()" in src and "_last_h" in src,
+       "变高方向同帧 repaint 防脏区（_last_h 看守在位）")
+    ok("adjustSize()" in src, "布局末尾 adjustSize（坑 50）")
+
+    # ---- E12 光晕绘制路径看守（改坏会红）----
+    # paintEvent 必须在「非吸附态」分支调用 _paint_halo；
+    # 若删除该调用或去掉吸附判断，E6 像素断言与本源码看守双重变红。
+    ok("self._paint_halo(" in src, "paintEvent 调用 _paint_halo（绘制路径在位）")
+    ok("if not self._is_snapped:" in src,
+       "光晕仅在独立态绘制（吸附态关闭的分支在位）")
+    ok("HALO_ALPHA" in src and "setAlphaF" in src,
+       "光晕走 alpha 退晕（非深色收边）")
+
+    w.close()
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
     section_c()
     section_d()
+    section_e()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)
