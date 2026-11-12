@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""monitor_ui 阶段 0+1+2+3+4 自检（离屏，无真实硬件/侧车依赖）。
+"""monitor_ui 阶段 0~5 自检（离屏，无真实硬件/侧车依赖）。
 
-八节：
+九节：
   A. 契约与骨架——注入接口、UnitRow、配置块默认、空壳冒烟
   B. 假 hub——字段与真实 Metric 完全一致、五态/序列可脚本化注入、
      snapshot 计数、list_disks 传帧复用、与真实 hub 输出交叉验证
@@ -12,14 +12,21 @@
   F. 阶段 2 数据可视化——五态、阈值插值、呼吸相位、history、一帧一映射
   G. 阶段 3 磁吸——拖动→预览→松手落位→入组、移动中不吸附、幽灵穿透、屏幕边
   H. 阶段 4 解绑收口——解绑复位、右键轻点不拆组、四层清扫、全隐停、测试钩子
+  I. 阶段 5 接线——配置四函数、注入契约、生命周期、布局记忆（隔离 LOCALAPPDATA）
 
 跑法：  python tools/check_monitor_ui.py
 退出码： 0 全过 / 1 有失败
 """
 import os
 import sys
+import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 自启隔离：接线测试若走保存路径，计划任务/旧启动项清理全部空跑
+os.environ["AURA_AUTOSTART_DRYRUN"] = "1"
+# 配置隔离：LOCALAPPDATA 指到临时目录，绝不触碰真实配置
+_ISOLATED_LOCALAPPDATA = tempfile.mkdtemp(prefix="aura_mon_ui_localappdata_")
+os.environ["LOCALAPPDATA"] = _ISOLATED_LOCALAPPDATA
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -79,6 +86,7 @@ class FakeHub:
     def __init__(self):
         self._frame: dict[str, mh.Metric] = {}
         self._queue: list[dict] = []
+        self._history: dict = {}
         self.snapshot_calls = 0
         self.list_disks_calls = 0
         self.start_calls = 0
@@ -143,6 +151,13 @@ class FakeHub:
         return [mh.FanInfo(slot=s, index=0, name=f"FakeFan {s}",
                            value=None, status=mh.STATUS_UNSUPPORTED)
                 for s in ("cpu", "gpu_d", "mobo")]
+
+    def history(self, key):
+        # 与真实 MetricsHub.history 同契约：返回副本，无记录空列表
+        return list(self._history.get(key, []))
+
+    def seed_history(self, key, values):
+        self._history[key] = list(values)
 
     def start(self):
         self.start_calls += 1
@@ -1186,6 +1201,145 @@ def section_h():
     wb.close()
 
 
+# ---------------------------------------------------------------------------
+# I. 阶段 5：集成接线与生命周期（import main，隔离 LOCALAPPDATA）
+# ---------------------------------------------------------------------------
+def section_i():
+    print("[I] 阶段 5 集成接线与生命周期")
+    import main as M
+
+    # ---- I1 配置四函数：default 含 monitor 块 ----
+    d = M.default_settings()
+    ok("monitor" in d and isinstance(d["monitor"], dict),
+       "default_settings 含 monitor 块")
+    ok(d["monitor"]["refresh_ms"] == 1000
+       and d["monitor"]["idle_stop_sec"] == 300,
+       "monitor 默认拉取/闲置参数")
+    ok(set(d["monitor"]["units"]) == {k for k, *_ in mh.METRIC_DEFS},
+       "monitor units 键全集=白名单")
+
+    # ---- I2 _merge_config：monitor 块字段级合并 + 缺键回退 ----
+    base = M.default_settings()
+    src = {"monitor": {"refresh_ms": 2000,
+                       "units": {"cpu.load": {"enabled": False}},
+                       "layout": {"cpu": {"x": 10, "y": 20, "group_id": "g1"}}}}
+    merged = M._merge_config(base, src)
+    ok(merged["monitor"]["refresh_ms"] == 2000, "monitor 源字段覆盖")
+    ok(merged["monitor"]["idle_stop_sec"] == 300, "monitor 缺键回退默认")
+    ok(merged["monitor"]["units"]["cpu.load"]["enabled"] is False,
+       "monitor units 子块合并")
+    ok(merged["monitor"]["units"]["cpu.temp"]["enabled"] is True,
+       "monitor units 未改键保留默认")
+    ok(merged["monitor"]["layout"]["cpu"]["x"] == 10, "monitor layout 合并")
+    # 无 monitor 源 → 保留 base 默认（不丢块）
+    merged2 = M._merge_config(M.default_settings(), {"functions": []})
+    ok("monitor" in merged2 and merged2["monitor"]["refresh_ms"] == 1000,
+       "无 monitor 源保留默认块")
+
+    # ---- I3 load/save 往返（隔离配置；base 指临时目录，不扫描项目根）----
+    M.ensure_settings(base=tempfile.mkdtemp(prefix="aura_mon_root_"))
+    cfg = M.load_monitor_config()
+    ok(cfg["refresh_ms"] == 1000, "load_monitor_config 默认")
+    cfg["refresh_ms"] = 1500
+    cfg["idle_stop_sec"] = 120
+    M.save_monitor_config(cfg)
+    cfg2 = M.load_monitor_config()
+    ok(cfg2["refresh_ms"] == 1500 and cfg2["idle_stop_sec"] == 120,
+       "save/load 往返一致")
+    # save_monitor_layout 只动 layout，不动拉取参数
+    M.save_monitor_layout({"mem": {"x": 5, "y": 6, "group_id": None}})
+    cfg3 = M.load_monitor_config()
+    ok(cfg3["refresh_ms"] == 1500, "save_layout 不动拉取参数")
+    ok(cfg3["layout"]["mem"]["x"] == 5, "save_layout 写入布局")
+
+    # ---- I4 注入契约：scale/theme/topmost/place/log/config_io ----
+    ok(abs(M._monitor_scale_getter() - M.display_scale_factor("monitor")) < 1e-9,
+       "scale_getter 包 display_scale_factor('monitor')")
+    th = M._monitor_theme()
+    ok(th["color_mid"] == M.CONFIG["color_mid"]
+       and "system_dark_mode" in th, "theme 包呼吸三色+深浅色")
+    ok(M._monitor_topmost_getter() == M.topmost_enabled(),
+       "topmost_getter 包 window.always_on_top")
+    ok(callable(M._monitor_place_fn) and callable(M._monitor_log_fn),
+       "place_fn/log_fn 可调用")
+    # monitor_ui 仍禁 import main（循环依赖看守）
+    mu_src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "monitor_ui.py"), encoding="utf-8").read()
+    import ast
+    bad = [n.module for n in ast.walk(ast.parse(mu_src))
+           if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("main")]
+    ok(not bad, "monitor_ui 仍禁 import main（接线后不回归）")
+
+    # ---- I5 SCALE_UNITS tooltip 更新为已实现 ----
+    mon_label = dict(M.SCALE_UNITS).get("monitor")
+    ok(mon_label == "资源监视单元", "SCALE_UNITS monitor 单元在位")
+    main_src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
+    ok("monitor_ui 已实现" in main_src, "monitor tooltip 注释更新为已实现")
+
+    # ---- I6 生命周期：首开 start、关窗停渲染不停采、退出 stop ----
+    # 不替换 MetricsHub 类（monitor_ui 内部用 mh.MetricsHub.fmt）；
+    # 先正常创建 manager，再把 hub 实例换成假 hub（避免启动侧车进程）。
+    M._MONITOR_MGR = None
+    M._MONITOR_HUB = None
+    mgr = M._ensure_monitor_manager()
+    fake = FakeHub()
+    real_hub = M._MONITOR_HUB
+    M._MONITOR_HUB = fake
+    mgr.hub = fake
+    try:
+        ok(mgr is not None, "惰性创建 manager")
+        ok(fake.start_calls == 0, "创建 manager 不启动采集")
+        # 打开监视 → 建窗 + start
+        M.open_monitor()
+        ok(fake.start_calls == 1, "首开 → hub.start() 一次")
+        ok(len(mgr._widgets) > 0, "建窗成功")
+        ok(any(w.isVisible() for w in mgr._widgets.values()), "监视窗可见")
+        ok(mgr._timer.isActive(), "拉取定时器运行")
+        # 关窗 → 停渲染定时器，但 hub 不停采（关窗不停采语义）
+        for w in mgr._widgets.values():
+            w.hide()
+        APP.processEvents()
+        mgr.tick()
+        ok(not mgr._timer.isActive(), "全隐 → 停拉取定时器")
+        ok(fake.stop_calls == 0, "关窗不停采（hub.stop 未调用）")
+        # 重开 → 不重复 start（first_open 判定按可见窗，采集持续）
+        fake.seed_history("cpu.load", [10.0, 20.0, 30.0])
+        M.open_monitor()
+        ok(fake.start_calls == 2,
+           "重开再 start（侧车已停采时重新拉起；首开/重开各一次）")
+        # 历史回填：重开后 cpu.load 行 history 来自 hub 缓冲
+        cpu_w = mgr._widgets.get("cpu")
+        if cpu_w is not None:
+            row = next((r for r in cpu_w._rows if r.key == "cpu.load"), None)
+            ok(row is not None and list(row.history)[:3] == [10.0, 20.0, 30.0],
+               "重开历史回填（秒回曲线）")
+        # 退出 → shutdown_monitor 必达 stop
+        M.shutdown_monitor()
+        ok(fake.stop_calls >= 1, "退出 → hub.stop() 必达")
+    finally:
+        for w in list(mgr._widgets.values()):
+            w.close()
+        real_hub.stop()
+        M._MONITOR_MGR = None
+        M._MONITOR_HUB = None
+
+    # ---- I7 内置扇区动作 monitor: 前缀识别 ----
+    ok("monitor:" in main_src and "open_monitor" in main_src,
+       "扇区 monitor: 动作入口在位")
+    ok("act_monitor" in main_src and "资源监视" in main_src,
+       "右键菜单资源监视入口在位")
+    ok("aboutToQuit.connect(shutdown_monitor)" in main_src,
+       "退出钩子接线在位")
+
+    # ---- I8 布局记忆落盘函数在位（移动停止 10s 先例）----
+    ok("def _monitor_layout_settle" in main_src
+       and "save_monitor_layout" in main_src,
+       "布局记忆 10s 落盘接线在位")
+    ok("def _monitor_idle_check" in main_src and "idle_stop_sec" in main_src,
+       "闲置停采接线在位")
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -1195,5 +1349,6 @@ if __name__ == "__main__":
     section_f()
     section_g()
     section_h()
+    section_i()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

@@ -44,6 +44,8 @@ import time
 import winreg
 
 import yaml
+import monitor_hub
+import monitor_ui
 from PySide6.QtCore import (QByteArray, QElapsedTimer, QEvent, QLibraryInfo,
                             QMimeData, QPoint,
                             QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer,
@@ -231,7 +233,7 @@ CREATE_NO_WINDOW = 0x08000000
 # 后续新增单元：此表加一行 + 渲染处调 display_scale_factor(键)。
 SCALE_UNITS = (
     ("ball", "球体及扇形"),          # 球体直径/光晕/扇环几何/扇区字号（渲染已接入）
-    ("monitor", "资源监视单元"),      # 预留给后续资源监视窗（MonitorDialog 尚未实现）
+    ("monitor", "资源监视单元"),      # 资源监视迷你窗（monitor_ui 已实现，阶段 5 接线）
     ("quicklaunch", "快捷启动单元"),  # 预留给后续快捷启动单元（尚未开发）
 )
 _SCALE_MIN, _SCALE_MAX, _SCALE_STEP = 50, 200, 25
@@ -975,6 +977,8 @@ def default_settings() -> dict:
                        "display_scale": normalize_scale_block(None)},
         "autostart": {"enabled": False},
         "window": {"always_on_top": False, "pos_x": None, "pos_y": None},
+        # 资源监视块（阶段 5）：拉取/历史/闲置停采 + 单元开关阈值 + 布局记忆
+        "monitor": monitor_ui.default_monitor_config(),
     }
 
 
@@ -1007,7 +1011,32 @@ def _merge_config(base: dict, src: dict) -> dict:
         base["autostart"] = {"enabled": astart}
     if isinstance(src.get("window"), dict):
         base["window"] = {**(base.get("window") or {}), **src["window"]}
+    # monitor 块（阶段 5）：字段级合并 + 缺键回退默认（照 appearance 先例）。
+    # units/layout 是嵌套子块，合并后整块归一，避免脏键长期堆积。
+    mon_src = src.get("monitor")
+    if isinstance(mon_src, dict):
+        base["monitor"] = _merge_monitor_block(base.get("monitor"), mon_src)
     return base
+
+
+def _merge_monitor_block(base_blk, src_blk: dict) -> dict:
+    """监视块合并：以出厂默认为底，源字段覆盖；units/layout 嵌套子块整块归一。"""
+    merged = monitor_ui.default_monitor_config()
+    if isinstance(base_blk, dict):
+        merged.update({k: v for k, v in base_blk.items() if k in merged})
+    for k in ("refresh_ms", "sparkline_points", "idle_stop_sec"):
+        if k in src_blk:
+            merged[k] = src_blk[k]
+    if isinstance(src_blk.get("units"), dict):
+        units = merged.get("units") or {}
+        for key, val in src_blk["units"].items():
+            if isinstance(val, dict):
+                units[key] = {**(units.get(key) or {"enabled": True, "threshold": []}),
+                              **val}
+        merged["units"] = units
+    if isinstance(src_blk.get("layout"), dict):
+        merged["layout"] = dict(src_blk["layout"])
+    return merged
 
 
 def merge_settings_with_defaults(src: dict) -> dict:
@@ -3029,6 +3058,37 @@ def apply_appearance_to_config(cfg: dict) -> None:
     refresh_geometry(CONFIG["display_scale"])
 
 
+# ---------------------------------------------------------------- 监视配置（阶段 5）
+def load_monitor_config() -> dict:
+    """读取监视配置块；缺键回退默认（照 appearance 先例，解析失败不打断启动）。"""
+    data = read_setting().get("monitor")
+    return _merge_monitor_block(None, data if isinstance(data, dict) else {})
+
+
+def save_monitor_config(cfg: dict) -> None:
+    """写回监视配置块（不动其他块）；units/layout 整块归一后落盘。"""
+    data = read_setting()
+    data["monitor"] = _merge_monitor_block(None, cfg if isinstance(cfg, dict) else {})
+    try:
+        write_setting(data)
+    except OSError as exc:
+        _log_crash("save_monitor_config", exc)
+
+
+def save_monitor_layout(layout: dict) -> None:
+    """仅写监视布局记忆（layout 子块），不动 units/拉取参数（位置记忆先例）。"""
+    data = read_setting()
+    mon = data.get("monitor")
+    if not isinstance(mon, dict):
+        mon = monitor_ui.default_monitor_config()
+    mon["layout"] = dict(layout or {})
+    data["monitor"] = mon
+    try:
+        write_setting(data)
+    except OSError as exc:
+        _log_crash("save_monitor_layout", exc)
+
+
 def normalize_hex(text: str, fallback: str) -> str:
     """把用户输入归一成 #RRGGBB；不合法的返回 fallback（保持原色）。"""
     t = (text or "").strip().lstrip("#")
@@ -4297,6 +4357,10 @@ class AuraBall(QWidget):
         if sec["placeholder"]:
             return
         code = sec["code"]
+        # 内置扇区动作（阶段 5）：monitor: 前缀 → 打开资源监视，不走代码执行通道
+        if code.strip().lower().startswith("monitor:"):
+            QTimer.singleShot(0, open_monitor)
+            return
         # 含成对特殊标记（次级功能）时，执行「主指令」（标记前）；无标记原样执行
         parsed = parse_special_sections(code)
         if parsed["err"]:
@@ -4326,6 +4390,7 @@ class AuraBall(QWidget):
             # V10：右键不再触发次级扇形（改由单击），任何位置一律弹默认菜单
             menu = QMenu(self)
             act_settings = menu.addAction("设置")
+            act_monitor = menu.addAction("资源监视")
             act_reload = menu.addAction("重载")
             act_disappear = menu.addAction("消失")
             act_quit = menu.addAction("退出")
@@ -4335,6 +4400,8 @@ class AuraBall(QWidget):
                 # QDialog.exec —— 嵌套模态窗在 Windows 上会中断主事件循环、程序整体退出。
                 # 用 singleShot(0) 把对话框推迟到本函数返回、菜单模态完全结束后再开。
                 QTimer.singleShot(0, self.open_settings)
+            elif chosen is act_monitor:
+                QTimer.singleShot(0, open_monitor)
             elif chosen is act_reload:
                 self.reload_config()
             elif chosen is act_disappear:
@@ -4466,6 +4533,235 @@ def _place_dialog_near_rect(dlg: QWidget, target: QRect, anchor: "AuraBall | Non
     x = max(screen.left() + 4, min(x, screen.right() - w - 4))
     y = max(screen.top() + 4, min(y, screen.bottom() - h - 4))
     dlg.move(x, y)
+
+
+# ---------------------------------------------------------------- 资源监视接线（阶段 5）
+# 薄接线层：monitor_ui 禁止 import main，共用能力一律构造注入。
+# 生命周期已拍板：关窗不停采只停渲染；连续 idle_stop_sec 无任何监视窗才停采。
+_MONITOR_HUB = None          # MetricsHub（采集后端，进程级单例）
+_MONITOR_MGR = None          # MonitorWindowManager（UI 管理器）
+_MONITOR_BALL = None         # 球体引用（定位锚点）
+_MONITOR_IDLE_TIMER = None   # 闲置停采定时器
+_MONITOR_LAST_VISIBLE = 0.0  # 上次有监视窗可见的时刻
+_MONITOR_LAYOUT_TIMER = None  # 布局记忆落盘定时器（移动停止 10s）
+_MONITOR_LAYOUT_DIRTY = False
+
+# 监视单元分组（unit_key → 行键集）：按指标白名单分组，每组一个迷你窗
+_MONITOR_UNITS = (
+    ("sys", ["sys.uptime"]),
+    ("cpu", ["cpu.load", "cpu.freq", "cpu.temp", "cpu.power"]),
+    ("mem", ["mem.load", "mem.used"]),
+    ("gpu_i", ["gpu_i.load", "gpu_i.shared"]),
+    ("gpu_d", ["gpu_d.load", "gpu_d.temp", "gpu_d.vram_load", "gpu_d.vram_used"]),
+    ("disk", ["disk.0.temp", "disk.0.usage"]),
+    ("fan", ["fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0"]),
+    ("net", ["net.tx", "net.rx"]),
+)
+
+
+def _monitor_scale_getter() -> float:
+    return display_scale_factor("monitor")
+
+
+def _monitor_theme() -> dict:
+    return {"color_start": CONFIG["color_start"],
+            "color_mid": CONFIG["color_mid"],
+            "color_end": CONFIG["color_end"],
+            "system_dark_mode": system_dark_mode()}
+
+
+def _monitor_topmost_getter() -> bool:
+    return topmost_enabled()
+
+
+def _monitor_place_fn(widget, anchor_rect) -> None:
+    _place_dialog_near_rect(widget, anchor_rect, _MONITOR_BALL)
+
+
+def _monitor_config_io_read() -> dict:
+    return load_monitor_config()
+
+
+def _monitor_config_io_write(cfg: dict) -> None:
+    save_monitor_config(cfg)
+
+
+def _monitor_log_fn(where: str, exc: BaseException) -> None:
+    _log_crash(where, exc)
+
+
+def _ensure_monitor_manager():
+    """惰性创建 hub + manager（首次打开监视窗时）；注入件按契约绑定。"""
+    global _MONITOR_HUB, _MONITOR_MGR, _MONITOR_IDLE_TIMER, _MONITOR_LAYOUT_TIMER
+    if _MONITOR_MGR is not None:
+        return _MONITOR_MGR
+    _MONITOR_HUB = monitor_hub.MetricsHub()
+    cfg = load_monitor_config()
+    _MONITOR_MGR = monitor_ui.MonitorWindowManager(
+        _MONITOR_HUB,
+        scale_getter=_monitor_scale_getter,
+        place_fn=_monitor_place_fn,
+        theme=_monitor_theme(),
+        topmost_getter=_monitor_topmost_getter,
+        log_fn=_monitor_log_fn,
+        config_io={"read": _monitor_config_io_read,
+                   "write": _monitor_config_io_write,
+                   "save_layout": save_monitor_layout},
+    )
+    # 闲置停采定时器：每秒检查是否连续 idle_stop_sec 无监视窗
+    _MONITOR_IDLE_TIMER = QTimer()
+    _MONITOR_IDLE_TIMER.setInterval(1000)
+    _MONITOR_IDLE_TIMER.timeout.connect(_monitor_idle_check)
+    # 布局记忆：移动停止 10s 落盘（照球心位置记忆先例）
+    _MONITOR_LAYOUT_TIMER = QTimer()
+    _MONITOR_LAYOUT_TIMER.setInterval(1000)
+    _MONITOR_LAYOUT_TIMER.timeout.connect(_monitor_layout_settle)
+    return _MONITOR_MGR
+
+
+def open_monitor() -> None:
+    """打开资源监视：右键菜单/扇区入口。首开 → hub.start() + 建窗 + 拉取。"""
+    global _MONITOR_LAST_VISIBLE
+    try:
+        mgr = _ensure_monitor_manager()
+        cfg = load_monitor_config()
+        anchor = _MONITOR_BALL._outer_frame_rect() if _MONITOR_BALL else QRect(0, 0, 1, 1)
+        first_open = not any(w.isVisible() for w in mgr._widgets.values())
+        # 建窗（按分组；已存在的窗只唤起）
+        for unit_key, row_keys in _MONITOR_UNITS:
+            ucfg = (cfg.get("units") or {}).get(unit_key) or {}
+            if ucfg.get("enabled") is False:
+                continue
+            w = mgr._widgets.get(unit_key)
+            if w is None:
+                w = monitor_ui.MonitorUnitWidget(
+                    unit_key, mgr.hub,
+                    scale_getter=_monitor_scale_getter,
+                    place_fn=_monitor_place_fn,
+                    theme=_monitor_theme(),
+                    topmost_getter=_monitor_topmost_getter,
+                    log_fn=_monitor_log_fn,
+                    manager=mgr)
+                thresholds = {k: ucfg.get("threshold") or [] for k in row_keys}
+                mgr.register_widget(unit_key, w, row_keys, thresholds)
+                w.set_settings_callback(open_monitor_settings)
+                _monitor_restore_layout(w, cfg.get("layout") or {})
+            if not w.isVisible():
+                w.show_at(anchor)
+            w.raise_()
+        # 首开 → 启动采集（侧车冷启动 ~5s 宽限，UI 显示唤醒中）
+        if first_open:
+            _MONITOR_HUB.start()
+            _monitor_backfill_history()
+        mgr.start_polling(cfg.get("refresh_ms", 1000))
+        _MONITOR_LAST_VISIBLE = time.time()
+        if _MONITOR_IDLE_TIMER is not None:
+            _MONITOR_IDLE_TIMER.start()
+        if _MONITOR_LAYOUT_TIMER is not None:
+            _MONITOR_LAYOUT_TIMER.start()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("open_monitor", exc)
+
+
+def _monitor_backfill_history() -> None:
+    """重开时把 hub 历史环形缓冲回填到各行 sparkline（秒回曲线）。"""
+    try:
+        for w in _MONITOR_MGR._widgets.values():
+            for row in w._rows:
+                hist = _MONITOR_HUB.history(row.key)
+                if hist:
+                    row.history.clear()
+                    row.history.extend(hist)
+            w.update()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_backfill", exc)
+
+
+def _monitor_restore_layout(w, layout: dict) -> None:
+    """按布局记忆摆放单元窗（有记录用记录，无记录走 place_fn）。"""
+    rec = layout.get(w.unit_key)
+    if isinstance(rec, dict):
+        try:
+            x, y = float(rec.get("x")), float(rec.get("y"))
+            if math.isfinite(x) and math.isfinite(y):
+                w.move(round(x), round(y))
+                return
+        except (TypeError, ValueError):
+            pass
+
+
+def _monitor_idle_check() -> None:
+    """连续 idle_stop_sec 无任何监视窗 → hub.stop() 释放侧车（~76MB）。"""
+    global _MONITOR_LAST_VISIBLE
+    try:
+        cfg = load_monitor_config()
+        idle_stop = cfg.get("idle_stop_sec", 300)
+        any_visible = any(w.isVisible() for w in _MONITOR_MGR._widgets.values())
+        if any_visible:
+            _MONITOR_LAST_VISIBLE = time.time()
+            return
+        if idle_stop and idle_stop > 0:
+            if time.time() - _MONITOR_LAST_VISIBLE >= idle_stop:
+                _MONITOR_HUB.stop()
+                if _MONITOR_IDLE_TIMER is not None:
+                    _MONITOR_IDLE_TIMER.stop()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_idle_check", exc)
+
+
+def _monitor_layout_settle() -> None:
+    """布局记忆：移动停止 10s 落盘（照球心位置记忆先例，退出不写）。"""
+    global _MONITOR_LAYOUT_DIRTY
+    try:
+        if _MONITOR_MGR is None:
+            return
+        layout = {}
+        moved = False
+        for unit_key, w in _MONITOR_MGR._widgets.items():
+            if not w.isVisible():
+                continue
+            pos = w.pos()
+            layout[unit_key] = {"x": pos.x(), "y": pos.y(),
+                                "group_id": w._group.group_id if w._group else None}
+            last = getattr(w, "_monitor_last_pos", None)
+            if last is None or (pos.x() != last.x() or pos.y() != last.y()):
+                moved = True
+            w._monitor_last_pos = pos
+        if moved:
+            _MONITOR_LAYOUT_DIRTY = True
+            _monitor_layout_settle._still = 0
+            return
+        if not _MONITOR_LAYOUT_DIRTY:
+            return
+        _monitor_layout_settle._still = getattr(_monitor_layout_settle, "_still", 0) + 1
+        if _monitor_layout_settle._still >= 10:
+            _MONITOR_LAYOUT_DIRTY = False
+            _monitor_layout_settle._still = 0
+            save_monitor_layout(layout)
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_layout_settle", exc)
+
+
+def open_monitor_settings() -> None:
+    """监视窗「打开设置」入口：复用主设置窗（非模态）。"""
+    try:
+        if _MONITOR_BALL is not None:
+            QTimer.singleShot(0, _MONITOR_BALL.open_settings)
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("open_monitor_settings", exc)
+
+
+def shutdown_monitor() -> None:
+    """主程序退出 → hub.stop() 必达（释放侧车进程）。"""
+    try:
+        if _MONITOR_IDLE_TIMER is not None:
+            _MONITOR_IDLE_TIMER.stop()
+        if _MONITOR_LAYOUT_TIMER is not None:
+            _MONITOR_LAYOUT_TIMER.stop()
+        if _MONITOR_HUB is not None:
+            _MONITOR_HUB.stop()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("shutdown_monitor", exc)
 
 
 def _selftest() -> int:
@@ -4653,6 +4949,10 @@ def main(argv: list[str]) -> int:
     ball.place_at(sx, sy)
     ball.show()
     ball.start()
+    # 监视接线（阶段 5）：球体引用供监视窗定位锚点；退出时 hub.stop() 必达
+    global _MONITOR_BALL
+    _MONITOR_BALL = ball
+    app.aboutToQuit.connect(shutdown_monitor)
     # 启动跨进程定位监听：第二实例点「在哪儿？」时经命名管道唤起本球
     try:
         _start_locate_server(ball.locate_here)
