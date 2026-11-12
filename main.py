@@ -5142,9 +5142,24 @@ class MonitorSettingsDialog(QDialog):
         self._param_checks: dict = {}
         self._hw_labels: dict = {}   # key -> 设备名小字 QLabel（不落盘，每次运行重载）
         self._bulk_updating = False  # 批量勾选守卫：全选/载入期间抑制逐项保存同步
+        # 设备名补刷新：窗体可见期间定时从实时快照重取（首帧晚到/后打开窗
+        # 也能补上设备名）；隐藏即停，不拉起采集、不改采集生命周期。
+        self._hw_refresh_timer = QTimer(self)
+        self._hw_refresh_timer.setInterval(1500)
+        self._hw_refresh_timer.timeout.connect(self._on_hw_refresh_tick)
         self._build_ui()
         self._load_to_ui()
         self.adjustSize()
+
+    def _on_hw_refresh_tick(self) -> None:
+        """定时补刷新设备名（仅窗体可见时运行；快照无帧则维持「—」）。"""
+        try:
+            if self.isVisible():
+                self.refresh_hardware_names()
+            else:
+                self._hw_refresh_timer.stop()
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_hw_refresh_tick", exc)
 
     # ---- 构建 ----
     def _build_ui(self) -> None:
@@ -5492,11 +5507,20 @@ class MonitorSettingsDialog(QDialog):
             self._load_to_ui()
             # 设备名每次运行重载（V16.2）：从当前实时快照重取，不落盘不缓存旧名
             self.refresh_hardware_names()
+            # 首帧晚到/采集后启动时定时补刷新（可见期间才运行，隐藏即停）
+            self._hw_refresh_timer.start()
             if _MONITOR_BALL is not None:
                 _place_dialog_near_rect(self, _MONITOR_BALL._outer_frame_rect(),
                                         _MONITOR_BALL)
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_settings_show", exc)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        try:
+            self._hw_refresh_timer.stop()
+            super().hideEvent(event)
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_settings_hide", exc)
 
 
 def shutdown_monitor() -> None:

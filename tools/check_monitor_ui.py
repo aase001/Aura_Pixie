@@ -1597,6 +1597,21 @@ def section_j():
            and dlg._param_checks["disk.1.temp"].isChecked(),
            "全选态下新盘参数自动勾上")
         ok(dlg.chk_select_all.isChecked(), "新盘加入后全选态保持")
+        # J17 首帧晚到 → 可见期间定时补刷新自动补上设备名（本轮修复）
+        dlg.show()
+        APP.processEvents()
+        ok(dlg._hw_refresh_timer.isActive(), "设置窗可见 → 设备名补刷新定时器运行")
+        fake._frame.clear()   # 模拟打开窗时采集尚未出帧
+        dlg.refresh_hardware_names()
+        ok(dlg._hw_labels["cpu.load"].text() == "—", "无帧时设备名占位「—」")
+        fake.set_metric("cpu.load", 10.0, mh.STATUS_OK)
+        fake._frame["cpu.load"].hardware = "i7-LATE"
+        dlg._on_hw_refresh_tick()   # 定时补刷新触发（首帧晚到）
+        ok(dlg._hw_labels["cpu.load"].text() == "i7-LATE",
+           "首帧晚到 → 定时补刷新自动补上设备名")
+        dlg.hide()
+        APP.processEvents()
+        ok(not dlg._hw_refresh_timer.isActive(), "设置窗隐藏 → 补刷新定时器停止")
         dlg.close()
     finally:
         for w in list(mgr._widgets.values()):
