@@ -163,6 +163,9 @@ def main() -> int:
     if not ensure_fonts():
         print("[警告] 未加载到中文字体，墨迹质心类断言将基于方框字形")
     app.setQuitOnLastWindowClosed(False)
+    # 镜像 main() 的应用级图标与深浅色主题（V16.2），供图标/主题断言验证
+    app.setWindowIcon(M.app_icon())
+    app.setPalette(M.themed_palette())
     M.ensure_settings(base=_SELFTEST_SOURCE_DIR)   # 隔离目录：不会触碰项目根目录真实配置
     failures: list[str] = []
     size = M.ACTIVE_SIZE
@@ -1119,6 +1122,37 @@ def main() -> int:
         check(_lab, _tok in help_text, "", failures)
     check("帮助板块用指令同款分割线", help_text.count("────────────────────────────") >= 5,
           f"（分割线数={help_text.count('────────────────────────────')}）", failures)
+
+    # ---------- 15b 应用图标 + 深浅色主题（V16.2）----------
+    print("\n应用图标与深浅色主题")
+    check("app_icon 辅助存在且返回非空图标",
+          callable(getattr(M, "app_icon", None)) and not M.app_icon().isNull(),
+          "", failures)
+    # 应用级图标：全部窗口继承（修复监视设置窗左上角图标丢失）
+    from PySide6.QtWidgets import QApplication as _QApp
+    check("应用级窗口图标已设置（对话框继承）",
+          not _QApp.instance().windowIcon().isNull(), "", failures)
+    # 主题调色板：浅色=白底黑字、深色=黑底白字（复用 system_dark_mode 判定）
+    _pal_l = M.themed_palette()
+    _C = M.QPalette.ColorRole
+    check("themed_palette 浅色白底黑字",
+          _pal_l.color(_C.Window).name().upper() == "#FFFFFF"
+          and _pal_l.color(_C.WindowText).name().upper() == "#000000",
+          "", failures)
+    # 强制深色判定验证黑底白字（monkeypatch 系统判定，改坏会红）
+    _orig_dark = M.system_dark_mode
+    try:
+        M.system_dark_mode = lambda: True
+        _pal_d = M.themed_palette()
+        check("themed_palette 深色黑底白字",
+              _pal_d.color(_C.Window).lightness() < 128
+              and _pal_d.color(_C.WindowText).name().upper() == "#FFFFFF",
+              "", failures)
+    finally:
+        M.system_dark_mode = _orig_dark
+    check("应用级调色板已套用（设置窗去灰底）",
+          _QApp.instance().palette().color(_C.Window).name().upper()
+          == M.themed_palette().color(_C.Window).name().upper(), "", failures)
 
     # 帮助里的多行示例必须能直接复制执行（用户验收点：示例粘贴即用）
     help_py = ("py:\nimport subprocess, os\np = os.path.join(os.environ['TEMP'], "

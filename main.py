@@ -235,6 +235,18 @@ except Exception:   # noqa: BLE001 - 资源模块缺失/损坏时不阻塞启动
     def _load_builtin_icon():
         return QIcon()
 
+
+def app_icon() -> QIcon:
+    """统一应用图标：优先内嵌资源，缺失回退外部 icon2.png（V16.2）。
+
+    球体与全部设置窗共用，应用级 setWindowIcon 后所有窗口继承，
+    修复监视设置窗等对话框左上角图标丢失。
+    """
+    icon = _load_builtin_icon()
+    if icon.isNull() and os.path.exists(ICON_PATH):
+        icon = QIcon(ICON_PATH)
+    return icon
+
 PLACEHOLDER_COLOR = QColor("#9AA0A6")
 MIN_SECTORS, MAX_SECTORS = 2, 9
 CREATE_NO_WINDOW = 0x08000000
@@ -420,6 +432,45 @@ def system_dark_mode() -> bool:
     except Exception:   # noqa: BLE001 - 兜底失败不影响主流程
         pass
     return False
+
+
+def themed_palette() -> QPalette:
+    """按系统深浅色生成调色板：浅色=白底黑字、深色=黑底白字（V16.2 用户拍板）。
+
+    复用球体休眠顺色同款 system_dark_mode() 判定，不另起逻辑。
+    应用级 setPalette 后全部设置窗与控件继承，去掉系统默认灰底。
+    """
+    dark = system_dark_mode()
+    pal = QPalette()
+    if dark:
+        window, base, text = QColor("#1E1E1E"), QColor("#2D2D2D"), QColor("#FFFFFF")
+        button, disabled = QColor("#3A3A3A"), QColor("#7A7A7A")
+        highlight = QColor("#0078D4")
+    else:
+        window, base, text = QColor("#FFFFFF"), QColor("#FFFFFF"), QColor("#000000")
+        button, disabled = QColor("#F0F0F0"), QColor("#9A9A9A")
+        highlight = QColor("#0078D4")
+    C = QPalette.ColorRole
+    G = QPalette.ColorGroup
+    pal.setColor(C.Window, window)
+    pal.setColor(C.WindowText, text)
+    pal.setColor(C.Base, base)
+    pal.setColor(C.AlternateBase, window)
+    pal.setColor(C.Text, text)
+    pal.setColor(C.Button, button)
+    pal.setColor(C.ButtonText, text)
+    pal.setColor(C.ToolTipBase, base)
+    pal.setColor(C.ToolTipText, text)
+    pal.setColor(C.Highlight, highlight)
+    pal.setColor(C.HighlightedText, QColor("#FFFFFF"))
+    pal.setColor(C.PlaceholderText, disabled)
+    pal.setColor(C.Link, highlight)
+    # 置灰控件文字（总开关未勾时参数复选置灰仍可读）
+    for role in (C.WindowText, C.Text, C.ButtonText):
+        pal.setColor(G.Disabled, role, disabled)
+    pal.setColor(G.Disabled, C.Base, window)
+    pal.setColor(G.Disabled, C.Window, window)
+    return pal
 
 
 def breath_colors() -> tuple[QColor, QColor, QColor]:
@@ -3560,10 +3611,7 @@ class AuraBall(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setFixedSize(IDLE_SIZE, IDLE_SIZE)
-        icon = _load_builtin_icon()          # 优先内嵌资源（打包后不依赖外部 icon2.png）
-        if icon.isNull() and os.path.exists(ICON_PATH):
-            icon = QIcon(ICON_PATH)          # 兜底：源码运行时可直接读文件
-        self.setWindowIcon(icon)
+        self.setWindowIcon(app_icon())       # 统一图标辅助（内嵌优先，回退外部文件）
 
         self._sectors = load_functions()
         self._phase = 0.0
@@ -5314,16 +5362,24 @@ class MonitorSettingsDialog(QDialog):
 
     @staticmethod
     def _hw_font(base: QFont) -> QFont:
-        """设备名小字字体：比参数名小一点点（约小 2px）。
+        """设备名小字字体：固定 6px（用户拍板，比参数名小、不撑开行距）。
 
         关键：默认字体是「点」单位，pixelSize() 返回 -1，若直接
         max(1, pixelSize()-N) 会塌成 1px → 渲染成一条灰线（V16.2 实测根因）。
-        故先用 QFontMetricsF 取真实像素高再减，保证可读不塌缩。
+        故显式 setPixelSize 一个可读的固定值，绝不依赖 pixelSize() 现值。
         """
-        px = QFontMetricsF(base).height()
         f = QFont(base)
-        f.setPixelSize(max(8, int(round(px)) - 2))
+        f.setPixelSize(6)
         return f
+
+    @staticmethod
+    def _hw_style() -> str:
+        """设备名小字颜色：跟随系统深浅色用半透明文字色（V16.2）。
+
+        浅底→半透明黑、深底→半透明白，比固定 gray 在纯白/纯黑底上更清晰。
+        """
+        rgba = "rgba(255,255,255,0.6)" if system_dark_mode() else "rgba(0,0,0,0.55)"
+        return f"color: {rgba};"
 
     def _add_hw_label(self, key: str, parent) -> None:
         """参数复选框正下方加设备名小字 QLabel（仅有设备名的参数）。"""
@@ -5331,7 +5387,7 @@ class MonitorSettingsDialog(QDialog):
             return
         lab = QLabel("—", parent)
         lab.setFont(self._hw_font(lab.font()))
-        lab.setStyleSheet("color: gray;")
+        lab.setStyleSheet(self._hw_style())
         lab.setContentsMargins(20, 0, 0, 2)   # 与复选框文字左缘大致对齐
         self._hw_labels[key] = lab
         self._param_layout.addWidget(lab)
@@ -5432,7 +5488,7 @@ class MonitorSettingsDialog(QDialog):
                 if self._hw_capable(key):
                     lab = QLabel("—", self)
                     lab.setFont(self._hw_font(lab.font()))
-                    lab.setStyleSheet("color: gray;")
+                    lab.setStyleSheet(self._hw_style())
                     lab.setContentsMargins(20, 0, 0, 2)
                     lab.setEnabled(self.chk_enable.isChecked())
                     self._hw_labels[key] = lab
@@ -5474,7 +5530,7 @@ class MonitorSettingsDialog(QDialog):
                 if self._hw_capable(key):
                     lab = QLabel("—", self)
                     lab.setFont(self._hw_font(lab.font()))
-                    lab.setStyleSheet("color: gray;")
+                    lab.setStyleSheet(self._hw_style())
                     lab.setContentsMargins(20, 0, 0, 2)
                     lab.setEnabled(self.chk_enable.isChecked())
                     self._hw_labels[key] = lab
@@ -5710,6 +5766,11 @@ def main(argv: list[str]) -> int:
     sys.unraisablehook = lambda unis: _log_crash("unraisable", unis.exc_value)
 
     app = QApplication(argv)
+    # 应用级图标（V16.2）：全部窗口（含监视设置窗等对话框）继承，修复左上角图标丢失
+    app.setWindowIcon(app_icon())
+    # 应用级深浅色主题（V16.2 用户拍板）：浅色=白底黑字、深色=黑底白字，
+    # 复用球体休眠同款 system_dark_mode() 判定，全部设置窗与控件继承，去灰底。
+    app.setPalette(themed_palette())
     # 标准对话框按钮中文（确定/取消/关闭/是/否）：装在 QApplication 之后、
     # 任何窗口之前，覆盖全部 QMessageBox 与未就地 setText 的按钮盒。
     install_chinese_buttons(app)

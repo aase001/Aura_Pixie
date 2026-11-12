@@ -1539,15 +1539,15 @@ def section_j():
         ok(all(not lab.isEnabled() for lab in dlg._hw_labels.values()),
            "总开关关闭 → 设备名小字置灰")
         # J7b 字号防塌缩（V16.2 灰线根因）：默认字体点单位 pixelSize()=-1，
-        # 旧 max(1, pixelSize()-N) 塌成 1px 渲染成灰线；设备名字号须可读（≥8px）
-        # 且小于参数名字号（改坏会红）。
+        # 旧 max(1, pixelSize()-N) 塌成 1px 渲染成灰线；设备名固定 6px（用户拍板），
+        # 须可读（≥6px）且小于参数名字号（改坏会红）。
         from PySide6.QtGui import QFontMetricsF as _QFMF
         _param_px = _QFMF(dlg._param_checks["cpu.load"].font()).height()
         _hw_px = {k: lab.font().pixelSize() for k, lab in dlg._hw_labels.items()}
-        ok(all(px >= 8 for px in _hw_px.values()),
-           f"设备名字号不塌缩（全部≥8px，实得 {sorted(set(_hw_px.values()))}）")
+        ok(all(px == 6 for px in _hw_px.values()),
+           f"设备名字号固定 6px（实得 {sorted(set(_hw_px.values()))}）")
         ok(all(px < _param_px for px in _hw_px.values()),
-           "设备名字号小于参数名（小一点点）")
+           "设备名字号小于参数名")
         # J8 设备名重载：注入硬件名 → 刷新为新名（改坏会红）
         fake.set_metric("cpu.load", 10.0, mh.STATUS_OK)
         fake._frame["cpu.load"].hardware = "i7-TEST"
