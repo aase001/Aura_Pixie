@@ -1664,9 +1664,9 @@ def main() -> int:
           all(dlg_sc.scale_checks[k].isChecked()
               and dlg_sc.scale_combos[k].currentText() == "100%"
               and dlg_sc.scale_combos[k].isEnabled() for k in _units), "", failures)
-    check("未实现单元有提示（说明值先保存、接入后生效）",
-          "尚未" in dlg_sc.scale_checks["monitor"].toolTip()
-          and "尚未" in dlg_sc.scale_checks["quicklaunch"].toolTip()
+    check("未实现单元有提示（仅快捷启动；监视已实现）",
+          "尚未" in dlg_sc.scale_checks["quicklaunch"].toolTip()
+          and "尚未" not in dlg_sc.scale_checks["monitor"].toolTip()
           and "尚未" not in dlg_sc.scale_checks["ball"].toolTip(), "", failures)
 
     # 复选框联动下拉可用性（勾选=启用，取消=禁用并置灰）

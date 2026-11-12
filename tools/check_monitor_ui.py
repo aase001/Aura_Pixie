@@ -227,14 +227,18 @@ def section_a():
     ok(cfg["sparkline_points"] == 60, "默认 sparkline_points=60")
     ok(cfg["idle_stop_sec"] == 300, "默认 idle_stop_sec=300（0=永不停采）")
     ok(cfg["layout"] == {}, "默认 layout 空")
-    ok(set(cfg["units"]) == {k for k, *_ in mh.METRIC_DEFS},
-       "units 键全集=白名单固定键（动态键运行时展开）")
-    ok(all(u["enabled"] is True and u["threshold"] == []
-           for u in cfg["units"].values()), "units 默认 enabled+空阈值段")
-    cfg["units"]["cpu.load"]["enabled"] = False
-    cfg["layout"]["cpu"] = {"x": 1, "y": 2, "group_id": "g"}
+    ok(cfg["enabled"] is False, "监视总开关默认不勾选")
+    _fixed = {k for k, *_ in mh.METRIC_DEFS}
+    _dyn = {"fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
+    ok(set(cfg["units"]) == _fixed | _dyn,
+       "units 键全集=白名单固定键+风扇三槽+硬盘0（参数键化）")
+    ok("sys.uptime" not in cfg["units"], "运行时间已废弃不列入")
+    ok(all(u["enabled"] is False and u["threshold"] == []
+           for u in cfg["units"].values()), "units 默认全不勾选+空阈值段")
+    cfg["units"]["cpu.load"]["enabled"] = True
+    cfg["layout"]["cpu.load"] = {"x": 1, "y": 2, "group_id": "g"}
     cfg2 = mu.default_monitor_config()
-    ok(cfg2["units"]["cpu.load"]["enabled"] is True and cfg2["layout"] == {},
+    ok(cfg2["units"]["cpu.load"]["enabled"] is False and cfg2["layout"] == {},
        "默认每次返回全新副本（改旧不污染新）")
 
     # 空壳冒烟：构造成功、注入件原样持有、状态占位就位
@@ -355,9 +359,9 @@ def section_b():
     ok(fs["cpu.temp"].status == rs["cpu.temp"].status
        and fs["cpu.temp"].value == rs["cpu.temp"].value,
        "假 hub 与真实 hub 同状态同值（stale 口径交叉一致）")
-    ok(rs["sys.uptime"].key == "sys.uptime"
-       and rs["sys.uptime"].unit == "s",
-       "真实 hub sys.uptime 键/单位（白名单口径）")
+    ok("sys.uptime" not in rs, "运行时间已废弃：快照不再产出该键")
+    ok(rs["cpu.load"].key == "cpu.load" and rs["cpu.load"].unit == "%",
+       "真实 hub cpu.load 键/单位（白名单口径）")
 
 
 # ---------------------------------------------------------------------------
@@ -393,10 +397,11 @@ def section_c():
        "禁 exec() 嵌套（坑 6）")
     ok("import monitor_hub" in code, "后端只经 monitor_hub 消费")
 
-    # 白名单键全集与后端定义一致（UI 不得私增/删指标）
-    ok(set(mu.default_monitor_config()["units"]) ==
-       {k for k, *_ in mh.METRIC_DEFS},
-       "配置 units 与 METRIC_DEFS 同步（加键须两侧同改）")
+    # 白名单键全集与后端定义一致（UI 不得私增/删指标）+ 动态默认键
+    _expect = {k for k, *_ in mh.METRIC_DEFS} | {
+        "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
+    ok(set(mu.default_monitor_config()["units"]) == _expect,
+       "配置 units 与 METRIC_DEFS+动态默认键同步（加键须两侧同改）")
 
 
 # ---------------------------------------------------------------------------
@@ -566,14 +571,16 @@ def section_e():
     ok(mu.halo_color({"color_mid": "#FF0000"}).name().upper() == "#FF0000",
        "光晕基色=主题过渡色")
 
-    # ---- E8 数值格式化走 hub.fmt（不自造换算）----
+    # ---- E8 数值格式化走 hub.fmt_value（纯数值，单位独立 C 列）----
     w_f, _, _ = _make_widget()
-    r_up = _row("sys.uptime", "系统运行时间", 3725.0, "s")
-    ok(w_f._value_text(r_up) == "1:02:05", "uptime 走 fmt（H:MM:SS）")
+    r_pct = _row("cpu.load", "CPU使用率", 42.0, "%")
+    ok(w_f._value_text(r_pct) == "42.0", "百分比纯数值（不带单位）")
     r_na = _row("cpu.temp", "CPU温度", None, "℃", mh.STATUS_NEED_ADMIN)
-    ok(w_f._value_text(r_na) == "需管理员", "need_admin 走 fmt 文案")
+    ok(w_f._value_text(r_na) == "--", "无读数显示 --（状态文案走小字）")
     r_fan = _row("fan.cpu.0", "CPU风扇转速", 2400.0, "RPM")
-    ok(w_f._value_text(r_fan) == "2400 RPM", "风扇整数 RPM 走 fmt")
+    ok(w_f._value_text(r_fan) == "2400", "风扇整数 RPM 纯数值")
+    r_temp = _row("cpu.temp", "CPU温度", 63.2, "℃")
+    ok(w_f._value_text(r_temp) == "63.2", "温度一位小数纯数值")
     w_f.close()
 
     # ---- E9 崩溃兜底：回调异常经 log_fn 不裸抛 ----
@@ -769,20 +776,28 @@ def section_f():
     w4.close()
     w5.close()
 
-    # ---- F8 多盘动态行同步 ----
+    # ---- F8 新盘发现回调（阶段 A：一参数一窗格，旧多行塞一窗已废弃）----
     w6, hub6, mgr6 = _make_widget()
-    mgr6.register_widget("disk", w6, ["disk.0.temp", "disk.0.usage"])
+    mgr6.register_widget("disk.0.temp", w6, ["disk.0.temp"])
     w6.show()
     APP.processEvents()
+    discovered = []
+    mgr6.on_new_disk_keys = lambda keys: discovered.extend(keys)
     hub6.set_metric("disk.0.temp", 42.0, mh.STATUS_OK)
     hub6.set_metric("disk.0.usage", 38.6, mh.STATUS_OK)
     hub6.set_metric("disk.1.temp", 40.0, mh.STATUS_OK)
     hub6.set_metric("disk.1.usage", 11.4, mh.STATUS_OK)
     mgr6.tick()
-    keys = [r.key for r in w6._rows]
-    ok(keys == ["disk.0.temp", "disk.0.usage", "disk.1.temp", "disk.1.usage"],
-       f"多盘动态行展开（{keys}）")
-    ok(w6._rows[2].value == 40.0, "盘2 温度同步")
+    ok(set(discovered) == {"disk.0.temp", "disk.0.usage",
+                           "disk.1.temp", "disk.1.usage"},
+       f"新盘键经回调通知（{discovered}）")
+    ok([r.key for r in w6._rows] == ["disk.0.temp"],
+       "窗格保持单参数行（不被塞入多盘行）")
+    ok(w6._rows[0].value == 42.0, "盘0 温度同步")
+    # 第二次 tick 无新盘 → 不重复回调
+    discovered.clear()
+    mgr6.tick()
+    ok(discovered == [], "无新盘不重复回调")
     w6.close()
 
     # ---- F9 sparkline 绘制路径源码看守（改坏会红）----
@@ -932,6 +947,27 @@ def section_g():
     ok(wa._contact_edges == ["right"], f"A 接触边 right（{wa._contact_edges}）")
     ok(wb._contact_edges == ["left"], f"B 接触边 left（{wb._contact_edges}）")
     ok(wa._preview_target is None and wa._preview_rect is None, "落位清预览")
+    # 交叉轴对齐（阶段 A）：左右贴合 → 顶边对齐
+    ok(wa.frameGeometry().top() == wb.frameGeometry().top(),
+       f"左右贴合顶边对齐（{wa.frameGeometry().top()} vs {wb.frameGeometry().top()}）")
+    # 上下贴合 → 左缘对齐（直接验证候选几何）
+    from PySide6.QtCore import QRect as _QR
+    _my = _QR(100, 100, 80, 60)
+    _tg = _QR(120, 300, 90, 70)
+    _cands = wa._edge_candidates(_my, _tg)
+    _bottom = [sr for d, e, sr in _cands if e == "bottom"]
+    _top = [sr for d, e, sr in _cands if e == "top"]
+    ok(_bottom and _bottom[0].left() == _tg.left(),
+       "上下贴合左缘对齐（bottom 候选）")
+    ok(_top and _top[0].left() == _tg.left(),
+       "上下贴合左缘对齐（top 候选）")
+    # right 候选需垂直投影重叠：另构造水平相邻、垂直重叠的矩形
+    _my2 = _QR(100, 310, 80, 60)
+    _tg2 = _QR(200, 300, 90, 70)
+    _cands2 = wa._edge_candidates(_my2, _tg2)
+    _right = [sr for d, e, sr in _cands2 if e == "right"]
+    ok(_right and _right[0].top() == _tg2.top(),
+       "左右贴合顶边对齐（right 候选）")
 
     # ---- G5 吸附态关光晕（像素）----
     img_snapped = _grab(wa)
@@ -1215,22 +1251,26 @@ def section_i():
     ok(d["monitor"]["refresh_ms"] == 1000
        and d["monitor"]["idle_stop_sec"] == 300,
        "monitor 默认拉取/闲置参数")
-    ok(set(d["monitor"]["units"]) == {k for k, *_ in mh.METRIC_DEFS},
-       "monitor units 键全集=白名单")
+    _expect = {k for k, *_ in mh.METRIC_DEFS} | {
+        "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
+    ok(set(d["monitor"]["units"]) == _expect,
+       "monitor units 键全集=白名单+动态默认键")
+    ok(d["monitor"]["enabled"] is False, "monitor 总开关默认不勾选")
 
     # ---- I2 _merge_config：monitor 块字段级合并 + 缺键回退 ----
     base = M.default_settings()
-    src = {"monitor": {"refresh_ms": 2000,
-                       "units": {"cpu.load": {"enabled": False}},
-                       "layout": {"cpu": {"x": 10, "y": 20, "group_id": "g1"}}}}
+    src = {"monitor": {"refresh_ms": 2000, "enabled": True,
+                       "units": {"cpu.load": {"enabled": True}},
+                       "layout": {"cpu.load": {"x": 10, "y": 20, "group_id": "g1"}}}}
     merged = M._merge_config(base, src)
     ok(merged["monitor"]["refresh_ms"] == 2000, "monitor 源字段覆盖")
+    ok(merged["monitor"]["enabled"] is True, "monitor 总开关源字段覆盖")
     ok(merged["monitor"]["idle_stop_sec"] == 300, "monitor 缺键回退默认")
-    ok(merged["monitor"]["units"]["cpu.load"]["enabled"] is False,
+    ok(merged["monitor"]["units"]["cpu.load"]["enabled"] is True,
        "monitor units 子块合并")
-    ok(merged["monitor"]["units"]["cpu.temp"]["enabled"] is True,
-       "monitor units 未改键保留默认")
-    ok(merged["monitor"]["layout"]["cpu"]["x"] == 10, "monitor layout 合并")
+    ok(merged["monitor"]["units"]["cpu.temp"]["enabled"] is False,
+       "monitor units 未改键保留默认（不勾选）")
+    ok(merged["monitor"]["layout"]["cpu.load"]["x"] == 10, "monitor layout 合并")
     # 无 monitor 源 → 保留 base 默认（不丢块）
     merged2 = M._merge_config(M.default_settings(), {"functions": []})
     ok("monitor" in merged2 and merged2["monitor"]["refresh_ms"] == 1000,
@@ -1277,11 +1317,12 @@ def section_i():
         os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
     ok("monitor_ui 已实现" in main_src, "monitor tooltip 注释更新为已实现")
 
-    # ---- I6 生命周期：首开 start、关窗停渲染不停采、退出 stop ----
-    # 不替换 MetricsHub 类（monitor_ui 内部用 mh.MetricsHub.fmt）；
+    # ---- I6 生命周期（阶段 A）：总开关门禁 + 参数级窗格 + 关窗不停采 ----
+    # 不替换 MetricsHub 类（monitor_ui 内部用 mh.MetricsHub.fmt_value）；
     # 先正常创建 manager，再把 hub 实例换成假 hub（避免启动侧车进程）。
     M._MONITOR_MGR = None
     M._MONITOR_HUB = None
+    M._MONITOR_SETTINGS_DLG = None
     mgr = M._ensure_monitor_manager()
     fake = FakeHub()
     real_hub = M._MONITOR_HUB
@@ -1290,39 +1331,67 @@ def section_i():
     try:
         ok(mgr is not None, "惰性创建 manager")
         ok(fake.start_calls == 0, "创建 manager 不启动采集")
-        # 打开监视 → 建窗 + start
+        # 总开关默认关 → open_monitor 只弹设置窗，不建窗不采集
         M.open_monitor()
-        ok(fake.start_calls == 1, "首开 → hub.start() 一次")
-        ok(len(mgr._widgets) > 0, "建窗成功")
-        ok(any(w.isVisible() for w in mgr._widgets.values()), "监视窗可见")
+        APP.processEvents()
+        ok(fake.start_calls == 0, "总开关未启用 → 不拉起采集")
+        ok(not any(w.isVisible() for w in mgr._widgets.values()),
+           "总开关未启用 → 无监视窗格")
+        ok(M._MONITOR_SETTINGS_DLG is not None, "open_monitor 弹监视设置窗")
+        M._MONITOR_SETTINGS_DLG.hide()
+        # 启用总开关 + 勾选两个参数 → 同步建窗 + start
+        cfg = M.load_monitor_config()
+        cfg["enabled"] = True
+        cfg["units"]["cpu.load"]["enabled"] = True
+        cfg["units"]["mem.load"]["enabled"] = True
+        M.save_monitor_config(cfg)
+        M._monitor_sync_windows(cfg)
+        ok(fake.start_calls == 1, "总开关启用首开 → hub.start() 一次")
+        ok(set(mgr._widgets) == {"cpu.load", "mem.load"},
+           f"一参数一窗格（{set(mgr._widgets)}）")
+        ok(all(w.isVisible() for w in mgr._widgets.values()), "勾选参数窗格可见")
         ok(mgr._timer.isActive(), "拉取定时器运行")
-        # 关窗 → 停渲染定时器，但 hub 不停采（关窗不停采语义）
-        for w in mgr._widgets.values():
-            w.hide()
+        # 每个窗格只有 1 行（一参数一窗格核心断言）
+        ok(all(len(w._rows) == 1 for w in mgr._widgets.values()),
+           "每窗格仅 1 个参数行")
+        # 取消一个参数 → 对应窗格关闭，另一个保留
+        cfg["units"]["mem.load"]["enabled"] = False
+        M.save_monitor_config(cfg)
+        M._monitor_sync_windows(cfg)
+        ok(not mgr._widgets["mem.load"].isVisible(), "取消勾选 → 窗格关闭")
+        ok(mgr._widgets["cpu.load"].isVisible(), "其余窗格保留")
+        # 关窗不停采：隐藏剩余窗 → 停拉取但 hub 不停
+        mgr._widgets["cpu.load"].hide()
         APP.processEvents()
         mgr.tick()
         ok(not mgr._timer.isActive(), "全隐 → 停拉取定时器")
         ok(fake.stop_calls == 0, "关窗不停采（hub.stop 未调用）")
-        # 重开 → 不重复 start（first_open 判定按可见窗，采集持续）
+        # 重开 → 历史回填秒回曲线
         fake.seed_history("cpu.load", [10.0, 20.0, 30.0])
-        M.open_monitor()
-        ok(fake.start_calls == 2,
-           "重开再 start（侧车已停采时重新拉起；首开/重开各一次）")
-        # 历史回填：重开后 cpu.load 行 history 来自 hub 缓冲
-        cpu_w = mgr._widgets.get("cpu")
-        if cpu_w is not None:
-            row = next((r for r in cpu_w._rows if r.key == "cpu.load"), None)
-            ok(row is not None and list(row.history)[:3] == [10.0, 20.0, 30.0],
-               "重开历史回填（秒回曲线）")
+        cfg["units"]["cpu.load"]["enabled"] = True
+        M._monitor_sync_windows(cfg)
+        row = mgr._widgets["cpu.load"]._rows[0]
+        ok(list(row.history)[:3] == [10.0, 20.0, 30.0],
+           "重开历史回填（秒回曲线）")
+        # 总开关关闭 → 全窗关闭 + 停采
+        cfg["enabled"] = False
+        M.save_monitor_config(cfg)
+        M._monitor_sync_windows(cfg)
+        ok(not any(w.isVisible() for w in mgr._widgets.values()),
+           "总开关关闭 → 全部窗格关闭")
+        ok(fake.stop_calls >= 1, "总开关关闭 → hub.stop()")
         # 退出 → shutdown_monitor 必达 stop
         M.shutdown_monitor()
-        ok(fake.stop_calls >= 1, "退出 → hub.stop() 必达")
+        ok(fake.stop_calls >= 2, "退出 → hub.stop() 必达")
     finally:
         for w in list(mgr._widgets.values()):
             w.close()
+        if M._MONITOR_SETTINGS_DLG is not None:
+            M._MONITOR_SETTINGS_DLG.close()
         real_hub.stop()
         M._MONITOR_MGR = None
         M._MONITOR_HUB = None
+        M._MONITOR_SETTINGS_DLG = None
 
     # ---- I7 内置扇区动作 monitor: 前缀识别 ----
     ok("monitor:" in main_src and "open_monitor" in main_src,
@@ -1340,6 +1409,83 @@ def section_i():
        "闲置停采接线在位")
 
 
+# ---------------------------------------------------------------------------
+# J. 阶段 A：监视设置窗（总开关 + 参数复选 + 实时渲染 + 保存语义）
+# ---------------------------------------------------------------------------
+def section_j():
+    print("[J] 阶段 A 监视设置窗")
+    import main as M
+
+    # 重置监视配置为出厂默认（I 节曾写入勾选状态，隔离配置共享需清场）
+    M.save_monitor_config(M.monitor_ui.default_monitor_config())
+    M._MONITOR_MGR = None
+    M._MONITOR_HUB = None
+    M._MONITOR_SETTINGS_DLG = None
+    mgr = M._ensure_monitor_manager()
+    fake = FakeHub()
+    real_hub = M._MONITOR_HUB
+    M._MONITOR_HUB = fake
+    mgr.hub = fake
+    try:
+        dlg = M.MonitorSettingsDialog()
+        # J1 结构：总开关 + 参数复选框齐全，默认全不勾选
+        ok(dlg.chk_enable.text() == "启用资源监视", "总开关文案")
+        ok(not dlg.chk_enable.isChecked(), "总开关默认不勾选")
+        _expect = {k for k, *_ in mh.METRIC_DEFS} | {
+            "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
+        ok(set(dlg._param_checks) == _expect,
+           f"参数复选框齐全（{len(dlg._param_checks)} 项）")
+        ok("sys.uptime" not in dlg._param_checks, "运行时间已废弃不罗列")
+        ok(all(not c.isChecked() for c in dlg._param_checks.values()),
+           "参数默认全不勾选")
+        ok(all(not c.isEnabled() for c in dlg._param_checks.values()),
+           "总开关未勾选 → 参数复选置灰")
+        # 无值参数也罗列（风扇/硬盘）
+        ok("fan.cpu.0" in dlg._param_checks and "disk.0.temp" in dlg._param_checks,
+           "无值参数（风扇/硬盘）也罗列")
+        # J2 总开关勾选 → 参数复选启用
+        dlg.chk_enable.setChecked(True)
+        ok(all(c.isEnabled() for c in dlg._param_checks.values()),
+           "总开关勾选 → 参数复选可用")
+        # J3 参数勾选 → 实时写配置 + 建窗（总开关已启用）
+        dlg._param_checks["cpu.load"].setChecked(True)
+        APP.processEvents()
+        cfg = M.load_monitor_config()
+        ok(cfg["units"]["cpu.load"]["enabled"] is True, "勾选实时写配置")
+        ok("cpu.load" in mgr._widgets and mgr._widgets["cpu.load"].isVisible(),
+           "勾选实时渲染窗格")
+        ok(fake.start_calls == 1, "首个窗格拉起采集")
+        # J4 取消勾选 → 实时关窗
+        dlg._param_checks["cpu.load"].setChecked(False)
+        APP.processEvents()
+        ok(not mgr._widgets["cpu.load"].isVisible(), "取消勾选实时关窗")
+        # J5 保存：总开关勾选 + 参数 → 落盘 + 同步
+        dlg._param_checks["mem.load"].setChecked(True)
+        dlg._on_save()
+        APP.processEvents()
+        cfg = M.load_monitor_config()
+        ok(cfg["enabled"] is True and cfg["units"]["mem.load"]["enabled"] is True,
+           "保存落盘总开关与参数")
+        ok(mgr._widgets["mem.load"].isVisible(), "保存后窗格可见")
+        # J6 保存：总开关取消 → 全窗关 + 停采
+        dlg.chk_enable.setChecked(False)
+        dlg._on_save()
+        APP.processEvents()
+        cfg = M.load_monitor_config()
+        ok(cfg["enabled"] is False, "保存总开关关闭落盘")
+        ok(not any(w.isVisible() for w in mgr._widgets.values()),
+           "总开关关闭保存 → 全窗关")
+        ok(fake.stop_calls >= 1, "总开关关闭保存 → 停采")
+        dlg.close()
+    finally:
+        for w in list(mgr._widgets.values()):
+            w.close()
+        real_hub.stop()
+        M._MONITOR_MGR = None
+        M._MONITOR_HUB = None
+        M._MONITOR_SETTINGS_DLG = None
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -1350,5 +1496,6 @@ if __name__ == "__main__":
     section_g()
     section_h()
     section_i()
+    section_j()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

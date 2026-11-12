@@ -301,20 +301,28 @@ class UnitRow:
 # monitor 配置块默认结构（阶段 5 四函数同步用；每次调用返回全新副本）
 # ---------------------------------------------------------------------------
 def default_monitor_config() -> dict:
-    """monitor 块出厂默认。
+    """monitor 块出厂默认（阶段 A：参数键化 + 总开关 + 默认全不勾选）。
 
+    enabled         监视总开关（默认 False；勾选并保存才拉起采集模块）
     refresh_ms      拉取周期（匹配侧车 ~1.1s/帧）
     sparkline_points 历史点数（60 ≈ 1 分钟）
     idle_stop_sec   连续无监视窗多少秒后停采（0=永不停采）
-    units           {key: {enabled, threshold:[{min,max,color}...]}}
-    layout          {unit_key: {x, y, group_id}}（位置与吸附组记忆）
+    units           {参数key: {enabled, threshold:[{min,max,color}...]}}
+                    固定 14 项 + 风扇三槽位 + 硬盘0 兜底项；默认全不勾选。
+                    动态硬盘键（disk.1+）运行时按实例展开，勾选状态落盘保留。
+    layout          {参数key: {x, y, group_id}}（位置与吸附组记忆）
     """
+    units = {key: {"enabled": False, "threshold": []}
+             for key, _label, _group, _unit in mh.METRIC_DEFS}
+    for key in ("fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0",
+                "disk.0.temp", "disk.0.usage"):
+        units[key] = {"enabled": False, "threshold": []}
     return {
+        "enabled": False,
         "refresh_ms": 1000,
         "sparkline_points": SPARKLINE_POINTS,
         "idle_stop_sec": 300,
-        "units": {key: {"enabled": True, "threshold": []}
-                  for key, _label, _group, _unit in mh.METRIC_DEFS},
+        "units": units,
         "layout": {},
     }
 
@@ -472,13 +480,15 @@ class MonitorUnitWidget(QWidget):
             self.log_fn("monitor_ui.update_layout", e)
 
     def _value_text(self, row: UnitRow) -> str:
-        """B 列数值文本：格式化一律走 hub.fmt（不自造换算）。
+        """B 列数值文本：纯数值（不带单位），走 hub.fmt_value（不自造换算）。
 
-        阶段 1 仅用 fmt 的数值/状态文案；五态灰显与状态小字在阶段 2 细化。
+        单位独立画在 C 列；无读数显示 "--"，状态文案走数值行下方状态小字。
+        （修复：旧实现用 fmt 带单位串，B 列宽按初始 "--" 量宽后不再重算，
+        真实数据右对齐被裁剪只剩尾部单位——数值消失根因。）
         """
         m = mh.Metric(key=row.key, label=row.label, group="",
                       value=row.value, unit=row.unit, status=row.status)
-        return mh.MetricsHub.fmt(m)
+        return mh.MetricsHub.fmt_value(m)
 
     def set_rows(self, rows: list) -> None:
         """动态行增删（多盘/风扇）：替换行集 → 重算高度 → adjustSize。"""
@@ -691,9 +701,24 @@ class MonitorUnitWidget(QWidget):
             # history：可用记值，否则 None（断线）
             row.history.append(metric.value if row.available else None)
             self._refresh_breathing()
+            # 内容驱动尺寸：文本变宽超过当前列宽 → 重算布局（窗格随之变宽）。
+            # 只在变宽时重算，避免每 tick 无谓 setFixedSize；变窄不回缩（防抖动）。
+            if self._text_outgrows_cols():
+                self.update_layout()
             self.update()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.update_data", e)
+
+    def _text_outgrows_cols(self) -> bool:
+        """当前行文本是否已超出列宽缓存（量宽用与布局同一字体）。"""
+        fm = QFontMetrics(self._font())
+        w_label, w_value, w_unit = self._col_w
+        for r in self._rows:
+            if (fm.horizontalAdvance(r.label) > w_label
+                    or fm.horizontalAdvance(self._value_text(r)) > w_value
+                    or fm.horizontalAdvance(r.unit) > w_unit):
+                return True
+        return False
 
     def _refresh_breathing(self) -> None:
         """任一行进入最高阈值段 → 启动呼吸时钟与动画定时器；全离开 → 停。"""
@@ -857,29 +882,33 @@ class MonitorUnitWidget(QWidget):
         """窗间四边贴合候选：(边距, 贴合边, 贴合位 QRect)。
 
         水平方向需垂直投影有重叠，垂直方向需水平投影有重叠，避免斜角误吸。
+        交叉轴对齐（用户拍板）：左右贴合 → 顶边对齐（y=target.top）；
+        上下贴合 → 左缘对齐（x=target.left）。
         """
         out = []
         v_overlap = my.top() < target.bottom() and my.bottom() > target.top()
         h_overlap = my.left() < target.right() and my.right() > target.left()
         # 贴合位用 left()+width() 口径（QRect.right()=left+width-1，避免 1px 缝）
         if v_overlap:
-            # 我右边贴目标左边：my.left+my.width == target.left
+            # 我右边贴目标左边：my.left+my.width == target.left，顶边对齐
             d = abs((my.left() + my.width()) - target.left())
-            sr = QRect(target.left() - my.width(), my.top(), my.width(), my.height())
+            sr = QRect(target.left() - my.width(), target.top(),
+                       my.width(), my.height())
             out.append((d, "right", sr))
-            # 我左边贴目标右边：my.left == target.left+target.width
+            # 我左边贴目标右边：my.left == target.left+target.width，顶边对齐
             d = abs(my.left() - (target.left() + target.width()))
-            sr = QRect(target.left() + target.width(), my.top(),
+            sr = QRect(target.left() + target.width(), target.top(),
                        my.width(), my.height())
             out.append((d, "left", sr))
         if h_overlap:
-            # 我下边贴目标上边：my.top+my.height == target.top
+            # 我下边贴目标上边：my.top+my.height == target.top，左缘对齐
             d = abs((my.top() + my.height()) - target.top())
-            sr = QRect(my.left(), target.top() - my.height(), my.width(), my.height())
+            sr = QRect(target.left(), target.top() - my.height(),
+                       my.width(), my.height())
             out.append((d, "bottom", sr))
-            # 我上边贴目标下边：my.top == target.top+target.height
+            # 我上边贴目标下边：my.top == target.top+target.height，左缘对齐
             d = abs(my.top() - (target.top() + target.height()))
-            sr = QRect(my.left(), target.top() + target.height(),
+            sr = QRect(target.left(), target.top() + target.height(),
                        my.width(), my.height())
             out.append((d, "top", sr))
         return out
@@ -1138,6 +1167,9 @@ class MonitorWindowManager:
         # 阶段 3：幽灵轮廓 overlay（独立透明穿透顶层窗）
         self._ghost = GhostOverlay(theme, scale_getter)
         self._group_seq = 0
+        # 阶段 A：新盘发现回调（参数级窗格下由 main 决定是否建窗）
+        self.on_new_disk_keys: Optional[Callable] = None
+        self._known_disk_keys: set = set()
 
     # ---- 阶段 2：单元窗注册与拉取节奏 ----
     def register_widget(self, unit_key: str, widget, row_keys: list,
@@ -1183,7 +1215,7 @@ class MonitorWindowManager:
                 return
             snap = self.hub.snapshot()          # 一帧一映射
             disks = self.hub.list_disks(snapshot=snap)
-            self._sync_disk_rows(snap, disks)
+            self._notify_new_disks(disks)
             for w in self._widgets.values():
                 if not w.isVisible():
                     continue
@@ -1194,29 +1226,21 @@ class MonitorWindowManager:
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.tick", e)
 
-    def _sync_disk_rows(self, snap: dict, disks: list) -> None:
-        """多盘动态行：按 list_disks 结果增删 disk 单元的行（保留 history）。"""
-        for unit_key, w in self._widgets.items():
-            if not any(r.key.startswith("disk.") for r in w._rows):
-                continue
-            want = []
-            for d in disks:
-                i = d["index"]
-                want.append(f"disk.{i}.temp")
-                want.append(f"disk.{i}.usage")
-            have = [r.key for r in w._rows]
-            if have == want:
-                continue
-            old = {r.key: r for r in w._rows}
-            rows = []
-            for key in want:
-                if key in old:
-                    rows.append(old[key])
-                else:
-                    label, _g, unit = self._def_of(key)
-                    rows.append(UnitRow(key=key, label=label, value=None,
-                                        unit=unit, status=mh.STATUS_STALE))
-            w.set_rows(rows)
+    def _notify_new_disks(self, disks: list) -> None:
+        """参数级窗格：发现新盘键 → 回调 main（由其按配置决定是否建窗）。
+
+        旧「多行塞一窗」同步已废弃（一参数一窗格，用户拍板）。
+        """
+        keys = set()
+        for d in disks:
+            i = d["index"]
+            keys.add(f"disk.{i}.temp")
+            keys.add(f"disk.{i}.usage")
+        new = keys - self._known_disk_keys
+        if new:
+            self._known_disk_keys = keys
+            if self.on_new_disk_keys is not None:
+                self.on_new_disk_keys(sorted(new))
 
     # ---- 阶段 3：磁吸 ----
     def new_group(self) -> SnapGroup:

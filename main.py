@@ -1034,14 +1034,14 @@ def _merge_monitor_block(base_blk, src_blk: dict) -> dict:
     merged = monitor_ui.default_monitor_config()
     if isinstance(base_blk, dict):
         merged.update({k: v for k, v in base_blk.items() if k in merged})
-    for k in ("refresh_ms", "sparkline_points", "idle_stop_sec"):
+    for k in ("enabled", "refresh_ms", "sparkline_points", "idle_stop_sec"):
         if k in src_blk:
-            merged[k] = src_blk[k]
+            merged[k] = bool(src_blk[k]) if k == "enabled" else src_blk[k]
     if isinstance(src_blk.get("units"), dict):
         units = merged.get("units") or {}
         for key, val in src_blk["units"].items():
             if isinstance(val, dict):
-                units[key] = {**(units.get(key) or {"enabled": True, "threshold": []}),
+                units[key] = {**(units.get(key) or {"enabled": False, "threshold": []}),
                               **val}
         merged["units"] = units
     if isinstance(src_blk.get("layout"), dict):
@@ -3239,8 +3239,7 @@ class AppearanceSettingsDialog(QDialog):
         grid.addWidget(QLabel("显示缩放（勾选=启用）", self))
         self.scale_checks, self.scale_combos = {}, {}
         scale_cfg = normalize_scale_block(cur.get("display_scale"))
-        _pending_tip = {"monitor": "资源监视单元尚未实现，设置先保存，界面接入后生效",
-                        "quicklaunch": "快捷启动单元尚未开发，设置先保存，界面接入后生效"}
+        _pending_tip = {"quicklaunch": "快捷启动单元尚未开发，设置先保存，界面接入后生效"}
         for _key, _label in SCALE_UNITS:
             _item = scale_cfg[_key]
             chk = QCheckBox(_label, self)
@@ -4557,16 +4556,27 @@ _MONITOR_LAYOUT_TIMER = None  # 布局记忆落盘定时器（移动停止 10s�
 _MONITOR_LAYOUT_DIRTY = False
 
 # 监视单元分组（unit_key → 行键集）：按指标白名单分组，每组一个迷你窗
-_MONITOR_UNITS = (
-    ("sys", ["sys.uptime"]),
-    ("cpu", ["cpu.load", "cpu.freq", "cpu.temp", "cpu.power"]),
-    ("mem", ["mem.load", "mem.used"]),
-    ("gpu_i", ["gpu_i.load", "gpu_i.shared"]),
-    ("gpu_d", ["gpu_d.load", "gpu_d.temp", "gpu_d.vram_load", "gpu_d.vram_used"]),
-    ("disk", ["disk.0.temp", "disk.0.usage"]),
-    ("fan", ["fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0"]),
-    ("net", ["net.tx", "net.rx"]),
-)
+# 参数级窗格清单（一参数一窗格；用户拍板：废弃 sys.uptime，无值参数也罗列）。
+# 固定 14 项 + 动态键（硬盘按实例展开 disk.{i}.temp/usage，风扇三槽位）。
+# 窗格键 = 指标 key；设置窗复选框与配置 units 均按此键。
+_MONITOR_PARAM_KEYS = tuple(k for k, _label, _group, _unit in monitor_hub.METRIC_DEFS)
+_MONITOR_FAN_KEYS = ("fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")
+
+
+def _monitor_disk_keys(snapshot: dict | None = None) -> list:
+    """动态硬盘参数键：按快照中实际盘数展开（每盘温度+使用率）。"""
+    keys = []
+    i = 0
+    while True:
+        tk, uk = f"disk.{i}.temp", f"disk.{i}.usage"
+        if snapshot is not None:
+            if tk not in snapshot and uk not in snapshot:
+                break
+        elif i >= 8:   # 无快照时按 hub 上限兜底
+            break
+        keys += [tk, uk]
+        i += 1
+    return keys
 
 
 def _monitor_scale_getter() -> float:
@@ -4618,6 +4628,7 @@ def _ensure_monitor_manager():
                    "write": _monitor_config_io_write,
                    "save_layout": save_monitor_layout},
     )
+    _MONITOR_MGR.on_new_disk_keys = _monitor_on_new_disk_keys
     # 闲置停采定时器：每秒检查是否连续 idle_stop_sec 无监视窗
     _MONITOR_IDLE_TIMER = QTimer()
     _MONITOR_IDLE_TIMER.setInterval(1000)
@@ -4630,47 +4641,123 @@ def _ensure_monitor_manager():
 
 
 def open_monitor() -> None:
-    """打开资源监视：右键菜单/扇区入口。首开 → hub.start() + 建窗 + 拉取。"""
+    """打开监视设置窗（右键菜单/扇区入口）。
+
+    采集与窗格由设置窗驱动：总开关勾选并保存才拉起采集；参数勾选实时建窗。
+    总开关已启用时直接同步窗格（不重复 start）。
+    """
+    try:
+        dlg = _get_monitor_settings_dialog()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        cfg = load_monitor_config()
+        if cfg.get("enabled"):
+            _monitor_sync_windows(cfg)
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("open_monitor", exc)
+
+
+def _monitor_all_param_keys(cfg: dict) -> list:
+    """设置窗/同步用的参数全集：固定 14 项 + 配置内动态键 + 快照盘数展开。"""
+    keys = list(_MONITOR_PARAM_KEYS)
+    units = cfg.get("units") or {}
+    # 配置里已有的动态键（硬盘/风扇）保留——换机/多盘勾选状态不丢
+    for k in units:
+        if k not in keys and (k.startswith("disk.") or k.startswith("fan.")):
+            keys.append(k)
+    # 快照中实际盘数展开（采集运行中才能发现新盘）
+    if _MONITOR_HUB is not None:
+        try:
+            snap = _MONITOR_HUB.snapshot()
+            for k in _monitor_disk_keys(snap):
+                if k not in keys:
+                    keys.append(k)
+        except Exception:  # noqa: BLE001
+            pass
+    for k in _MONITOR_FAN_KEYS:
+        if k not in keys:
+            keys.append(k)
+    return keys
+
+
+def _monitor_sync_windows(cfg: dict) -> None:
+    """按配置同步参数窗格：勾选→建窗/显示，取消→关窗；总开关关→全关+停采。"""
     global _MONITOR_LAST_VISIBLE
     try:
+        if not cfg.get("enabled"):
+            _monitor_close_all_windows()
+            if _MONITOR_HUB is not None:
+                _MONITOR_HUB.stop()
+            return
         mgr = _ensure_monitor_manager()
-        cfg = load_monitor_config()
-        anchor = _MONITOR_BALL._outer_frame_rect() if _MONITOR_BALL else QRect(0, 0, 1, 1)
+        anchor = (_MONITOR_BALL._outer_frame_rect()
+                  if _MONITOR_BALL else QRect(0, 0, 1, 1))
+        units = cfg.get("units") or {}
+        layout = cfg.get("layout") or {}
+        want = [k for k in _monitor_all_param_keys(cfg)
+                if (units.get(k) or {}).get("enabled")]
         first_open = not any(w.isVisible() for w in mgr._widgets.values())
-        # 建窗（按分组；已存在的窗只唤起）
-        for unit_key, row_keys in _MONITOR_UNITS:
-            ucfg = (cfg.get("units") or {}).get(unit_key) or {}
-            if ucfg.get("enabled") is False:
-                continue
-            w = mgr._widgets.get(unit_key)
+        for key in want:
+            w = mgr._widgets.get(key)
             if w is None:
                 w = monitor_ui.MonitorUnitWidget(
-                    unit_key, mgr.hub,
+                    key, mgr.hub,
                     scale_getter=_monitor_scale_getter,
                     place_fn=_monitor_place_fn,
                     theme=_monitor_theme(),
                     topmost_getter=_monitor_topmost_getter,
                     log_fn=_monitor_log_fn,
                     manager=mgr)
-                thresholds = {k: ucfg.get("threshold") or [] for k in row_keys}
-                mgr.register_widget(unit_key, w, row_keys, thresholds)
+                ucfg = units.get(key) or {}
+                mgr.register_widget(key, w, [key], {key: ucfg.get("threshold") or []})
                 w.set_settings_callback(open_monitor_settings)
-                _monitor_restore_layout(w, cfg.get("layout") or {})
+                _monitor_restore_layout(w, layout)
             if not w.isVisible():
                 w.show_at(anchor)
             w.raise_()
-        # 首开 → 启动采集（侧车冷启动 ~5s 宽限，UI 显示唤醒中）
+        # 取消勾选的窗格关闭（保留实例与历史，重勾秒回）
+        for key, w in mgr._widgets.items():
+            if key not in want and w.isVisible():
+                w.hide()
         if first_open:
             _MONITOR_HUB.start()
             _monitor_backfill_history()
-        mgr.start_polling(cfg.get("refresh_ms", 1000))
-        _MONITOR_LAST_VISIBLE = time.time()
-        if _MONITOR_IDLE_TIMER is not None:
-            _MONITOR_IDLE_TIMER.start()
-        if _MONITOR_LAYOUT_TIMER is not None:
-            _MONITOR_LAYOUT_TIMER.start()
+        if want:
+            mgr.start_polling(cfg.get("refresh_ms", 1000))
+            _MONITOR_LAST_VISIBLE = time.time()
+            if _MONITOR_IDLE_TIMER is not None:
+                _MONITOR_IDLE_TIMER.start()
+            if _MONITOR_LAYOUT_TIMER is not None:
+                _MONITOR_LAYOUT_TIMER.start()
     except Exception as exc:  # noqa: BLE001
-        _log_crash("open_monitor", exc)
+        _log_crash("monitor_sync_windows", exc)
+
+
+def _monitor_close_all_windows() -> None:
+    """关闭全部监视窗格（总开关关闭时；保留实例与历史缓冲）。"""
+    try:
+        if _MONITOR_MGR is None:
+            return
+        for w in _MONITOR_MGR._widgets.values():
+            if w.isVisible():
+                w.hide()
+        _MONITOR_MGR.stop_polling()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_close_all", exc)
+
+
+def _monitor_on_new_disk_keys(new_keys: list) -> None:
+    """采集中发现新盘：刷新设置窗参数清单 + 按配置同步窗格。"""
+    try:
+        cfg = load_monitor_config()
+        if not cfg.get("enabled"):
+            return
+        _monitor_sync_windows(cfg)
+        if _MONITOR_SETTINGS_DLG is not None and _MONITOR_SETTINGS_DLG.isVisible():
+            _MONITOR_SETTINGS_DLG.refresh_disk_params()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_new_disk", exc)
 
 
 def _monitor_backfill_history() -> None:
@@ -4701,10 +4788,19 @@ def _monitor_restore_layout(w, layout: dict) -> None:
 
 
 def _monitor_idle_check() -> None:
-    """连续 idle_stop_sec 无任何监视窗 → hub.stop() 释放侧车（~76MB）。"""
+    """连续 idle_stop_sec 无任何监视窗 → hub.stop() 释放侧车（~76MB）。
+
+    总开关关闭时直接停采（不依赖闲置计时）。
+    """
     global _MONITOR_LAST_VISIBLE
     try:
         cfg = load_monitor_config()
+        if not cfg.get("enabled"):
+            if _MONITOR_HUB is not None:
+                _MONITOR_HUB.stop()
+            if _MONITOR_IDLE_TIMER is not None:
+                _MONITOR_IDLE_TIMER.stop()
+            return
         idle_stop = cfg.get("idle_stop_sec", 300)
         any_visible = any(w.isVisible() for w in _MONITOR_MGR._widgets.values())
         if any_visible:
@@ -4752,13 +4848,209 @@ def _monitor_layout_settle() -> None:
         _log_crash("monitor_layout_settle", exc)
 
 
+_MONITOR_SETTINGS_DLG = None
+
+
+def _get_monitor_settings_dialog():
+    """惰性创建监视设置窗（单例，非模态；保引用防 GC）。"""
+    global _MONITOR_SETTINGS_DLG
+    if _MONITOR_SETTINGS_DLG is None:
+        _MONITOR_SETTINGS_DLG = MonitorSettingsDialog()
+    return _MONITOR_SETTINGS_DLG
+
+
 def open_monitor_settings() -> None:
-    """监视窗「打开设置」入口：复用主设置窗（非模态）。"""
+    """监视窗「打开设置」入口：打开监视设置窗（非模态）。"""
     try:
-        if _MONITOR_BALL is not None:
-            QTimer.singleShot(0, _MONITOR_BALL.open_settings)
+        dlg = _get_monitor_settings_dialog()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
     except Exception as exc:  # noqa: BLE001
         _log_crash("open_monitor_settings", exc)
+
+
+class MonitorSettingsDialog(QDialog):
+    """监视设置窗（阶段 A）：总开关 + 参数复选框（一参数一窗格）。
+
+    · 首项「启用资源监视」总开关，默认不勾选；勾选后点保存才拉起采集模块。
+    · 参数复选框：勾选即实时渲染对应窗格，取消即关窗格（总开关启用时）。
+    · 无值参数也罗列（风扇/硬盘换机可用），默认全不勾选。
+    · 非模态 show（照帮助窗先例，避坑 6 嵌套模态）；尺寸内容驱动 + adjustSize。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("监视设置")
+        self.setModal(False)
+        self._cfg = load_monitor_config()
+        self._param_checks: dict = {}
+        self._build_ui()
+        self._load_to_ui()
+        self.adjustSize()
+
+    # ---- 构建 ----
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        self.chk_enable = QCheckBox("启用资源监视", self)
+        self.chk_enable.setToolTip(
+            "勾选后点击「保存」开始拉起资源监视参数采集模块；"
+            "取消勾选并保存则关闭所有监视窗格并停止采集")
+        self.chk_enable.toggled.connect(self._on_enable_toggled)
+        root.addWidget(self.chk_enable)
+
+        # 参数区（滚动）：按分组顺序罗列「复选框 参数名」
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        self._param_layout = QVBoxLayout(inner)
+        self._param_layout.setContentsMargins(4, 4, 4, 4)
+        groups = (
+            ("CPU", [k for k in _MONITOR_PARAM_KEYS if k.startswith("cpu.")]),
+            ("内存", [k for k in _MONITOR_PARAM_KEYS if k.startswith("mem.")]),
+            ("GPU(核显)", [k for k in _MONITOR_PARAM_KEYS if k.startswith("gpu_i.")]),
+            ("GPU(独显)", [k for k in _MONITOR_PARAM_KEYS if k.startswith("gpu_d.")]),
+            ("硬盘", self._disk_keys_for_ui()),
+            ("风扇", list(_MONITOR_FAN_KEYS)),
+            ("网络", [k for k in _MONITOR_PARAM_KEYS if k.startswith("net.")]),
+        )
+        for title, keys in groups:
+            if not keys:
+                continue
+            lab = QLabel(title, inner)
+            f = lab.font()
+            f.setBold(True)
+            lab.setFont(f)
+            self._param_layout.addWidget(lab)
+            for key in keys:
+                label = self._param_label(key)
+                chk = QCheckBox(label, inner)
+                chk.setToolTip(key)
+                chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
+                self._param_checks[key] = chk
+                self._param_layout.addWidget(chk)
+        self._param_layout.addStretch(1)
+        scroll.setWidget(inner)
+        scroll.setMinimumWidth(280)
+        scroll.setMinimumHeight(320)
+        root.addWidget(scroll)
+
+        btn_row = QHBoxLayout()
+        self.btn_save = QPushButton("保存", self)
+        self.btn_save.setDefault(True)
+        btn_cancel = QPushButton("取消", self)
+        self.btn_save.clicked.connect(self._on_save)
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_save)
+        btn_row.addWidget(btn_cancel)
+        root.addLayout(btn_row)
+
+    def _disk_keys_for_ui(self) -> list:
+        """硬盘参数键：配置已有 + 快照实际盘数（至少盘0）。"""
+        keys = []
+        for k in (self._cfg.get("units") or {}):
+            if k.startswith("disk.") and k not in keys:
+                keys.append(k)
+        if _MONITOR_HUB is not None:
+            try:
+                for k in _monitor_disk_keys(_MONITOR_HUB.snapshot()):
+                    if k not in keys:
+                        keys.append(k)
+            except Exception:  # noqa: BLE001
+                pass
+        for k in ("disk.0.temp", "disk.0.usage"):
+            if k not in keys:
+                keys.append(k)
+        return sorted(keys)
+
+    @staticmethod
+    def _param_label(key: str) -> str:
+        """参数显示名：固定键取白名单中文名；动态键带盘号/槽位。"""
+        for k, label, _g, _u in monitor_hub.METRIC_DEFS:
+            if k == key:
+                return label
+        d = monitor_hub._def(key)
+        return d[1]
+
+    # ---- 载入/置灰 ----
+    def _load_to_ui(self) -> None:
+        self._cfg = load_monitor_config()
+        self.chk_enable.setChecked(bool(self._cfg.get("enabled")))
+        units = self._cfg.get("units") or {}
+        for key, chk in self._param_checks.items():
+            chk.setChecked(bool((units.get(key) or {}).get("enabled")))
+        self._update_param_enabled()
+
+    def _update_param_enabled(self) -> None:
+        on = self.chk_enable.isChecked()
+        for chk in self._param_checks.values():
+            chk.setEnabled(on)
+
+    def refresh_disk_params(self) -> None:
+        """采集中发现新盘 → 把新盘参数补进复选框清单（保留已有勾选）。"""
+        try:
+            for key in self._disk_keys_for_ui():
+                if key in self._param_checks:
+                    continue
+                chk = QCheckBox(self._param_label(key), self)
+                chk.setToolTip(key)
+                chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
+                self._param_checks[key] = chk
+                # 插到硬盘分组末尾（网络组之前）：按布局顺序找网络首个标签
+                idx = self._param_layout.count() - 1  # stretch 之前
+                self._param_layout.insertWidget(idx, chk)
+                chk.setEnabled(self.chk_enable.isChecked())
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_refresh_disk_params", exc)
+
+    def _on_enable_toggled(self, on: bool) -> None:
+        self._update_param_enabled()
+
+    # ---- 实时渲染 ----
+    def _on_param_toggled(self, key: str, on: bool) -> None:
+        """参数勾选/取消 → 写配置 + 实时建窗/关窗。
+
+        以界面总开关状态为准：总开关已勾选（即使尚未点保存）时，参数勾选
+        即实时渲染窗格并拉起采集；总开关未勾选时只记配置不建窗。
+        """
+        try:
+            units = self._cfg.setdefault("units", {})
+            u = units.setdefault(key, {"enabled": False, "threshold": []})
+            u["enabled"] = bool(on)
+            if self.chk_enable.isChecked():
+                self._cfg["enabled"] = True
+                save_monitor_config(self._cfg)
+                _monitor_sync_windows(self._cfg)
+            else:
+                save_monitor_config(self._cfg)
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_param_toggled", exc)
+
+    # ---- 保存 ----
+    def _on_save(self) -> None:
+        """保存：总开关勾选 → 拉起采集 + 同步窗格；取消 → 关窗停采。"""
+        try:
+            self._cfg["enabled"] = bool(self.chk_enable.isChecked())
+            units = self._cfg.setdefault("units", {})
+            for key, chk in self._param_checks.items():
+                u = units.setdefault(key, {"enabled": False, "threshold": []})
+                u["enabled"] = bool(chk.isChecked())
+            save_monitor_config(self._cfg)
+            _monitor_sync_windows(self._cfg)
+            self.accept()
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_settings_save", exc)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        try:
+            super().showEvent(event)
+            self._load_to_ui()
+            if _MONITOR_BALL is not None:
+                _place_dialog_near_rect(self, _MONITOR_BALL._outer_frame_rect(),
+                                        _MONITOR_BALL)
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_settings_show", exc)
 
 
 def shutdown_monitor() -> None:
