@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""monitor_ui 阶段 0+1+2+3 自检（离屏，无真实硬件/侧车依赖）。
+"""monitor_ui 阶段 0+1+2+3+4 自检（离屏，无真实硬件/侧车依赖）。
 
-七节：
+八节：
   A. 契约与骨架——注入接口、UnitRow、配置块默认、空壳冒烟
   B. 假 hub——字段与真实 Metric 完全一致、五态/序列可脚本化注入、
      snapshot 计数、list_disks 传帧复用、与真实 hub 输出交叉验证
@@ -11,6 +11,7 @@
   E. 阶段 1 渲染与布局——窗口标志、三列内容驱动、缩放、光晕像素、动态行高
   F. 阶段 2 数据可视化——五态、阈值插值、呼吸相位、history、一帧一映射
   G. 阶段 3 磁吸——拖动→预览→松手落位→入组、移动中不吸附、幽灵穿透、屏幕边
+  H. 阶段 4 解绑收口——解绑复位、右键轻点不拆组、四层清扫、全隐停、测试钩子
 
 跑法：  python tools/check_monitor_ui.py
 退出码： 0 全过 / 1 有失败
@@ -26,8 +27,8 @@ import time  # noqa: E402
 from collections import deque  # noqa: E402
 from dataclasses import fields  # noqa: E402
 
-from PySide6.QtCore import QPointF, Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QPointF, QRect, Qt  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 from PySide6.QtGui import QFontDatabase, QImage  # noqa: E402
 
 import monitor_hub as mh  # noqa: E402
@@ -237,12 +238,8 @@ def section_a():
     ok(w.scale_getter() == 1.0 and w.topmost_getter() is False,
        "注入回调可调用")
 
-    # 未实现方法一律 NotImplementedError（阶段边界看守；
-    # update_layout/set_rows 阶段 1、update_data/tick 阶段 2、
-    # snap_groups/simulate_drag 阶段 3 已实现，改由 E/F/G 节真实验证）
-    raises_not_implemented(
-        lambda: w.simulate_data_update("cpu.load", 1.0, mh.STATUS_OK),
-        "simulate_data_update 未实现")
+    # 阶段 0~4 方法均已实现（改由 E/F/G/H 节真实验证）；
+    # 阶段 5 集成接线归 main.py，本模块无遗留 NotImplementedError 方法。
 
     # 阶段 0 不碰 hub 生命周期（start/stop 归 main.py 阶段 5）
     ok(hub.start_calls == 0 and hub.stop_calls == 0,
@@ -1004,6 +1001,191 @@ def section_g():
     wb.close()
 
 
+# ---------------------------------------------------------------------------
+# H. 阶段 4：解绑与状态机收口
+# ---------------------------------------------------------------------------
+def _snapped_pair(mgr, hub):
+    """建两个已吸附成组的单元窗（A 右贴 B 左）。"""
+    wa, wb = _two_widgets(mgr, hub)
+    wa.move(100, 100)
+    wb.move(100 + wa.width(), 100)
+    wa.show()
+    wb.show()
+    APP.processEvents()
+    grp = mgr.new_group()
+    grp.add(wa)
+    grp.add(wb)
+    wa._is_snapped = True
+    wb._is_snapped = True
+    wa._contact_edges = ["right"]
+    wb._contact_edges = ["left"]
+    return wa, wb, grp
+
+
+def section_h():
+    print("[H] 阶段 4 解绑与状态机收口")
+    from PySide6.QtCore import QEvent, QPoint
+
+    hub = FakeHub()
+    inj = make_injections()
+    mgr = mu.MonitorWindowManager(hub, **inj)
+
+    # ---- H1 解绑：组剩余==1 解散，剩余成员复位光晕 ----
+    wa, wb, grp = _snapped_pair(mgr, hub)
+    ok(grp in mgr.snap_groups(), "组在管理器列表")
+    wa.detach_from_group()
+    ok(wa._group is None and not wa._is_snapped, "解绑自身清组与吸附态")
+    ok(wa._contact_edges == [], "解绑自身清接触边")
+    # 关键：剩余成员 wb 必须复位（漏这步会永久残留融合态）
+    ok(wb._group is None, "剩余成员 wb 组已解散")
+    ok(not wb._is_snapped, "剩余成员 wb 吸附态复位 False")
+    ok(wb._contact_edges == [], "剩余成员 wb 接触边清空")
+    ok(grp not in mgr.snap_groups(), "解散组从管理器列表移除")
+    # 光晕恢复像素：wb 独立态本体外围光晕带 alpha 回升
+    img = _grab(wb)
+    halo = round(mu.HALO_PX * 1.0)
+    a_band = _alpha(img, wb.width() // 2, max(1, halo // 2))
+    ok(a_band > 5, f"解绑后剩余成员光晕恢复（带 alpha={a_band}）")
+
+    # ---- H2 三成员组解绑一个 → 组保留（剩余 2）----
+    wc = mu.MonitorUnitWidget("net", hub, manager=mgr,
+                              **{k: v for k, v in inj.items() if k != "config_io"})
+    mgr.register_widget("net", wc, ["net.rx"])
+    wa.move(300, 300)
+    wb.move(300 + wa.width(), 300)
+    wc.move(300 + wa.width() + wb.width(), 300)
+    wc.show()
+    APP.processEvents()
+    g3 = mgr.new_group()
+    for w in (wa, wb, wc):
+        g3.add(w)
+        w._is_snapped = True
+    wa.detach_from_group()
+    ok(len(g3.members) == 2 and g3 in mgr.snap_groups(),
+       "三成员解绑一个 → 组保留剩余 2")
+    ok(wb._is_snapped and wc._is_snapped, "剩余 2 成员仍吸附（未误解散）")
+    ok(wa._group is None, "被解绑者独立")
+
+    # ---- H3 右键拖拽解绑全链路（sendEvent）----
+    # 重建吸附对，用右键拖动 wa 解绑
+    wa._group = None
+    wb._group = None
+    g3b = mgr.new_group()
+    g3b.add(wa)
+    g3b.add(wb)
+    wa._is_snapped = True
+    wb._is_snapped = True
+    wa.move(500, 500)
+    wb.move(500 + wa.width(), 500)
+    APP.processEvents()
+    mgr.simulate_drag(wa, 60, 40, button=Qt.MouseButton.RightButton)
+    ok(wa._group is None, "右键拖动解绑自身")
+    ok(wb._group is None and not wb._is_snapped,
+       "右键拖动解绑 → 剩余成员复位")
+    ok(wa.pos() == QPoint(560, 540), f"右键解绑后独立跟手（{wa.pos()}）")
+
+    # ---- H4 右键轻点（位移≤4px）不拆组 + 弹菜单 ----
+    wa.move(700, 700)
+    wb.move(700 + wa.width(), 700)
+    g4 = mgr.new_group()
+    g4.add(wa)
+    g4.add(wb)
+    wa._is_snapped = True
+    wb._is_snapped = True
+    APP.processEvents()
+    start = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wa, QEvent.Type.MouseButtonPress, start)  # 左键占位无关
+    # 用右键轻点
+    from PySide6.QtGui import QMouseEvent
+    def rev(etype, gpos):
+        return QMouseEvent(etype, QPointF(gpos), QPointF(gpos),
+                           Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                           Qt.KeyboardModifier.NoModifier)
+    APP.sendEvent(wa, rev(QEvent.Type.MouseButtonPress, start))
+    APP.sendEvent(wa, rev(QEvent.Type.MouseButtonRelease, start + QPoint(2, 1)))
+    ok(wa._group is g4 and wa._is_snapped, "右键轻点不拆组")
+    ok(len(g4.members) == 2, "右键轻点组成员不变")
+    # 菜单已弹出（QMenu 实例存在且可见）
+    menus = [ch for ch in wa.children() if isinstance(ch, QMenu)]
+    ok(any(m.isVisible() for m in menus), "右键轻点弹出最小菜单")
+    menu = next(m for m in menus if m.isVisible())
+    acts = [a.text() for a in menu.actions()]
+    ok("关闭本窗" in acts and "打开设置" in acts, f"菜单项齐全（{acts}）")
+    menu.close()
+
+    # ---- H5 菜单回调非模态（singleShot）+ 设置回调 ----
+    called = []
+    wa.set_settings_callback(lambda: called.append("settings"))
+    wa._open_settings()
+    ok(called == ["settings"], "设置回调触发")
+    # 源码看守：菜单回调走 singleShot 非模态，禁 exec 嵌套
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("QTimer.singleShot(0" in src and "menu.popup" in src,
+       "菜单回调 singleShot 非模态 + popup（非 exec）")
+    ok(".exec(" not in src, "禁 exec() 嵌套（坑 6）")
+    ok("def contextMenuEvent" in src, "未整体屏蔽 contextMenuEvent")
+
+    # ---- H6 四层残留清扫 ----
+    wa._preview_target = wb
+    wa._preview_edge = "right"
+    wa._preview_rect = QRect(0, 0, 10, 10)
+    mgr.show_ghost(QRect(0, 0, 10, 10), True)
+    wa._snap_animating = True
+    wa.clear_interaction_state()
+    ok(wa._preview_target is None and wa._preview_edge is None
+       and wa._preview_rect is None, "清扫预览目标/边/贴合位")
+    ok(not mgr._ghost.isVisible(), "清扫幽灵窗")
+    ok(not wa._snap_animating and not wa._snap_anim_timer.isActive(),
+       "清扫动画定时器")
+
+    # ---- H7 关闭窗清四层 + 解绑 + 可见性联动 ----
+    wa.move(900, 900)
+    wb.move(900 + wa.width(), 900)
+    g7 = mgr.new_group()
+    g7.add(wa)
+    g7.add(wb)
+    wa._is_snapped = True
+    mgr.start_polling(1000)
+    ok(mgr._timer.isActive(), "有可见窗定时器运行")
+    wa.close()
+    APP.processEvents()
+    ok(wa._group is None, "关闭窗解绑")
+    ok(not wa._snap_animating, "关闭窗清动画态")
+    # wb 仍可见 → 定时器不停
+    ok(mgr._timer.isActive(), "尚有可见窗 → 定时器不停")
+    wb.close()
+    wc.close()
+    APP.processEvents()
+    ok(not mgr._timer.isActive(), "全部关闭 → 停拉取定时器")
+
+    # ---- H8 测试钩子 simulate_data_update 走真实路径 ----
+    w8 = mu.MonitorUnitWidget("cpu", hub, manager=mgr,
+                              **{k: v for k, v in inj.items() if k != "config_io"})
+    mgr.register_widget("cpu", w8, ["cpu.load"])
+    w8.show()
+    APP.processEvents()
+    w8.simulate_data_update("cpu.load", 55.0, mh.STATUS_OK)
+    ok(w8._rows[0].value == 55.0 and w8._rows[0].available,
+       "simulate_data_update 走真实 update_data")
+    ok(list(w8._rows[0].history) == [55.0], "演示钩子 history 入值")
+    w8.simulate_data_update("cpu.load", None, mh.STATUS_NEED_ADMIN)
+    ok(not w8._rows[0].available and w8._rows[0].history[-1] is None,
+       "演示钩子五态断线")
+    w8.close()
+
+    # ---- H9 源码看守：解绑复位与状态机守卫（改坏会红）----
+    ok("len(grp.members) == 1" in src and "last._is_snapped = False" in src,
+       "组剩余==1 解散且剩余成员复位（漏检会红）")
+    ok("def clear_interaction_state" in src and "def detach_from_group" in src,
+       "四层清扫与解绑方法在位")
+    ok("def closeEvent" in src and "clear_interaction_state()" in src,
+       "关闭窗清四层")
+
+    wa.close()
+    wb.close()
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -1012,5 +1194,6 @@ if __name__ == "__main__":
     section_e()
     section_f()
     section_g()
+    section_h()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

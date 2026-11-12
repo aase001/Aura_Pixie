@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""资源监视 UI —— 阶段 3：契约骨架 + 单元渲染 + 数据可视化 + 磁吸吸附。
+"""资源监视 UI —— 阶段 4：契约骨架 + 渲染 + 数据可视化 + 磁吸 + 解绑收口。
 
 形态（已拍板）：N 个磁吸迷你窗，每指标单元一个顶层 QWidget。
 本模块禁止 import main（main 反向 import 本模块，会循环依赖）。
@@ -11,7 +11,8 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
   - 阶段 1：MonitorUnitWidget 三列内容驱动渲染 + 边缘虚化光晕 + 动态行高
   - 阶段 2：五态驱动视觉 + 语义色阈值插值 + 高负载呼吸 + sparkline + 拉取节奏
   - 阶段 3：SnapGroup + 拖动跟手 + 幽灵轮廓预览 + 松手 280ms 缓入缓出吸附
-  - 阶段 4~5：解绑收口 / 集成接线（方法留 NotImplementedError）
+  - 阶段 4：右键拖拽解绑 + 组解散复位 + 最小菜单 + 四层残留清扫 + 可见性联动
+  - 阶段 5：集成接线（方法留 NotImplementedError）
 
 后端契约（monitor_hub.py，只读消费）：
   - 每 tick 只调一次 snapshot()，全单元共享同一帧；禁止 get(key)
@@ -26,10 +27,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtCore import (QElapsedTimer, QEvent, QPoint, QPointF, QRect, QRectF,
+                            Qt, QTimer)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QPainter,
                            QPainterPath, QPen)
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 import monitor_hub as mh
 
@@ -370,6 +372,11 @@ class MonitorUnitWidget(QWidget):
         self._snap_to = QPoint()
         self._snap_animating = False
         self._snap_pending = None     # 落位后入组目标（widget 或 "screen"）
+        # 阶段 4：右键拖动解绑 / 轻点菜单
+        self._right_dragging = False
+        self._right_drag_started = False
+        self._right_press_global = QPoint()
+        self._settings_callback: Optional[Callable] = None  # 打开设置（注入）
         # 布局几何缓存（update_layout 重算，paintEvent 消费；缩放每次现查）
         self._col_w = (0, 0, 0)       # A 名称 / B 数值 / C 单位 列宽
         self._row_h = 0               # 单行文本高
@@ -702,10 +709,12 @@ class MonitorUnitWidget(QWidget):
             self._anim_timer.stop()
 
     def hideEvent(self, event) -> None:  # noqa: N802
-        """隐藏停自身呼吸相位推进（阶段 4 可见性联动）。"""
+        """隐藏停自身呼吸相位推进 + 清交互态 + 可见性联动（阶段 4）。"""
         try:
             self._anim_timer.stop()
+            self.clear_interaction_state()
             super().hideEvent(event)
+            self.manager.on_widget_hidden()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.hideEvent", e)
 
@@ -722,9 +731,10 @@ class MonitorUnitWidget(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         try:
             if event.button() == Qt.MouseButton.LeftButton:
-                # 动画期间禁止再次拖动打断产生残留
+                # 动画期间禁止再次拖动打断产生残留；新按下清齐四层
                 if self._snap_animating:
                     return
+                self._abort_snap_anim()
                 self._press_global = event.globalPosition().toPoint()
                 self._grab_offset = self._press_global - self.frameGeometry().topLeft()
                 self._dragging = True
@@ -735,6 +745,12 @@ class MonitorUnitWidget(QWidget):
                 else:
                     self._drag_members = [self]
                 event.accept()
+            elif event.button() == Qt.MouseButton.RightButton:
+                # 右键按下：记录起点，位移>4px 解绑、≤4px 抬起弹菜单
+                self._right_press_global = event.globalPosition().toPoint()
+                self._right_dragging = True
+                self._right_drag_started = False
+                event.accept()
             else:
                 super().mousePressEvent(event)
         except Exception as e:  # noqa: BLE001
@@ -742,10 +758,26 @@ class MonitorUnitWidget(QWidget):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         try:
+            gp = event.globalPosition().toPoint()
+            # 右键拖动：组内窗位移>4px → 解绑自身，此后按独立窗处理
+            if self._right_dragging:
+                if not self._right_drag_started:
+                    if (gp - self._right_press_global).manhattanLength() < DRAG_THRESHOLD_PX:
+                        return
+                    self._right_drag_started = True
+                    if self._group is not None:
+                        self.detach_from_group()
+                # 解绑后独立窗跟手移动（无弹簧）
+                if self._right_drag_started:
+                    delta = gp - self._right_press_global
+                    self.move(self.frameGeometry().topLeft() + delta)
+                    self._right_press_global = gp
+                    self._update_preview(gp)
+                event.accept()
+                return
             if not self._dragging:
                 super().mouseMoveEvent(event)
                 return
-            gp = event.globalPosition().toPoint()
             if not self._drag_started:
                 if (gp - self._press_global).manhattanLength() < DRAG_THRESHOLD_PX:
                     return
@@ -763,6 +795,16 @@ class MonitorUnitWidget(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         try:
+            if event.button() == Qt.MouseButton.RightButton and self._right_dragging:
+                self._right_dragging = False
+                if not self._right_drag_started:
+                    # 右键未拖动（位移≤4px 抬起）→ 弹最小菜单
+                    self._show_min_menu(event.globalPosition().toPoint())
+                else:
+                    self._right_drag_started = False
+                    self._finish_drag()
+                event.accept()
+                return
             if event.button() == Qt.MouseButton.LeftButton and self._dragging:
                 self._dragging = False
                 if self._drag_started:
@@ -949,9 +991,118 @@ class MonitorUnitWidget(QWidget):
                 p.drawLine(QPointF(body.left(), body.bottom()),
                            QPointF(body.right(), body.bottom()))
 
-    # ---- 阶段 4：测试钩子（保留为公开方法）----
+    # ---- 阶段 4：解绑与状态机收口 ----
+    def set_settings_callback(self, cb: Optional[Callable]) -> None:
+        """注入「打开设置」回调（菜单项触发，非模态）。"""
+        self._settings_callback = cb
+
+    def detach_from_group(self) -> None:
+        """从组移除自身；组剩余==1 时解散组，剩余成员复位 _is_snapped+恢复光晕。
+
+        自身清 _group/_is_snapped、立即 update 恢复光晕；此后按独立窗处理。
+        """
+        try:
+            grp = self._group
+            if grp is None:
+                # 独立窗也可能有屏幕边吸附态，解绑即恢复独立
+                self._is_snapped = False
+                self._screen_edge = None
+                self._contact_edges = []
+                self.update()
+                return
+            grp.remove(self)
+            self._is_snapped = False
+            self._contact_edges = []
+            self._screen_edge = None
+            # 组剩余==1 → 解散组，剩余成员必须复位（漏这步会永久残留融合态）
+            if len(grp.members) == 1:
+                last = grp.members[0]
+                grp.remove(last)
+                last._is_snapped = False
+                last._contact_edges = []
+                last._screen_edge = None
+                last.update()
+                self.manager.dissolve_group(grp)
+            elif len(grp.members) == 0:
+                self.manager.dissolve_group(grp)
+            self.update()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.detach_from_group", e)
+
+    def _show_min_menu(self, global_pos: QPoint) -> None:
+        """右键轻点最小菜单：关闭本窗 / 打开设置。
+
+        菜单回调一律 QTimer.singleShot(0, ...) 非模态触发，禁 exec() 嵌套（坑 6）。
+        用 popup（非模态）而非 exec；不得整体屏蔽 contextMenuEvent。
+        """
+        try:
+            menu = QMenu(self)
+            act_close = menu.addAction("关闭本窗")
+            act_settings = menu.addAction("打开设置")
+            act_close.triggered.connect(
+                lambda: QTimer.singleShot(0, self.close))
+            act_settings.triggered.connect(
+                lambda: QTimer.singleShot(0, self._open_settings))
+            menu.popup(global_pos)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui._show_min_menu", e)
+
+    def _open_settings(self) -> None:
+        try:
+            if self._settings_callback is not None:
+                self._settings_callback()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui._open_settings", e)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """右键菜单走最小菜单（不整体屏蔽；与右键轻点同入口）。"""
+        try:
+            self._show_min_menu(event.globalPos())
+            event.accept()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.contextMenuEvent", e)
+
+    def _abort_snap_anim(self) -> None:
+        """打断吸附动画（新按下/关闭窗）：停定时器、清动画态。"""
+        if self._snap_animating:
+            self._snap_anim_timer.stop()
+            self._snap_animating = False
+            self._snap_pending = None
+
+    def clear_interaction_state(self) -> None:
+        """状态机守卫：清齐四层（_preview_target/_preview_edge/幽灵窗/动画定时器）。
+
+        独立→预览→吸附→解绑→独立全链路每个切换点与打断点都调本方法。
+        """
+        self._preview_target = None
+        self._preview_edge = None
+        self._preview_rect = None
+        self._preview_strong = False
+        self.manager.hide_ghost()
+        self._abort_snap_anim()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """关闭窗：清齐四层 + 从组解绑 + 通知管理器可见性联动。"""
+        try:
+            self.clear_interaction_state()
+            if self._group is not None:
+                self.detach_from_group()
+            self._anim_timer.stop()
+            super().closeEvent(event)
+            self.manager.on_widget_hidden()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.closeEvent", e)
+
+    # ---- 阶段 4：测试钩子（公开方法，供离屏自检与无后端演示）----
     def simulate_data_update(self, key: str, value, status: str) -> None:
-        raise NotImplementedError("阶段 4：无后端演示钩子")
+        """无后端演示：构造 Metric 走真实 update_data 路径。"""
+        try:
+            label, group, unit = self.manager._def_of(key)
+            m = mh.Metric(key=key, label=label, group=group, value=value,
+                          unit=unit, status=status)
+            self.update_data(m)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.simulate_data_update", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1077,6 +1228,19 @@ class MonitorWindowManager:
     def snap_groups(self) -> list:
         return list(self._groups)
 
+    def dissolve_group(self, grp: SnapGroup) -> None:
+        """解散组（剩余≤1 时调用）：从组列表移除。"""
+        if grp in self._groups:
+            self._groups.remove(grp)
+
+    def on_widget_hidden(self) -> None:
+        """单元窗隐藏/关闭 → 全部不可见时停拉取定时器（可见性联动）。"""
+        try:
+            if not self._any_visible():
+                self._timer.stop()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.on_widget_hidden", e)
+
     def show_ghost(self, rect: QRect, strong: bool) -> None:
         try:
             self._ghost.show_at(rect, strong)
@@ -1089,18 +1253,20 @@ class MonitorWindowManager:
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.hide_ghost", e)
 
-    # ---- 阶段 4：测试钩子（保留为公开方法）----
-    def simulate_drag(self, widget, dx: float, dy: float) -> None:
-        """离屏拖动演示钩子：sendEvent 驱动 按下→移动→松手 全链路。"""
+    # ---- 阶段 4：测试钩子（公开方法，供离屏自检与无后端演示）----
+    def simulate_drag(self, widget, dx: float, dy: float,
+                      button: Qt.MouseButton = Qt.MouseButton.LeftButton) -> None:
+        """离屏拖动演示钩子：sendEvent 驱动 按下→移动→松手 全链路。
+
+        button=RightButton 时演示右键拖拽解绑。
+        """
         from PySide6.QtGui import QMouseEvent
-        from PySide6.QtCore import QEvent
         start = widget.frameGeometry().topLeft() + QPoint(5, 5)
         end = start + QPoint(int(dx), int(dy))
 
         def ev(etype, gpos):
             return QMouseEvent(etype, QPointF(gpos), QPointF(gpos),
-                               Qt.MouseButton.LeftButton,
-                               Qt.MouseButton.LeftButton,
+                               button, button,
                                Qt.KeyboardModifier.NoModifier)
         from PySide6.QtWidgets import QApplication as _QApp
         _QApp.sendEvent(widget, ev(QEvent.Type.MouseButtonPress, start))
