@@ -1647,6 +1647,12 @@ class MonitorWindowManager:
                 and a.top() < b.top() + b.height()
                 and a.top() + a.height() > b.top())
 
+    @staticmethod
+    def _opposite_edge(edge):
+        """贴合边取对侧（与 MonitorUnitWidget._opposite_edge 同口径）。"""
+        return {"left": "right", "right": "left",
+                "top": "bottom", "bottom": "top"}.get(edge)
+
     def _screen_avail_for(self, anchor_rect: QRect):
         """锚点所在屏可用区；screenAt 取不到时回退 screens()[0]（离屏自检）。"""
         screen = QGuiApplication.screenAt(anchor_rect.center())

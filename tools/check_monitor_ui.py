@@ -2567,12 +2567,20 @@ def section_o():
         "cpu.temp": {"x": 100 + wa.width(), "y": 100, "group_id": "g7"},
         "mem.load": {"x": 100, "y": 100 + wa.height() + 40, "group_id": None},
     }
+    # 捕获 restore_groups 内部异常（log_fn 兜底会吞异常，不捕获则崩溃漏检）
+    _restore_errs = []
+    _orig_log2 = mgr2.log_fn
+    mgr2.log_fn = lambda where, exc: _restore_errs.append((where, exc))
     mgr2.restore_groups(layout_mem)
+    mgr2.log_fn = _orig_log2
+    ok(not _restore_errs, f"重启恢复无内部异常（{_restore_errs}）")
     ok(wa._group is not None and wa._group is wb._group, "重启恢复：wa/wb 同组")
     ok(wa._group.group_id == "g7", "重启恢复：组 id 来自布局记忆")
     ok(wc._group is None, "重启恢复：独立窗不入组")
     ok(wa._is_snapped and wb._is_snapped, "重启恢复：吸附态复位")
     ok(any(t is wb for t, e in wa._snap_constraints), "重启恢复：贴合约束重建")
+    ok(wa._contact_edges == ["right"] and wb._contact_edges == ["left"],
+       f"重启恢复：接触边含对侧（{wa._contact_edges}/{wb._contact_edges}）")
     # 整组移动行为一致：拖 wa → wb 同步偏移
     p0 = wb.pos()
     start = wa.frameGeometry().topLeft() + QPoint(5, 5)
