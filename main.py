@@ -2515,7 +2515,8 @@ CODE_HELP_TEXT = (
     "监视窗以「一参数一窗格」的磁吸迷你窗呈现硬件实时数据。\n"
     "入口：右键球体 →「监视」，或设置主窗底部「监视」按钮。\n\n"
     "■ 启用资源监视（总开关）\n"
-    "  · 默认不勾选。勾选 + 保存才拉起采集模块；取消 + 保存则关闭所有窗格并停采。\n"
+    "  · 默认不勾选。勾选 + 保存才拉起窗格采集；取消 + 保存则关闭所有窗格并停采。\n"
+    "  · 打开设置窗即轻量预览采集以显示设备名小字（不建窗格），关闭即释放。\n"
     "  · 总开关未勾选时，下方参数复选框置灰。\n\n"
     "■ 参数复选框（按 CPU/内存/GPU核显/GPU独显/硬盘/风扇/网络 分组）\n"
     "  · 勾选即实时弹出对应窗格，取消即实时关闭（以界面总开关状态为准）。\n"
@@ -5015,6 +5016,38 @@ def _monitor_on_hardware_names(names: dict) -> None:
         _log_crash("monitor_hardware_names", exc)
 
 
+def _monitor_preview_start() -> None:
+    """设置窗预览采集（V16.2）：打开设置窗即轻量拉起采集取设备名。
+
+    只 start 侧车供设备名小字实时显示，不建窗格、不改总开关配置；
+    窗格仍由「参数勾选/总开关保存」驱动。关闭设置窗且无任何窗格时
+    由 _monitor_preview_stop 停采释放（不长期占用侧车）。
+    """
+    try:
+        _ensure_monitor_manager()
+        runner = getattr(_MONITOR_HUB, "runner", None)
+        if _MONITOR_HUB is not None and not getattr(runner, "alive", False):
+            _MONITOR_HUB.start()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_preview_start", exc)
+
+
+def _monitor_preview_stop() -> None:
+    """设置窗关闭：无任何可见窗格且总开关未启用 → 停预览采集释放侧车。
+
+    总开关已启用或有窗格可见时不停（采集生命周期仍归监视主链路）。
+    """
+    try:
+        if _MONITOR_HUB is None or _MONITOR_MGR is None:
+            return
+        cfg = load_monitor_config()
+        any_visible = any(w.isVisible() for w in _MONITOR_MGR._widgets.values())
+        if not cfg.get("enabled") and not any_visible:
+            _MONITOR_HUB.stop()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_preview_stop", exc)
+
+
 def _monitor_backfill_history() -> None:
     """重开时把 hub 历史环形缓冲回填到各行 sparkline（秒回曲线）。"""
     try:
@@ -5505,6 +5538,9 @@ class MonitorSettingsDialog(QDialog):
         try:
             super().showEvent(event)
             self._load_to_ui()
+            # 预览采集（V16.2）：打开设置窗即拉起采集取设备名（不建窗格），
+            # 设备名小字不必等「总开关+保存」即可实时显示
+            _monitor_preview_start()
             # 设备名每次运行重载（V16.2）：从当前实时快照重取，不落盘不缓存旧名
             self.refresh_hardware_names()
             # 首帧晚到/采集后启动时定时补刷新（可见期间才运行，隐藏即停）
@@ -5518,6 +5554,8 @@ class MonitorSettingsDialog(QDialog):
     def hideEvent(self, event) -> None:  # noqa: N802
         try:
             self._hw_refresh_timer.stop()
+            # 关闭设置窗：无窗格且总开关未启用 → 停预览采集释放侧车
+            _monitor_preview_stop()
             super().hideEvent(event)
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_settings_hide", exc)

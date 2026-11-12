@@ -1377,14 +1377,16 @@ def section_i():
     try:
         ok(mgr is not None, "惰性创建 manager")
         ok(fake.start_calls == 0, "创建 manager 不启动采集")
-        # 总开关默认关 → open_monitor 只弹设置窗，不建窗不采集
+        # 总开关默认关 → open_monitor 弹设置窗 + 预览采集（取设备名），但不建窗格
         M.open_monitor()
         APP.processEvents()
-        ok(fake.start_calls == 0, "总开关未启用 → 不拉起采集")
+        ok(fake.start_calls == 1, "打开设置窗 → 预览采集启动（V16.2 取设备名）")
         ok(not any(w.isVisible() for w in mgr._widgets.values()),
-           "总开关未启用 → 无监视窗格")
+           "总开关未启用 → 无监视窗格（预览不建窗）")
         ok(M._MONITOR_SETTINGS_DLG is not None, "open_monitor 弹监视设置窗")
         M._MONITOR_SETTINGS_DLG.hide()
+        APP.processEvents()
+        ok(fake.stop_calls >= 1, "关设置窗且无窗格未启用 → 预览采集停采释放")
         # 启用总开关 + 勾选两个参数 → 同步建窗 + start
         cfg = M.load_monitor_config()
         cfg["enabled"] = True
@@ -1392,7 +1394,7 @@ def section_i():
         cfg["units"]["mem.load"]["enabled"] = True
         M.save_monitor_config(cfg)
         M._monitor_sync_windows(cfg)
-        ok(fake.start_calls == 1, "总开关启用首开 → hub.start() 一次")
+        ok(fake.start_calls == 2, "总开关启用首开 → hub.start() 再次")
         ok(set(mgr._widgets) == {"cpu.load", "mem.load"},
            f"一参数一窗格（{set(mgr._widgets)}）")
         ok(all(w.isVisible() for w in mgr._widgets.values()), "勾选参数窗格可见")
@@ -1406,12 +1408,13 @@ def section_i():
         M._monitor_sync_windows(cfg)
         ok(not mgr._widgets["mem.load"].isVisible(), "取消勾选 → 窗格关闭")
         ok(mgr._widgets["cpu.load"].isVisible(), "其余窗格保留")
-        # 关窗不停采：隐藏剩余窗 → 停拉取但 hub 不停
+        # 关窗不停采：隐藏剩余窗 → 停拉取但 hub 不停（增量口径，排除预览停采计数）
+        _stop_before_hide = fake.stop_calls
         mgr._widgets["cpu.load"].hide()
         APP.processEvents()
         mgr.tick()
         ok(not mgr._timer.isActive(), "全隐 → 停拉取定时器")
-        ok(fake.stop_calls == 0, "关窗不停采（hub.stop 未调用）")
+        ok(fake.stop_calls == _stop_before_hide, "关窗不停采（hub.stop 未新增）")
         # 重开 → 历史回填秒回曲线
         fake.seed_history("cpu.load", [10.0, 20.0, 30.0])
         cfg["units"]["cpu.load"]["enabled"] = True
