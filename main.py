@@ -5312,14 +5312,25 @@ class MonitorSettingsDialog(QDialog):
         """该参数是否有设备名（CPU/核显/独显/硬盘；内存/网络/风扇无）。"""
         return key.startswith(("cpu.", "gpu_i.", "gpu_d.", "disk."))
 
+    @staticmethod
+    def _hw_font(base: QFont) -> QFont:
+        """设备名小字字体：比参数名小一点点（约小 2px）。
+
+        关键：默认字体是「点」单位，pixelSize() 返回 -1，若直接
+        max(1, pixelSize()-N) 会塌成 1px → 渲染成一条灰线（V16.2 实测根因）。
+        故先用 QFontMetricsF 取真实像素高再减，保证可读不塌缩。
+        """
+        px = QFontMetricsF(base).height()
+        f = QFont(base)
+        f.setPixelSize(max(8, int(round(px)) - 2))
+        return f
+
     def _add_hw_label(self, key: str, parent) -> None:
-        """参数复选框正下方加最小字号设备名 QLabel（仅有设备名的参数）。"""
+        """参数复选框正下方加设备名小字 QLabel（仅有设备名的参数）。"""
         if not self._hw_capable(key):
             return
         lab = QLabel("—", parent)
-        f = lab.font()
-        f.setPixelSize(max(1, f.pixelSize() - 2))   # 比参数名小两号（太小会渲染成灰线）
-        lab.setFont(f)
+        lab.setFont(self._hw_font(lab.font()))
         lab.setStyleSheet("color: gray;")
         lab.setContentsMargins(20, 0, 0, 2)   # 与复选框文字左缘大致对齐
         self._hw_labels[key] = lab
@@ -5420,9 +5431,7 @@ class MonitorSettingsDialog(QDialog):
                 chk.setEnabled(self.chk_enable.isChecked())
                 if self._hw_capable(key):
                     lab = QLabel("—", self)
-                    f = lab.font()
-                    f.setPixelSize(max(1, f.pixelSize() - 2))
-                    lab.setFont(f)
+                    lab.setFont(self._hw_font(lab.font()))
                     lab.setStyleSheet("color: gray;")
                     lab.setContentsMargins(20, 0, 0, 2)
                     lab.setEnabled(self.chk_enable.isChecked())
@@ -5464,9 +5473,7 @@ class MonitorSettingsDialog(QDialog):
                 chk.setEnabled(self.chk_enable.isChecked())
                 if self._hw_capable(key):
                     lab = QLabel("—", self)
-                    f = lab.font()
-                    f.setPixelSize(max(1, f.pixelSize() - 2))
-                    lab.setFont(f)
+                    lab.setFont(self._hw_font(lab.font()))
                     lab.setStyleSheet("color: gray;")
                     lab.setContentsMargins(20, 0, 0, 2)
                     lab.setEnabled(self.chk_enable.isChecked())
