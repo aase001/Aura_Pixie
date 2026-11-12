@@ -200,12 +200,22 @@ def install_chinese_buttons(app) -> None:
     对话框另有就地 setText 硬编码中文，不受此处影响。
     """
     _zh_translators_keep.clear()
-    tdir = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    # 翻译目录候选：① 内嵌 translations（Nuitka onefile 解压目录 = __file__ 同级，
+    # 打包形态；BASE_DIR 是原始 exe 目录不含内嵌数据，故用 __file__）
+    # ② Qt 官方 TranslationsPath（源码形态）。打包须 --include-data-files 带上
+    # qtbase_zh_CN.qm，否则散落消息框按钮回退英文（坑 52）。
+    tdirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "translations"),
+             QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)]
     for base in ("qtbase_zh_CN", "qt_zh_CN"):
-        tr = QTranslator(app)
-        if tr.load(base, tdir):
-            app.installTranslator(tr)
-            _zh_translators_keep.append(tr)
+        loaded = False
+        for tdir in tdirs:
+            tr = QTranslator(app)
+            if tr.load(base, tdir):
+                app.installTranslator(tr)
+                _zh_translators_keep.append(tr)
+                loaded = True
+                break
+        if loaded:
             break
 
 # 配置文件主位置：从本版本起迁移到 %LOCALAPPDATA%\Aura_Pixie\setting.yaml
