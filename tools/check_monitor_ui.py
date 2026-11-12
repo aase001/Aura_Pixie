@@ -1828,43 +1828,52 @@ def section_l():
     wa.close()
     wb.close()
 
-    # ---- L2 使用率类不画曲线，非使用率画曲线 ----
+    # ---- L2 仅硬盘使用率不画曲线；CPU/内存使用率与温度画曲线（V16.2 收窄）----
     hub2 = FakeHub()
     mgr2 = mu.MonitorWindowManager(hub2, **inj)
     w_inj = {k: v for k, v in inj.items() if k != "config_io"}
-    w_pct = mu.MonitorUnitWidget("cpu.load", hub2, manager=mgr2, **w_inj)
-    mgr2.register_widget("cpu.load", w_pct, ["cpu.load"])
-    w_pct.show()
-    APP.processEvents()
-    img_empty = _grab(w_pct)
-    for v in (10.0, 40.0, 70.0, 30.0, 90.0, 50.0):
-        hub2.set_metric("cpu.load", v, mh.STATUS_OK)
-        w_pct.update_data(hub2.snapshot()["cpu.load"])
-    img_pct = _grab(w_pct)
-    diff_pct = sum(1 for yy in range(img_pct.height())
-                   for xx in range(img_pct.width())
-                   if img_pct.pixel(xx, yy) != img_empty.pixel(xx, yy))
-    # 使用率：数值文本变化会有像素差异，但 sparkline 区（底部带）不应有折线
-    # 直接看守源码跳过逻辑 + 对比非使用率
-    ok("使用率" in open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "monitor_ui.py"), encoding="utf-8").read(),
-       "使用率跳过曲线逻辑在位（源码看守）")
-    w_pct.close()
-    # 非使用率（CPU温度）→ 画曲线（与 F10 同口径，像素差异显著）
-    w_temp = mu.MonitorUnitWidget("cpu.temp", hub2, manager=mgr2, **w_inj)
-    mgr2.register_widget("cpu.temp", w_temp, ["cpu.temp"])
-    w_temp.show()
-    APP.processEvents()
-    img_t_empty = _grab(w_temp)
-    for v in (50.0, 60.0, 70.0, 65.0, 80.0, 55.0):
-        hub2.set_metric("cpu.temp", v, mh.STATUS_OK)
-        w_temp.update_data(hub2.snapshot()["cpu.temp"])
-    img_t = _grab(w_temp)
-    diff_t = sum(1 for yy in range(img_t.height())
-                 for xx in range(img_t.width())
-                 if img_t.pixel(xx, yy) != img_t_empty.pixel(xx, yy))
-    ok(diff_t > 20, f"非使用率（温度）画曲线（{diff_t} 像素差异）")
-    w_temp.close()
+
+    def _spark_draw_calls(key, values):
+        """注入波动历史后真实渲染，记录 QPainter.drawPath 调用次数。
+
+        sparkline 折线走 drawPath（圆角矩形走 drawRoundedRect，互不干扰）；
+        0=未画曲线，≥1=画了曲线。比像素对比可靠（不受抗锯齿混色/呼吸影响）。
+        """
+        from PySide6.QtGui import QPainter
+        w = mu.MonitorUnitWidget(key, hub2, manager=mgr2, **w_inj)
+        mgr2.register_widget(key, w, [key])
+        w.show()
+        APP.processEvents()
+        for v in values:
+            hub2.set_metric(key, v, mh.STATUS_OK)
+            w.update_data(hub2.snapshot()[key])
+        calls = []
+        orig = QPainter.drawPath
+        def _spy(self, *a, **k):
+            calls.append(1)
+            return orig(self, *a, **k)
+        QPainter.drawPath = _spy
+        try:
+            _grab(w)
+        finally:
+            QPainter.drawPath = orig
+        w.close()
+        return len(calls)
+
+    _vals = (10.0, 40.0, 70.0, 30.0, 90.0, 50.0)
+    d_disk = _spark_draw_calls("disk.0.usage", _vals)
+    ok(d_disk == 0, f"硬盘使用率不画曲线（drawPath 0 次，实得 {d_disk}）")
+    d_cpu = _spark_draw_calls("cpu.load", _vals)
+    ok(d_cpu >= 1, f"CPU使用率恢复画曲线（drawPath {d_cpu} 次）")
+    d_mem = _spark_draw_calls("mem.load", _vals)
+    ok(d_mem >= 1, f"内存使用率恢复画曲线（drawPath {d_mem} 次）")
+    d_temp = _spark_draw_calls("cpu.temp", (50.0, 60.0, 70.0, 65.0, 80.0, 55.0))
+    ok(d_temp >= 1, f"温度画曲线（drawPath {d_temp} 次）")
+    # 源码看守：跳过条件按键判定 disk.{i}.usage，不再按标签「使用率」一刀切
+    _src_l2 = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "monitor_ui.py"), encoding="utf-8").read()
+    ok('_kp[2] == "usage"' in _src_l2 and '"使用率" in row.label' not in _src_l2,
+       "曲线跳过仅按硬盘使用率键判定（源码看守）")
 
     # ---- L3 单对单：独立窗 A 吸独立窗 B → 同组 2 成员 ----
     hub3 = FakeHub()

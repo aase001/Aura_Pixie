@@ -772,9 +772,12 @@ class MonitorUnitWidget(QWidget):
             # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽
             band_h = spark_h / n
             top = y_base + i * band_h
-            # 使用率类（含动态硬盘使用率）波动极小，曲线近乎一条横线无信息量，
-            # 不绘制（用户拍板）；数据层 history 照常记录，仅渲染跳过
-            if "使用率" in row.label:
+            # 仅硬盘使用率（容量占比）波动极小、曲线近乎横线无信息量，不绘制
+            # （V16.2 用户拍板收窄范围：CPU/内存/GPU/显存使用率恢复画曲线）。
+            # 按键判定不依赖标签文本；数据层 history 照常记录，仅渲染跳过。
+            _kp = row.key.split(".")
+            if (len(_kp) == 3 and _kp[0] == "disk"
+                    and _kp[1].isdigit() and _kp[2] == "usage"):
                 continue
             hist = list(row.history)
             if len(hist) < 2:
