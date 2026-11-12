@@ -1574,6 +1574,85 @@ def main() -> int:
     check("倍率标签保留一位小数并带 x 后缀",
           dlg_aura2.lbl_scale.text() == "2.0x",
           f"（实得 {dlg_aura2.lbl_scale.text()}）", failures)
+    # ── V16.1 休眠倒计时末档「永不」（显式禁用 idle_sec=0）──
+    check("休眠滑块 21 档（30~600 秒 20 档 + 末档永不）",
+          dlg_aura2.sld_idle.minimum() == 1
+          and dlg_aura2.sld_idle.maximum() == 21
+          and M._IDLE_NEVER_TIER == 21, "", failures)
+    check("末档换算为 0（永不），第 20 档仍为 600 秒",
+          M.idle_tier_to_value(21) == 0
+          and M.idle_tier_to_value(20) == 600
+          and M.idle_tier_to_value(1) == 30, "", failures)
+    check("0/负值 → 永不末档；秒数 → 等差档（双向自洽）",
+          M.idle_value_to_tier(0) == 21
+          and M.idle_value_to_tier(-5) == 21
+          and M.idle_value_to_tier(600) == 20
+          and M.idle_value_to_tier(60) == 2
+          and all(M.idle_value_to_tier(M.idle_tier_to_value(t)) == t
+                  for t in range(1, 22)), "", failures)
+    check("永不标签文案为「永不」，秒数档带秒后缀",
+          M.idle_label(0) == "永不" and M.idle_label(300) == "300 秒", "", failures)
+    check("_clamp_idle 放行 0（不被下限抬成 10 秒）",
+          M._clamp_idle(0) == 0 and M._clamp_idle(-1) == 0
+          and M._clamp_idle(5) == 10 and M._clamp_idle(999) == 600, "", failures)
+    # 拖到末档：标签变永不 + settings 收集 0 + 休眠透明度置灰
+    dlg_aura2.sld_idle.setValue(21)
+    check("拖到末档 → 标签「永不」且 settings.idle_sec=0",
+          dlg_aura2.lbl_idle.text() == "永不"
+          and dlg_aura2.settings()["idle_sec"] == 0,
+          f"（{dlg_aura2.lbl_idle.text()} / {dlg_aura2.settings()['idle_sec']}）", failures)
+    check("永不档 → 休眠透明度滑块置灰（该参数无意义）",
+          not dlg_aura2.sld_sleep_op.isEnabled(), "", failures)
+    # 调回秒数档 → 立即恢复可用
+    dlg_aura2.sld_idle.setValue(4)      # 120 秒
+    check("调回秒数档 → 休眠透明度恢复可用且标签带秒",
+          dlg_aura2.sld_sleep_op.isEnabled()
+          and dlg_aura2.lbl_idle.text() == "120 秒", "", failures)
+    # 永不休眠时闲置计时不触发休眠（显式禁用守卫）
+    _saved_idle = M.CONFIG.get("idle_sec")
+    try:
+        M.CONFIG["idle_sec"] = 0
+        _ball_n = M.AuraBall()
+        _ball_n._idle_ms = 0.0
+        for _ in range(200):      # 累计 200×1000ms = 200 秒，远超任何秒数档
+            _ball_n._note_idle(1000.0, False)
+        check("idle_sec=0 → 长时间无交互也不进休眠（永不守卫生效）",
+              not _ball_n._asleep and _ball_n._idle_ms == 0.0,
+              f"（asleep={_ball_n._asleep}, idle_ms={_ball_n._idle_ms}）", failures)
+        M.CONFIG["idle_sec"] = 30
+        _ball_n2 = M.AuraBall()
+        for _ in range(31):
+            _ball_n2._note_idle(1000.0, False)
+        check("idle_sec=30 → 满 30 秒仍正常进休眠（未误伤原逻辑）",
+              _ball_n2._asleep, "", failures)
+        _ball_n.deleteLater()
+        _ball_n2.deleteLater()
+    finally:
+        M.CONFIG["idle_sec"] = _saved_idle
+    # UI 顺序：倍率 → 总体透明度 → 休眠透明度 → 休眠倒计时
+    _slider_titles = []
+    _gl = dlg_aura2.layout().itemAt(0).layout()
+    for _i in range(_gl.count()):
+        _it = _gl.itemAt(_i)
+        if _it.layout() is not None and _it.layout().count() == 3:
+            _w0 = _it.layout().itemAt(0).widget()
+            if isinstance(_w0, M.QLabel) and _it.layout().itemAt(1).widget() is not None:
+                if isinstance(_it.layout().itemAt(1).widget(), M.QSlider):
+                    _slider_titles.append(_w0.text())
+    check("外观滑块 UI 顺序=倍率/总体透明度/休眠透明度/休眠倒计时",
+          _slider_titles == ["呼吸倍率", "总体透明度", "休眠透明度", "休眠倒计时"],
+          f"（实得 {_slider_titles}）", failures)
+    # 老配置 idle_sec=0 打开窗口 → 落在永不末档（不被吸附成秒数档）
+    _cfg_never = M.load_appearance_config()
+    _cfg_never["idle_sec"] = 0
+    M.save_appearance_config(_cfg_never)
+    _dlg_never = M.AppearanceSettingsDialog()
+    check("配置 idle_sec=0 → 打开窗口落永不末档且标签永不",
+          _dlg_never.sld_idle.value() == 21
+          and _dlg_never.lbl_idle.text() == "永不"
+          and not _dlg_never.sld_sleep_op.isEnabled(),
+          f"（tier={_dlg_never.sld_idle.value()}）", failures)
+    _dlg_never.deleteLater()
     # 老配置非整阶值打开窗口 → 吸附整阶后回写，不会原样吐回
     dlg_aura2.deleteLater()
     # 运行期 CONFIG 应用透明度

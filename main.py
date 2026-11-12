@@ -3003,11 +3003,18 @@ def _clamp_scale(v) -> float:
 
 
 def _clamp_idle(v) -> int:
-    """休眠秒数钳制到 [10, 600]；非法回退 60。"""
+    """休眠秒数钳制到 [10, 600]；非法回退 60。
+
+    **0 = 永不休眠**（V16.1 显式禁用语义，与 monitor.idle_stop_sec=0 同口径）：
+    必须在钳制之前短路放行，否则 max(10, 0) 会把「永不」抬成 10 秒。
+    """
     try:
-        return max(10, min(600, int(round(float(v)))))
+        n = int(round(float(v)))
     except (TypeError, ValueError):
         return 60
+    if n <= 0:
+        return 0
+    return max(10, min(600, n))
 
 
 def _clamp_opacity(v) -> int:
@@ -3038,7 +3045,34 @@ def resolve_sleep_opacity(sleep_raw, opacity_raw) -> int:
 # 取「档位序号 1..N」而非真实数值：真实值 = 起点 + (档位-1)×步长，天然整阶，
 # UI 侧无需输入钳制。格式：(档数, 起点, 步长)
 _SCALE_SPEC = (30, 0.1, 0.1)      # 呼吸倍率 0.1x~3.0x，每阶 0.1
-_IDLE_SPEC = (20, 30, 30)         # 休眠倒计时 30~600 秒，每阶 30
+_IDLE_SPEC = (20, 30, 30)         # 休眠倒计时 30~600 秒，每阶 30（等差部分）
+# V16.1：滑块最右端再加一档「永不」（第 21 档）——非等差，故用专属换算，
+# 不改 tier_to_value/value_to_tier（四个滑块共用的纯算式，改它会波及全部）。
+_IDLE_NEVER_TIER = _IDLE_SPEC[0] + 1   # 末档序号 21 = 永不休眠
+_IDLE_NEVER_SEC = 0                    # 永不休眠的配置值（显式禁用，非极大值）
+
+
+def idle_tier_to_value(tier: int) -> int:
+    """休眠滑块档位 → 秒数：末档（21）= 0 表示永不，其余走等差换算。"""
+    if int(tier) >= _IDLE_NEVER_TIER:
+        return _IDLE_NEVER_SEC
+    return int(tier_to_value(tier, _IDLE_SPEC))
+
+
+def idle_value_to_tier(val) -> int:
+    """休眠秒数 → 滑块档位：0（或负）= 永不末档，其余等差就近吸附。"""
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return 1
+    if n <= 0:
+        return _IDLE_NEVER_TIER
+    return value_to_tier(n, _IDLE_SPEC)
+
+
+def idle_label(val) -> str:
+    """休眠倒计时数值标签：0 → 「永不」，其余「N 秒」。"""
+    return "永不" if int(val) <= 0 else f"{int(val)} 秒"
 _OPACITY_SPEC = (10, 10, 10)      # 总体透明度 10%~100%，每阶 10%
 _SLEEP_OP_SPEC = (4, 5, 5)        # 休眠透明度 5%~20%，每阶 5%
 
@@ -3317,11 +3351,22 @@ class AppearanceSettingsDialog(QDialog):
             "呼吸整体速度：每段渐变实际耗时 = 设定秒数 ÷ 倍率（0.1x~3.0x，每阶 0.1）",
             cur.get("aura_scale", CONFIG["aura_scale"]))
 
-        self.sld_idle, self.lbl_idle = _slider_row(
-            _IDLE_SPEC, lambda v: f"{v} 秒",
+        # 休眠倒计时：30~600 秒（20 档）+ 最右端「永不」第 21 档（显式禁用 idle_sec=0）
+        self.sld_idle = QSlider(Qt.Orientation.Horizontal, self)
+        self.sld_idle.setRange(1, _IDLE_NEVER_TIER)
+        self.sld_idle.setSingleStep(1)
+        self.sld_idle.setPageStep(1)
+        self.sld_idle.setValue(idle_value_to_tier(
+            cur.get("idle_sec", CONFIG["idle_sec"])))
+        self.sld_idle.setToolTip(
             "无球体交互（悬停/点击/拖拽）达到该秒数后呼吸暂停并转入休眠"
-            "（30~600 秒，每阶 30）",
-            cur.get("idle_sec", CONFIG["idle_sec"]))
+            "（30~600 秒，每阶 30）；最右档「永不」= 关闭自动休眠"
+            "（仍可右键「消失」手动休眠）")
+        self.lbl_idle = QLabel(idle_label(idle_tier_to_value(self.sld_idle.value())), self)
+        self.lbl_idle.setMinimumWidth(46)
+        self.lbl_idle.setAlignment(Qt.AlignmentFlag.AlignRight
+                                   | Qt.AlignmentFlag.AlignVCenter)
+        self.sld_idle.valueChanged.connect(self._on_idle_changed)
 
         self.sld_opacity, self.lbl_opacity = _slider_row(
             _OPACITY_SPEC, lambda v: f"{v}%",
@@ -3356,10 +3401,11 @@ class AppearanceSettingsDialog(QDialog):
             row.addWidget(lbl)
             grid.addLayout(row)
 
+        # UI 顺序（用户拍板 V16.1）：倍率 → 总体透明度 → 休眠透明度 → 休眠倒计时
         _grid_slider_row("呼吸倍率", self.sld_scale, self.lbl_scale)
-        _grid_slider_row("休眠倒计时", self.sld_idle, self.lbl_idle)
         _grid_slider_row("总体透明度", self.sld_opacity, self.lbl_opacity)
         _grid_slider_row("休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
+        _grid_slider_row("休眠倒计时", self.sld_idle, self.lbl_idle)
 
         # 显示缩放：每单元一行「复选框（=启用）+ 下拉（50%~200%，每阶 25%）」。
         # 未勾选 → 下拉置灰、恒按 100% 生效，配置值保留；单元清单与接入方式见 SCALE_UNITS。
@@ -3402,6 +3448,8 @@ class AppearanceSettingsDialog(QDialog):
 
         # 初始联动：呼吸关闭则颜色/时长/倍率置灰
         self._on_breath_toggled(self.chk_breath.isChecked())
+        # 初始联动：休眠倒计时为「永不」则休眠透明度置灰
+        self._on_idle_changed(self.sld_idle.value())
 
         # ── 尺寸自定（定位前提，勿删）── QDialog 弹出前尺寸是 Qt 默认的 640x480，
         # _place_sub_dialog 靠它选侧/贴边/底部对齐；必须在此按布局实际撑开，
@@ -3425,6 +3473,16 @@ class AppearanceSettingsDialog(QDialog):
         self.edt_monitor.setEnabled(True)
         if _monitor_btn is not None:
             _monitor_btn.setEnabled(True)
+
+    def _on_idle_changed(self, tier: int) -> None:
+        """休眠倒计时档位变更：更新数值标签 + 永不档时休眠透明度置灰。
+
+        「永不」（末档，idle_sec=0）下休眠透明度无意义（永不自动休眠），
+        联动置灰但配置值保留；调回秒数档立即恢复可用。
+        """
+        val = idle_tier_to_value(tier)
+        self.lbl_idle.setText(idle_label(val))
+        self.sld_sleep_op.setEnabled(val > 0)
 
     def _pick_color(self, edt: QLineEdit, title: str) -> None:
         """通用取色：以该框当前合法色为初值打开系统取色器，选定后回填大写色码。"""
@@ -3458,7 +3516,7 @@ class AppearanceSettingsDialog(QDialog):
             "dur_mid_end": d2,
             "dur_end_start": d3,
             "aura_scale": tier_to_value(self.sld_scale.value(), _SCALE_SPEC),
-            "idle_sec": tier_to_value(self.sld_idle.value(), _IDLE_SPEC),
+            "idle_sec": idle_tier_to_value(self.sld_idle.value()),
             "opacity": op,
             "sleep_opacity": resolve_sleep_opacity(
                 tier_to_value(self.sld_sleep_op.value(), _SLEEP_OP_SPEC), op),
@@ -4063,14 +4121,22 @@ class AuraBall(QWidget):
     def _note_idle(self, dt_ms: float, interacting: bool) -> None:
         """无操作计时：对球体有任何交互（悬停/点击/拖拽）则清零；否则累计，
         达到 idle_sec 秒（界面 30~600，默认 60；10 为配置兼容下限）进入休眠。
-        休眠中不重复计时。"""
+        休眠中不重复计时。
+
+        idle_sec <= 0 = 永不休眠（V16.1 末档「永不」）：直接清零返回，
+        既不进休眠也不做无意义累计；右键「消失」手动休眠是独立路径，不受影响。
+        """
         if interacting:
             self._idle_ms = 0.0
             return
         if self._asleep:
             return
+        idle_cfg = float(CONFIG.get("idle_sec", 60))
+        if idle_cfg <= 0:
+            self._idle_ms = 0.0
+            return
         self._idle_ms += dt_ms
-        limit_ms = max(10.0, float(CONFIG.get("idle_sec", 60))) * 1000.0
+        limit_ms = max(10.0, idle_cfg) * 1000.0
         if self._idle_ms >= limit_ms:
             self._idle_ms = 0.0
             self._enter_sleep()
