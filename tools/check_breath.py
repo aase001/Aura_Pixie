@@ -1104,10 +1104,21 @@ def main() -> int:
         check(label, token.lower() in help_text.lower(), "", failures)
     dlg_help = M.build_code_help_dialog()
     check("帮助窗可构建（标题/滚动/关闭按钮）",
-          dlg_help.windowTitle() == "指令格式说明"
+          dlg_help.windowTitle() == "帮助"
           and len(dlg_help.findChildren(M.QScrollArea)) == 1
           and len(dlg_help.findChildren(M.QDialogButtonBox)) == 1, "", failures)
     dlg_help.deleteLater()
+    # 帮助文档重构：指令 + 外观设置 + 监视设置三大板块（沿用 ──── 分割）
+    for _tok, _lab in (("【外观设置说明】", "含外观设置板块"),
+                       ("【监视设置说明】", "含监视设置板块"),
+                       ("资源监视（背景色）", "外观含资源监视背景色说明"),
+                       ("显示缩放", "外观含显示缩放说明"),
+                       ("启用资源监视（总开关）", "监视含总开关说明"),
+                       ("一参数一窗格", "监视含窗格形态说明"),
+                       ("磁吸交互", "监视含磁吸交互说明")):
+        check(_lab, _tok in help_text, "", failures)
+    check("帮助板块用指令同款分割线", help_text.count("────────────────────────────") >= 5,
+          f"（分割线数={help_text.count('────────────────────────────')}）", failures)
 
     # 帮助里的多行示例必须能直接复制执行（用户验收点：示例粘贴即用）
     help_py = ("py:\nimport subprocess, os\np = os.path.join(os.environ['TEMP'], "

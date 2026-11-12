@@ -725,16 +725,28 @@ class MonitorUnitWidget(QWidget):
                                   w_value + gap + w_unit, self._status_h),
                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                            st_text)
-            # 硬件名小字（CPU/GPU/硬盘）：与参数名右对齐、画在参数名正下方
-            # （用户拍板）；字号同状态小字，颜色走深白浅黑（text_color）
+            # 硬件名小字（CPU/GPU/硬盘）：画在参数名正下方，穿透 B/C 列用全本体宽，
+            # 字号自适应——从状态小字字号起逐步缩小，优先保证一行显示完整硬件名，
+            # 缩到下限仍放不下才截断（用户拍板）；颜色走深白浅黑（text_color）。
             if row.hardware:
-                p.setFont(small)
+                hw_full_w = w_label + w_value + w_unit + 2 * gap
+                hw_px = max(1, round(FONT_PX * 0.72 * s))
+                hw_min_px = max(1, round(FONT_PX * 0.45 * s))
+                hw_font = QFont(self._font())
+                hw_font.setPixelSize(hw_px)
+                # 逐步缩字号直到一行放得下（或到下限）；每步重算字体度量
+                while hw_px > hw_min_px:
+                    if QFontMetrics(hw_font).horizontalAdvance(row.hardware) <= hw_full_w:
+                        break
+                    hw_px -= 1
+                    hw_font.setPixelSize(hw_px)
+                p.setFont(hw_font)
                 hc = QColor(tc)
                 hc.setAlphaF(0.75)
                 p.setPen(hc)
                 p.drawText(QRectF(x_label, y + self._row_h - 2,
-                                  w_label, self._status_h),
-                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                  hw_full_w, self._status_h),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                            row.hardware)
             y += self._row_h + row_gap
         # sparkline 区域：文本行下方，每行一条折线
