@@ -1546,6 +1546,48 @@ def section_j():
            "设备名不写入配置文件")
         # J11 管理器硬件名变化回调接线在位
         ok(mgr.on_hardware_names is not None, "硬件名变化回调已注入管理器")
+        # J12 全选复选框（V16.2）：结构 + 默认不勾 + 随总开关置灰
+        ok(dlg.chk_select_all.text() == "全选/全不选", "全选复选框文案")
+        ok(not dlg.chk_select_all.isChecked(), "全选默认不勾选")
+        ok(not dlg.chk_select_all.isEnabled(), "总开关关闭 → 全选置灰")
+        dlg.chk_enable.setChecked(True)
+        ok(dlg.chk_select_all.isEnabled(), "总开关勾选 → 全选可用")
+        # J13 全选勾选 → 全部参数勾上 + 实时建窗（批量一次同步）
+        dlg.chk_select_all.setChecked(True)
+        APP.processEvents()
+        ok(all(c.isChecked() for c in dlg._param_checks.values()),
+           "全选勾选 → 全部参数勾上")
+        cfg = M.load_monitor_config()
+        ok(all((cfg["units"].get(k) or {}).get("enabled")
+               for k in dlg._param_checks), "全选实时写配置（全部启用）")
+        ok(all(mgr._widgets[k].isVisible() for k in dlg._param_checks
+               if k in mgr._widgets), "全选实时建窗（全部可见）")
+        # J14 全不选 → 全部取消 + 实时关窗
+        dlg.chk_select_all.setChecked(False)
+        APP.processEvents()
+        ok(all(not c.isChecked() for c in dlg._param_checks.values()),
+           "全不选 → 全部参数取消")
+        ok(not any(w.isVisible() for w in mgr._widgets.values()),
+           "全不选实时关窗（全部隐藏）")
+        # J15 单参数反向联动：逐个全勾 → 全选自动勾上；取消一个 → 全选落下
+        for chk in dlg._param_checks.values():
+            chk.setChecked(True)
+        APP.processEvents()
+        ok(dlg.chk_select_all.isChecked(), "逐个全勾 → 全选态自动勾上")
+        dlg._param_checks["cpu.load"].setChecked(False)
+        APP.processEvents()
+        ok(not dlg.chk_select_all.isChecked(), "取消一个 → 全选态落下")
+        # J16 全选态下新盘/新卡自动勾上
+        dlg.chk_select_all.setChecked(True)
+        APP.processEvents()
+        fake.set_metric("disk.1.temp", 40.0, mh.STATUS_OK)
+        fake.set_metric("disk.1.usage", 50.0, mh.STATUS_OK)
+        dlg.refresh_disk_params()
+        APP.processEvents()
+        ok("disk.1.temp" in dlg._param_checks
+           and dlg._param_checks["disk.1.temp"].isChecked(),
+           "全选态下新盘参数自动勾上")
+        ok(dlg.chk_select_all.isChecked(), "新盘加入后全选态保持")
         dlg.close()
     finally:
         for w in list(mgr._widgets.values()):

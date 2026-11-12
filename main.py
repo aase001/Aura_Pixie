@@ -5139,6 +5139,7 @@ class MonitorSettingsDialog(QDialog):
         self._cfg = load_monitor_config()
         self._param_checks: dict = {}
         self._hw_labels: dict = {}   # key -> 设备名小字 QLabel（不落盘，每次运行重载）
+        self._bulk_updating = False  # 批量勾选守卫：全选/载入期间抑制逐项保存同步
         self._build_ui()
         self._load_to_ui()
         self.adjustSize()
@@ -5146,12 +5147,21 @@ class MonitorSettingsDialog(QDialog):
     # ---- 构建 ----
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        enable_row = QHBoxLayout()
         self.chk_enable = QCheckBox("启用资源监视", self)
         self.chk_enable.setToolTip(
             "勾选后点击「保存」开始拉起资源监视参数采集模块；"
             "取消勾选并保存则关闭所有监视窗格并停止采集")
         self.chk_enable.toggled.connect(self._on_enable_toggled)
-        root.addWidget(self.chk_enable)
+        enable_row.addWidget(self.chk_enable)
+        enable_row.addStretch(1)
+        # V16.2：全选/全不选（默认不勾；勾选→下方所有硬件参数全勾上）
+        self.chk_select_all = QCheckBox("全选/全不选", self)
+        self.chk_select_all.setToolTip(
+            "勾选 = 下方所有硬件参数全部勾上；取消 = 全部取消勾选")
+        self.chk_select_all.toggled.connect(self._on_select_all_toggled)
+        enable_row.addWidget(self.chk_select_all)
+        root.addLayout(enable_row)
 
         # 参数区（滚动）：按分组顺序罗列「复选框 参数名」
         scroll = QScrollArea(self)
@@ -5289,10 +5299,15 @@ class MonitorSettingsDialog(QDialog):
     # ---- 载入/置灰 ----
     def _load_to_ui(self) -> None:
         self._cfg = load_monitor_config()
-        self.chk_enable.setChecked(bool(self._cfg.get("enabled")))
-        units = self._cfg.get("units") or {}
-        for key, chk in self._param_checks.items():
-            chk.setChecked(bool((units.get(key) or {}).get("enabled")))
+        self._bulk_updating = True
+        try:
+            self.chk_enable.setChecked(bool(self._cfg.get("enabled")))
+            units = self._cfg.get("units") or {}
+            for key, chk in self._param_checks.items():
+                chk.setChecked(bool((units.get(key) or {}).get("enabled")))
+        finally:
+            self._bulk_updating = False
+        self._sync_select_all_state()
         self._update_param_enabled()
 
     def _update_param_enabled(self) -> None:
@@ -5301,6 +5316,42 @@ class MonitorSettingsDialog(QDialog):
             chk.setEnabled(on)
         for lab in self._hw_labels.values():
             lab.setEnabled(on)
+        self.chk_select_all.setEnabled(on)
+
+    # ---- 全选/全不选（V16.2）----
+    def _sync_select_all_state(self) -> None:
+        """按参数勾选现状反向联动全选态（全勾=勾上，否则不勾）。"""
+        self._bulk_updating = True
+        try:
+            checks = list(self._param_checks.values())
+            self.chk_select_all.setChecked(
+                bool(checks) and all(c.isChecked() for c in checks))
+        finally:
+            self._bulk_updating = False
+
+    def _on_select_all_toggled(self, on: bool) -> None:
+        """全选/全不选：批量勾选/取消全部参数，只保存+同步一次（防 N 次建窗抖动）。"""
+        if self._bulk_updating:
+            return
+        try:
+            self._bulk_updating = True
+            try:
+                for chk in self._param_checks.values():
+                    chk.setChecked(bool(on))
+            finally:
+                self._bulk_updating = False
+            units = self._cfg.setdefault("units", {})
+            for key in self._param_checks:
+                u = units.setdefault(key, {"enabled": False, "threshold": []})
+                u["enabled"] = bool(on)
+            if self.chk_enable.isChecked():
+                self._cfg["enabled"] = True
+                save_monitor_config(self._cfg)
+                _monitor_sync_windows(self._cfg)
+            else:
+                save_monitor_config(self._cfg)
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_select_all", exc)
 
     def refresh_disk_params(self) -> None:
         """采集中发现新盘 → 把新盘参数补进复选框清单（保留已有勾选）。"""
@@ -5327,9 +5378,23 @@ class MonitorSettingsDialog(QDialog):
                     lab.setEnabled(self.chk_enable.isChecked())
                     self._hw_labels[key] = lab
                     self._param_layout.insertWidget(idx + 1, lab)
+                # 全选态下新盘自动勾上（批量守卫，末尾统一保存同步一次）
+                if self.chk_select_all.isChecked():
+                    self._bulk_updating = True
+                    try:
+                        chk.setChecked(True)
+                    finally:
+                        self._bulk_updating = False
+                    u = self._cfg.setdefault("units", {}).setdefault(
+                        key, {"enabled": False, "threshold": []})
+                    u["enabled"] = True
                 added = True
             if added:
                 self.refresh_hardware_names()
+                if self.chk_select_all.isChecked() and self.chk_enable.isChecked():
+                    self._cfg["enabled"] = True
+                    save_monitor_config(self._cfg)
+                    _monitor_sync_windows(self._cfg)
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_refresh_disk_params", exc)
 
@@ -5357,9 +5422,23 @@ class MonitorSettingsDialog(QDialog):
                     lab.setEnabled(self.chk_enable.isChecked())
                     self._hw_labels[key] = lab
                     self._param_layout.insertWidget(idx + 1, lab)
+                # 全选态下新卡自动勾上（批量守卫，末尾统一保存同步一次）
+                if self.chk_select_all.isChecked():
+                    self._bulk_updating = True
+                    try:
+                        chk.setChecked(True)
+                    finally:
+                        self._bulk_updating = False
+                    u = self._cfg.setdefault("units", {}).setdefault(
+                        key, {"enabled": False, "threshold": []})
+                    u["enabled"] = True
                 added = True
             if added:
                 self.refresh_hardware_names()
+                if self.chk_select_all.isChecked() and self.chk_enable.isChecked():
+                    self._cfg["enabled"] = True
+                    save_monitor_config(self._cfg)
+                    _monitor_sync_windows(self._cfg)
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_refresh_gpu_d_params", exc)
 
@@ -5372,7 +5451,10 @@ class MonitorSettingsDialog(QDialog):
 
         以界面总开关状态为准：总开关已勾选（即使尚未点保存）时，参数勾选
         即实时渲染窗格并拉起采集；总开关未勾选时只记配置不建窗。
+        批量勾选（全选/载入）期间由 _bulk_updating 抑制，统一一次保存同步。
         """
+        if self._bulk_updating:
+            return
         try:
             units = self._cfg.setdefault("units", {})
             u = units.setdefault(key, {"enabled": False, "threshold": []})
@@ -5383,6 +5465,7 @@ class MonitorSettingsDialog(QDialog):
                 _monitor_sync_windows(self._cfg)
             else:
                 save_monitor_config(self._cfg)
+            self._sync_select_all_state()
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_param_toggled", exc)
 
