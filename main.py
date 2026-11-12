@@ -98,6 +98,7 @@ CONFIG = {
     "color_start": "#FFFFFF",   # 呼吸起始色（可配；呼吸关闭时球体恒渲此色）
     "color_mid": "#283FFE",     # 呼吸过渡色（可配，原「主题色」）
     "color_end": "#FFFFFF",     # 呼吸末尾色（可配）
+    "monitor_color": "#181A20",  # 资源监视窗格背景色（可配；字色按其亮度自动黑/白）
     # —— V10 呼吸开关与分段渐变时长 ——
     #   breath=False → 颜色+大小全停，恒渲染起始色；
     #   起始色==末尾色（两色态）→ 起始→过渡 用 dur_start_mid、过渡→起始 用 dur_mid_end，
@@ -979,7 +980,7 @@ def default_settings() -> dict:
         "functions": [],
         "appearance": {"breath": True,
                        "color_start": "#FFFFFF", "color_mid": "#FFFFFF",
-                       "color_end": "#FFFFFF",
+                       "color_end": "#FFFFFF", "monitor_color": "#181A20",
                        "dur_start_mid": 5, "dur_mid_end": 5, "dur_end_start": 5,
                        "aura_scale": 1.0, "idle_sec": 60,
                        "opacity": 100, "sleep_opacity": 10,
@@ -3004,6 +3005,9 @@ def load_appearance_config() -> dict:
             str(data.get("color_mid") or CONFIG["color_mid"]), CONFIG["color_mid"]),
         "color_end": normalize_hex(
             str(data.get("color_end") or CONFIG["color_end"]), CONFIG["color_end"]),
+        "monitor_color": normalize_hex(
+            str(data.get("monitor_color") or CONFIG["monitor_color"]),
+            CONFIG["monitor_color"]),
         "dur_start_mid": _clamp_dur(data.get("dur_start_mid", CONFIG["dur_start_mid"])),
         "dur_mid_end": _clamp_dur(data.get("dur_mid_end", CONFIG["dur_mid_end"])),
         "dur_end_start": _clamp_dur(data.get("dur_end_start", CONFIG["dur_end_start"])),
@@ -3032,6 +3036,9 @@ def save_appearance_config(cfg: dict) -> None:
         "color_start": str(cfg.get("color_start", CONFIG["color_start"])).upper(),
         "color_mid": str(cfg.get("color_mid", CONFIG["color_mid"])).upper(),
         "color_end": str(cfg.get("color_end", CONFIG["color_end"])).upper(),
+        "monitor_color": normalize_hex(
+            str(cfg.get("monitor_color", CONFIG["monitor_color"])),
+            CONFIG["monitor_color"]),
         "dur_start_mid": _clamp_dur(cfg.get("dur_start_mid", CONFIG["dur_start_mid"])),
         "dur_mid_end": _clamp_dur(cfg.get("dur_mid_end", CONFIG["dur_mid_end"])),
         "dur_end_start": _clamp_dur(cfg.get("dur_end_start", CONFIG["dur_end_start"])),
@@ -3058,6 +3065,8 @@ def apply_appearance_to_config(cfg: dict) -> None:
     CONFIG["color_start"] = cfg.get("color_start", CONFIG["color_start"])
     CONFIG["color_mid"] = cfg["color_mid"]
     CONFIG["color_end"] = cfg.get("color_end", CONFIG["color_end"])
+    CONFIG["monitor_color"] = normalize_hex(
+        str(cfg.get("monitor_color", CONFIG["monitor_color"])), CONFIG["monitor_color"])
     CONFIG["dur_start_mid"] = _clamp_dur(
         cfg.get("dur_start_mid", CONFIG["dur_start_mid"]))
     CONFIG["dur_mid_end"] = _clamp_dur(cfg.get("dur_mid_end", CONFIG["dur_mid_end"]))
@@ -3073,6 +3082,12 @@ def apply_appearance_to_config(cfg: dict) -> None:
         cfg.get("display_scale", CONFIG["display_scale"]))
     refresh_geometry(CONFIG["display_scale"])
     _monitor_rescale_if_changed()
+    # 资源监视背景色/三色改动 → 已开窗格即时刷新主题（构造时持有旧副本）
+    if _MONITOR_MGR is not None:
+        try:
+            _MONITOR_MGR.refresh_theme(_monitor_theme())
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_refresh_theme", exc)
 
 
 def _monitor_rescale_if_changed() -> None:
@@ -3175,7 +3190,11 @@ class AppearanceSettingsDialog(QDialog):
             btn.setToolTip(tip)
             btn.clicked.connect(
                 lambda _=False, e=edt, t=title: self._pick_color(e, t))
-            setattr(self, f"edt_{key.split('_')[1]}", edt)
+            _attr = {"color_start": "edt_start", "color_mid": "edt_mid",
+                     "color_end": "edt_end", "monitor_color": "edt_monitor"}[key]
+            setattr(self, _attr, edt)
+            if key == "monitor_color":
+                self._monitor_pick_btn = btn   # 置灰排除用（呼吸关闭不影响监视色）
             row.addWidget(edt, 1)
             row.addWidget(btn)
             return row
@@ -3183,6 +3202,8 @@ class AppearanceSettingsDialog(QDialog):
         start_row = _color_row("color_start", "起始色", "打开系统取色器选起始色")
         mid_row = _color_row("color_mid", "过渡色", "打开系统取色器选过渡色")
         end_row = _color_row("color_end", "末尾色", "打开系统取色器选末尾色")
+        monitor_row = _color_row("monitor_color", "资源监视",
+                                 "打开系统取色器选资源监视窗格背景色")
 
         # 渐变时长：三个小框并列一行，分别对应三段顺次渐变
         self.edit_dur = []
@@ -3245,6 +3266,10 @@ class AppearanceSettingsDialog(QDialog):
         grid.addLayout(mid_row)
         grid.addWidget(QLabel("末尾色", self))
         grid.addLayout(end_row)
+        _lbl_monitor = QLabel("资源监视", self)
+        _lbl_monitor.setToolTip("建议黑灰白三色确保显示效果")
+        grid.addWidget(_lbl_monitor)
+        grid.addLayout(monitor_row)
         grid.addWidget(QLabel("渐变时长（秒，起→中 / 中→末 / 末→起）", self))
         grid.addLayout(dur_row)
 
@@ -3310,15 +3335,21 @@ class AppearanceSettingsDialog(QDialog):
 
     def _on_breath_toggled(self, on: bool) -> None:
         """球体呼吸开关联动：取消勾选 → 三色框+取色钮+三时长框+倍率全部置灰
-        （渲染全停，这些参数无意义）；休眠/透明度不受影响。"""
+        （渲染全停，这些参数无意义）；休眠/透明度不受影响。
+        资源监视背景色与球体呼吸无关，恒可用（不参与置灰）。"""
         for edt in (self.edt_start, self.edt_mid, self.edt_end):
             edt.setEnabled(on)
+        # 资源监视取色钮：按控件身份排除（不能按文案，四个取色钮文案相同）
+        _monitor_btn = getattr(self, "_monitor_pick_btn", None)
         for w in self.findChildren(QPushButton):
-            if w.text() == "取色…":
+            if w.text() == "取色…" and w is not _monitor_btn:
                 w.setEnabled(on)
         for edt in self.edit_dur:
             edt.setEnabled(on)
         self.sld_scale.setEnabled(on)
+        self.edt_monitor.setEnabled(True)
+        if _monitor_btn is not None:
+            _monitor_btn.setEnabled(True)
 
     def _pick_color(self, edt: QLineEdit, title: str) -> None:
         """通用取色：以该框当前合法色为初值打开系统取色器，选定后回填大写色码。"""
@@ -3346,6 +3377,8 @@ class AppearanceSettingsDialog(QDialog):
                                        self._fallback["color_mid"]),
             "color_end": normalize_hex(self.edt_end.text(),
                                        self._fallback["color_end"]),
+            "monitor_color": normalize_hex(self.edt_monitor.text(),
+                                           self._fallback["monitor_color"]),
             "dur_start_mid": d1,
             "dur_mid_end": d2,
             "dur_end_start": d3,
@@ -4618,6 +4651,7 @@ def _monitor_theme() -> dict:
     return {"color_start": CONFIG["color_start"],
             "color_mid": CONFIG["color_mid"],
             "color_end": CONFIG["color_end"],
+            "monitor_color": CONFIG.get("monitor_color", "#181A20"),
             "system_dark_mode": system_dark_mode()}
 
 

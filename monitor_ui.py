@@ -280,12 +280,32 @@ def halo_color(theme: dict) -> QColor:
 
 
 def body_color(theme: dict) -> QColor:
-    """本体底色随系统深浅色：深色→深底、浅色→浅底（禁深色收边）。"""
+    """本体底色：优先取「资源监视」颜色设置项（theme.monitor_color）；
+    无该设置时回退系统深浅色（深色→深底、浅色→浅底，禁深色收边）。"""
+    mc = theme.get("monitor_color")
+    if mc:
+        c = QColor(str(mc))
+        if c.isValid():
+            return c
     return QColor(24, 26, 32) if theme.get("system_dark_mode") else QColor(250, 250, 252)
 
 
+def _luminance(c: QColor) -> float:
+    """感知亮度（0~255，与 main.luminance 同口径）。"""
+    return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+
+
 def text_color(theme: dict) -> QColor:
-    """前景文字色随系统深浅色（浅色系统下白字不可见）。"""
+    """名称/单位/状态小字颜色：按背景色亮度自动黑/白（浅色底→黑字、深色底→白字）。
+
+    有「资源监视」背景色设置项时按其亮度判定；无则回退系统深浅色。
+    数值与曲线不走本函数——它们按阈值范围着语义色（用户拍板）。
+    """
+    mc = theme.get("monitor_color")
+    if mc:
+        c = QColor(str(mc))
+        if c.isValid():
+            return QColor(30, 32, 40) if _luminance(c) > 150 else QColor(235, 238, 245)
     return QColor(235, 238, 245) if theme.get("system_dark_mode") else QColor(30, 32, 40)
 
 
@@ -453,6 +473,7 @@ class MonitorUnitWidget(QWidget):
     def _font(self) -> QFont:
         f = QFont(FONT_FAMILY)
         f.setPixelSize(max(1, round(FONT_PX * self.scale_getter())))
+        f.setBold(True)   # 窗格字体加粗（用户拍板，提升小窗可读性）
         return f
 
     def update_layout(self) -> None:
@@ -484,31 +505,50 @@ class MonitorUnitWidget(QWidget):
                     request()
                     expanded = bool(getattr(self.manager, "_width_expanded", False))
             total_w = expanded_w if expanded else base_w
-            # 列宽分配：白名单全量标签/典型值样本/全量单位 + 当前行文本取大者
-            # 预留（数据跳动不撑宽）；超出窗格宽时按「数值列→名称列」顺序压缩，
-            # 名称列截断绘制（drawText 矩形裁剪），保证三列不溢出本体。
+            # 列宽分配（当前行真实内容优先保全，恒完整显示不截断）：
+            #   下限 = 当前行各列实际文本宽（硬约束，任何档位都不截断当前内容）；
+            #   预留 = 白名单全量标签/典型值样本/全量单位（数据跳动不撑宽）；
+            #   窗格宽放得下预留 → 按预留分配、富余均分列间距；放不下 → 先保全
+            #   当前行下限，剩余空间再尽量给预留样本（超宽样本让位，不截当前内容）。
+            cur_label = max((fm.horizontalAdvance(r.label) for r in rows), default=0)
+            cur_value = max((fm.horizontalAdvance(self._value_text(r)) for r in rows),
+                            default=0)
+            cur_unit = max((fm.horizontalAdvance(r.unit) for r in rows), default=0)
             label_samples = [label for _k, label, _g, _u in mh.METRIC_DEFS]
             label_samples += [mh._def(k)[1] for k in
                               ("disk.0.temp", "disk.0.usage",
                                "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")]
-            label_samples += [r.label for r in rows]
-            value_samples = list(_SAMPLE_VALUES) + [self._value_text(r) for r in rows]
-            unit_samples = [u for _k, _l, _g, u in mh.METRIC_DEFS]
-            unit_samples += ["℃", "%", "RPM"] + [r.unit for r in rows]
-            w_label = max(fm.horizontalAdvance(t) for t in label_samples)
-            w_value = max(fm.horizontalAdvance(t) for t in value_samples)
-            w_unit = max(fm.horizontalAdvance(t) for t in unit_samples)
-            natural_w = w_label + w_value + w_unit + 2 * gap + 2 * pad_x
-            if natural_w <= total_w:
-                # 富余均分到两个列间距：三列铺满本体，数值/单位不挤在左侧
-                gap += (total_w - natural_w) // 2
+            value_samples = list(_SAMPLE_VALUES)
+            unit_samples = [u for _k, _l, _g, u in mh.METRIC_DEFS] + ["℃", "%", "RPM"]
+            res_label = max((fm.horizontalAdvance(t) for t in label_samples), default=0)
+            res_value = max((fm.horizontalAdvance(t) for t in value_samples), default=0)
+            res_unit = max((fm.horizontalAdvance(t) for t in unit_samples), default=0)
+            avail = total_w - 2 * gap - 2 * pad_x   # 三列可用总宽
+            cur_sum = cur_label + cur_value + cur_unit
+            res_sum = res_label + res_value + res_unit
+            if res_sum <= avail:
+                # 预留样本放得下：按预留分配，富余均分列间距
+                w_label, w_value, w_unit = res_label, res_value, res_unit
+                gap += (avail - res_sum) // 2
+            elif cur_sum <= avail:
+                # 当前行放得下、预留放不下：保全当前行下限，剩余空间按预留比例补
+                extra = avail - cur_sum
+                need_l = max(0, res_label - cur_label)
+                need_v = max(0, res_value - cur_value)
+                need_u = max(0, res_unit - cur_unit)
+                need_sum = need_l + need_v + need_u
+                if need_sum > 0:
+                    w_label = cur_label + extra * need_l // need_sum
+                    w_value = cur_value + extra * need_v // need_sum
+                    w_unit = cur_unit + extra * need_u // need_sum
+                else:
+                    w_label, w_value, w_unit = cur_label, cur_value, cur_unit
+                    gap += extra // 2
             else:
-                over = natural_w - total_w
-                shrink = min(over, max(0, w_value - fm.horizontalAdvance("--")))
-                w_value -= shrink
-                over -= shrink
-                if over > 0:
-                    w_label = max(0, w_label - over)
+                # 极端：当前行本身超窗格宽（如运行时超长标签）——保全数值/单位，
+                # 名称列截断绘制（drawText 矩形裁剪），并请求全局扩宽
+                w_value, w_unit = cur_value, cur_unit
+                w_label = max(0, avail - cur_value - cur_unit)
             self._col_w = (w_label, w_value, w_unit)
             self._col_gap = gap
             self._row_h = fm.height()
@@ -1448,6 +1488,21 @@ class MonitorWindowManager:
         """解散组（剩余≤1 时调用）：从组列表移除。"""
         if grp in self._groups:
             self._groups.remove(grp)
+
+    def refresh_theme(self, theme: dict) -> None:
+        """外观改动（资源监视背景色/呼吸三色）后刷新全部窗格与幽灵窗主题。
+
+        窗格构造时持有主题副本，改色后须显式刷新才生效；只换主题+重绘，
+        不动布局/位置/磁吸关系。由 main 在外观应用链路调用。
+        """
+        try:
+            self.theme = dict(theme)
+            self._ghost.theme = dict(theme)
+            for w in self._widgets.values():
+                w.theme = dict(theme)
+                w.update()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.refresh_theme", e)
 
     def request_expand_width(self) -> None:
         """任一窗格内容自然宽超基准 → 全部窗格统一切到扩宽档（一改变就全改变）。

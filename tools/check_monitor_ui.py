@@ -490,9 +490,11 @@ def section_e():
     w_exp.set_rows([_row("gpu_d.vram_load", "GPU(独显)显存使用率", 88.8, "%")])
     ok(w_exp.width() == mu.BASE_W_EXPANDED, f"扩宽档窗格 {mu.BASE_W_EXPANDED}px")
     ok(w_exp._col_w[0] >= fm.horizontalAdvance("GPU(独显)显存使用率"),
-       "扩宽档 A 列完整预留白名单最长标签")
-    ok(w_exp._col_w[1] >= fm.horizontalAdvance("100.0"),
-       "扩宽档 B 列完整预留典型值（100.0）")
+       "扩宽档 A 列完整显示当前行最长标签")
+    # 当前行真实内容（88.8）必须完整显示不截断（列宽优先保全当前行）
+    ok(w_exp._col_w[1] >= fm.horizontalAdvance(w_exp._value_text(w_exp._rows[0])),
+       "扩宽档 B 列完整显示当前行数值")
+    ok(w_exp._col_w[2] >= fm.horizontalAdvance("%"), "扩宽档 C 列完整显示单位")
     w_exp.close()
 
     # ---- E3 数据跳动不改变窗格尺寸（固定基准核心断言）----
@@ -1952,6 +1954,146 @@ def section_l():
        "整组吸附动画成员字段在位")
 
 
+# ---------------------------------------------------------------------------
+# M. 资源监视颜色设置项 / 字色对比度 / 字体加粗 / 主题刷新（本轮需求）
+# ---------------------------------------------------------------------------
+def section_m():
+    print("[M] 资源监视颜色 / 字色对比度 / 加粗 / 主题刷新")
+    import main as M
+
+    # ---- M1 颜色函数：背景取设置项，字色按亮度自动黑/白 ----
+    light = {"monitor_color": "#F0F0F0", "system_dark_mode": True}
+    dark = {"monitor_color": "#101014", "system_dark_mode": False}
+    ok(mu.body_color(light).name().upper() == "#F0F0F0", "浅色背景取设置项")
+    ok(mu.body_color(dark).name().upper() == "#101014", "深色背景取设置项")
+    ok(mu.text_color(light).lightness() < 128, "浅色背景 → 黑字")
+    ok(mu.text_color(dark).lightness() > 128, "深色背景 → 白字")
+    # 亮度分界 150：#969696(150)→白字，#979797(151)→黑字
+    ok(mu.text_color({"monitor_color": "#969696"}).lightness() > 128,
+       "亮度 150 → 白字（分界）")
+    ok(mu.text_color({"monitor_color": "#979797"}).lightness() < 128,
+       "亮度 151 → 黑字（分界）")
+    # 无设置项 → 回退系统深浅色（兼容旧主题）
+    ok(mu.body_color({"system_dark_mode": True}).lightness() < 128,
+       "无设置项回退系统深色底")
+    ok(mu.text_color({"system_dark_mode": False}).lightness() < 128,
+       "无设置项回退系统浅色 → 黑字")
+    # 非法色码 → 回退系统深浅色
+    ok(mu.body_color({"monitor_color": "not-a-color",
+                      "system_dark_mode": True}).lightness() < 128,
+       "非法色码回退系统深色底")
+
+    # ---- M2 字体加粗 ----
+    w, hub, mgr = _make_widget()
+    ok(w._font().bold(), "窗格字体加粗")
+    w.close()
+
+    # ---- M3 数值/曲线仍走阈值语义色（不受背景字色规则影响）----
+    w2, hub2, mgr2 = _make_widget()
+    mgr2.register_widget("cpu.load", w2, ["cpu.load"])
+    w2.show()
+    APP.processEvents()
+    hub2.set_metric("cpu.load", 95.0, mh.STATUS_OK)   # 高负载 → 红
+    w2.update_data(hub2.snapshot()["cpu.load"])
+    row = w2._rows[0]
+    sem = w2._semantic_color(row)
+    ok(sem.name().upper() == mu.SEM_RED.upper(),
+       f"高负载数值仍走阈值红色（{sem.name()}，不受背景字色影响）")
+    # 浅色背景下数值仍是阈值色（非黑字）
+    w2.theme = {"monitor_color": "#F0F0F0", "system_dark_mode": True}
+    sem2 = w2._semantic_color(row)
+    ok(sem2.name().upper() == mu.SEM_RED.upper(),
+       "浅色背景数值仍阈值红（非黑字）")
+    w2.close()
+
+    # ---- M4 配置链路：默认/读/写/应用 monitor_color ----
+    M.save_monitor_config(M.monitor_ui.default_monitor_config())
+    d = M.default_settings()
+    ok(d["appearance"].get("monitor_color") == "#181A20",
+       "出厂默认 monitor_color=#181A20")
+    cfg = M.load_appearance_config()
+    ok(cfg.get("monitor_color") == "#181A20", "load 默认 monitor_color")
+    cfg["monitor_color"] = "#ABCDEF"
+    M.save_appearance_config(cfg)
+    ok(M.load_appearance_config()["monitor_color"] == "#ABCDEF",
+       "save/load 往返 monitor_color")
+    M.apply_appearance_to_config(cfg)
+    ok(M.CONFIG["monitor_color"] == "#ABCDEF", "apply 合并 monitor_color 到 CONFIG")
+    ok(M._monitor_theme()["monitor_color"] == "#ABCDEF",
+       "_monitor_theme 注入 monitor_color")
+    # 非法色码归一：回退当前生效色（与 color_start/mid/end 同口径，非出厂默认）
+    cfg["monitor_color"] = "xyz"
+    M.apply_appearance_to_config(cfg)
+    ok(M.CONFIG["monitor_color"] == "#ABCDEF",
+       "非法 monitor_color 保持当前生效色（归一回退）")
+
+    # ---- M5 外观窗 UI：资源监视颜色行 + 悬停提示 + 呼吸置灰排除 ----
+    M.apply_appearance_to_config(M.load_appearance_config())
+    dlg = M.AppearanceSettingsDialog()
+    ok(hasattr(dlg, "edt_monitor"), "外观窗含资源监视颜色框 edt_monitor")
+    ok(dlg.edt_monitor.text().upper() == M.CONFIG["monitor_color"],
+       "资源监视颜色框初值=CONFIG")
+    # 标签悬停提示
+    labels = [c for c in dlg.findChildren(M.QLabel) if c.text() == "资源监视"]
+    ok(any("建议黑灰白三色确保显示效果" in (c.toolTip() or "") for c in labels),
+       "资源监视标签悬停提示在位")
+    # 呼吸关闭 → 三色置灰但资源监视色恒可用
+    dlg.chk_breath.setChecked(False)
+    ok(not dlg.edt_start.isEnabled(), "呼吸关闭三色框置灰")
+    ok(dlg.edt_monitor.isEnabled(), "呼吸关闭资源监视色框仍可用")
+    ok(dlg._monitor_pick_btn.isEnabled(), "呼吸关闭资源监视取色钮仍可用")
+    dlg.chk_breath.setChecked(True)
+    # settings() 收集 monitor_color
+    dlg.edt_monitor.setText("#223344")
+    s = dlg.settings()
+    ok(s.get("monitor_color") == "#223344", "settings() 收集 monitor_color")
+    dlg.close()
+
+    # ---- M6 主题刷新：改色后已开窗格即时生效 ----
+    M._MONITOR_MGR = None
+    M._MONITOR_HUB = None
+    mgr3 = M._ensure_monitor_manager()
+    fake = FakeHub()
+    real_hub = M._MONITOR_HUB
+    M._MONITOR_HUB = fake
+    mgr3.hub = fake
+    try:
+        cfg = M.load_monitor_config()
+        cfg["enabled"] = True
+        cfg["units"]["cpu.load"]["enabled"] = True
+        M.save_monitor_config(cfg)
+        M._monitor_sync_windows(cfg)
+        w3 = mgr3._widgets["cpu.load"]
+        ok(w3.theme.get("monitor_color") == M.CONFIG["monitor_color"],
+           "建窗时主题含 monitor_color")
+        # 改色 → refresh_theme → 窗格主题即时更新
+        new_cfg = dict(M.CONFIG)
+        new_cfg["monitor_color"] = "#EEEEEE"
+        M.apply_appearance_to_config(new_cfg)
+        ok(w3.theme.get("monitor_color") == "#EEEEEE",
+           "改色后已开窗格主题即时刷新")
+        ok(mu.body_color(w3.theme).name().upper() == "#EEEEEE",
+           "刷新后窗格背景取新色")
+    finally:
+        for w in list(mgr3._widgets.values()):
+            w.close()
+        real_hub.stop()
+        M._MONITOR_MGR = None
+        M._MONITOR_HUB = None
+
+    # ---- M7 源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("def refresh_theme" in src, "管理器主题刷新方法在位")
+    ok("monitor_color" in src and "_luminance" in src,
+       "背景色取设置项 + 亮度字色判定在位")
+    ok("setBold(True)" in src, "字体加粗在位")
+    main_src = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+    ok("建议黑灰白三色确保显示效果" in main_src, "悬停提示文案在位")
+    ok("refresh_theme(_monitor_theme())" in main_src,
+       "main 外观应用链路主题刷新接线在位")
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -1965,5 +2107,6 @@ if __name__ == "__main__":
     section_j()
     section_k()
     section_l()
+    section_m()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)
