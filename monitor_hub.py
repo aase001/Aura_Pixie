@@ -41,6 +41,7 @@ import string
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -58,6 +59,9 @@ STATUS_NEED_ADMIN = "need_admin"
 STATUS_UNSUPPORTED = "unsupported"
 STATUS_NOT_INSTALLED = "not_installed"
 STATUS_STALE = "stale"
+
+#: 历史环形缓冲点数（60 ≈ 1 分钟，侧车 ~1.1s/帧）。关窗不停采，重开秒回曲线。
+HISTORY_POINTS = 60
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -718,6 +722,10 @@ class MetricsHub:
         self._lock = threading.Lock()
         # psutil 侧最新值（poller 写、snapshot 读）
         self._ps_cache: dict[str, tuple[float, Optional[float]]] = {}
+        # 历史环形缓冲（poller 写、history() 读）：关窗不停采，重开秒回曲线。
+        # 每键一个 deque(maxlen=HISTORY_POINTS)；值 None=无读数（sparkline 断线）。
+        self._history: dict[str, deque] = {}
+        self._history_lock = threading.Lock()
 
     # ------------------------------------------------------------- 生命周期 --
     def start(self) -> None:
@@ -756,6 +764,31 @@ class MetricsHub:
         cache["disk_busy"] = (now, self.ps.disk_busy_pct())
         with self._lock:
             self._ps_cache = cache
+        # 历史积累：每拍把当前全量快照的值入环形缓冲（关窗也持续，重开秒回曲线）
+        self._record_history()
+
+    def _record_history(self) -> None:
+        """把当前快照各键值入历史环形缓冲（None=无读数）。后台 poller 调用。"""
+        try:
+            snap = self.snapshot()
+            with self._history_lock:
+                for key, m in snap.items():
+                    dq = self._history.get(key)
+                    if dq is None:
+                        dq = deque(maxlen=HISTORY_POINTS)
+                        self._history[key] = dq
+                    dq.append(m.value if m.available else None)
+        except Exception:  # noqa: BLE001 - 历史积累失败不影响采集主流程
+            pass
+
+    def history(self, key: str) -> list:
+        """读取某键历史环形缓冲（副本，最旧→最新）；无记录返回空列表。
+
+        UI 重开单元窗时用它回填 sparkline，无需等待新帧积累。
+        """
+        with self._history_lock:
+            dq = self._history.get(key)
+            return list(dq) if dq is not None else []
 
     def _ps(self, key: str) -> tuple[Optional[float], float]:
         with self._lock:

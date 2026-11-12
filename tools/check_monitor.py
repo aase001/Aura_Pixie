@@ -254,8 +254,57 @@ def section_b():
        "stop() 后侧车进程已退出")
 
 
+# ---------------------------------------------------------------------------
+# C. 历史环形缓冲（阶段 5 增量：关窗不停采，重开秒回曲线）
+# ---------------------------------------------------------------------------
+def section_c():
+    print("[C] 历史环形缓冲")
+    ok(mh.HISTORY_POINTS == 60, "历史点数 60")
+    # 假侧车路径：installed 但永不出帧 → 侧车系 stale，psutil 系需 start 才有值。
+    # 直接驱动 _record_history（不启真实进程），用 mock 帧注入 psutil 缓存。
+    hub = mh.MetricsHub(sidecar_path=__file__)
+    now = time.time()
+    with hub._lock:
+        hub._ps_cache = {
+            "cpu.load": (now, 42.0),
+            "sys.uptime": (now, 3725.0),
+            "mem.load": (now, 17.0),
+            "mem.used": (now, 10.85),
+            "net.tx": (now, 1.5),
+            "net.rx": (now, 2.5),
+            "cpu.freq_ps": (now, 4.2),
+            "disk_busy": (now, 0.0),
+        }
+    # 积累 75 拍 → 环形淘汰最旧，容量恒 60
+    for i in range(75):
+        with hub._lock:
+            hub._ps_cache["cpu.load"] = (now, float(i))
+        hub._record_history()
+    h = hub.history("cpu.load")
+    ok(len(h) == 60, f"历史容量 60（{len(h)}）")
+    ok(h[0] == 15.0 and h[-1] == 74.0, "环形淘汰最旧（首 15 末 74）")
+    ok(h == sorted(h), "历史最旧→最新有序")
+    # 读取返回副本：外部修改不污染内部缓冲
+    h.append(999.0)
+    ok(hub.history("cpu.load")[-1] == 74.0, "history 返回副本（外部改不污染）")
+    # 无记录键返回空列表
+    ok(hub.history("nonexistent.key") == [], "无记录键返回空列表")
+    # None 断线：侧车系指标（无帧）available=False → 记 None
+    hub._record_history()
+    ht = hub.history("cpu.temp")
+    ok(ht and ht[-1] is None, "无读数键历史记 None（断线）")
+    # 多键各自独立缓冲
+    ok(len(hub.history("mem.load")) == 61 or len(hub.history("mem.load")) == 60,
+       "多键各自独立缓冲")
+    ok(hub.history("mem.load")[-1] == 17.0, "mem.load 历史值正确")
+    # start/stop 生命周期：stop 后缓冲仍在（关窗不停采语义——缓冲随 hub 存活）
+    hub.stop()
+    ok(len(hub.history("cpu.load")) == 60, "stop 后历史缓冲仍保留")
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
+    section_c()
     print(f"\n== PASS {PASS} / FAIL {FAIL} / SKIP {SKIP} ==")
     sys.exit(1 if FAIL else 0)
