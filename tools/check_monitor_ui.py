@@ -464,34 +464,53 @@ def section_e():
        "topmost_getter=True → 置顶（随注入不写死）")
     w2.close()
 
-    # ---- E2 内容驱动尺寸（非写死、show 前非假 640x480）----
+    # ---- E2 固定基准尺寸（用户拍板 200×40；show 前非假 640x480）----
     rows = [_row("cpu.load", "CPU使用率", 42.0, "%"),
             _row("cpu.temp", "CPU温度", 63.2, "℃")]
     w.set_rows(rows)
     ok((w.width(), w.height()) != (640, 480),
        f"show 前尺寸非假 640x480（{w.width()}x{w.height()}）")
-    ok((w.width(), w.height()) != (200, 40), "尺寸非写死 200x40")
-    # 宽度 = 三列内容最大宽 + 2 列间距 + 2 padding（独立用 QFontMetrics 复算）
+    ok(w.width() == round(mu.BASE_W * 1.0),
+       f"基准宽恒 {mu.BASE_W}px（{w.width()}）")
+    ok(w.height() == round(mu.BASE_H * 1.0),
+       f"基准高恒 {mu.BASE_H}px（{w.height()}）")
+    # 固定 200px 档：三列+间距+边距恰好铺满本体不溢出（白名单最长标签
+    # 超宽时截断绘制，不撑宽）；列宽按白名单预留、数据跳动不改变尺寸
     fm = QFontMetrics(w._font())
-    s = 1.0
-    exp_w_label = max(fm.horizontalAdvance(r.label) for r in rows)
-    exp_w_value = max(fm.horizontalAdvance(w._value_text(r)) for r in rows)
-    exp_w_unit = max(fm.horizontalAdvance(r.unit) for r in rows)
-    exp_w = (exp_w_label + exp_w_value + exp_w_unit
-             + 2 * round(mu.COL_GAP * s) + 2 * round(mu.PAD_X * s))
-    ok(w.width() == exp_w, f"宽=三列内容最大宽推导（{w.width()} vs {exp_w}）")
-    ok(w._col_w == (exp_w_label, exp_w_value, exp_w_unit),
-       "列宽缓存=各列内容最大宽")
+    w_label, w_value, w_unit = w._col_w
+    pad_x = round(mu.PAD_X * 1.0)
+    content_right = (2 * pad_x + w_label + w_value + w_unit
+                     + 2 * w._col_gap)
+    ok(content_right <= w.width(),
+       f"三列+间距+边距不溢出窗格（{content_right} ≤ {w.width()}）")
+    ok(w_label > 0 and w_value > 0 and w_unit > 0, "三列宽均非零")
+    # 扩宽档（250px）下白名单最长标签与典型值可完整预留不截断
+    w_exp, _, mgr_exp = _make_widget()
+    mgr_exp._width_expanded = True
+    w_exp.set_rows([_row("gpu_d.vram_load", "GPU(独显)显存使用率", 88.8, "%")])
+    ok(w_exp.width() == mu.BASE_W_EXPANDED, f"扩宽档窗格 {mu.BASE_W_EXPANDED}px")
+    ok(w_exp._col_w[0] >= fm.horizontalAdvance("GPU(独显)显存使用率"),
+       "扩宽档 A 列完整预留白名单最长标签")
+    ok(w_exp._col_w[1] >= fm.horizontalAdvance("100.0"),
+       "扩宽档 B 列完整预留典型值（100.0）")
+    w_exp.close()
 
-    # ---- E3 内容变化 → 宽度变化 ----
-    w_short, _, _ = _make_widget()
-    w_short.set_rows([_row("cpu.load", "CPU", 1.0, "%")])
-    w_long, _, _ = _make_widget()
-    w_long.set_rows([_row("gpu_d.vram_load", "GPU(独显)显存使用率", 88.8, "%")])
-    ok(w_long.width() > w_short.width(),
-       f"长内容宽 > 短内容宽（{w_long.width()} > {w_short.width()}）")
-    w_short.close()
-    w_long.close()
+    # ---- E3 数据跳动不改变窗格尺寸（固定基准核心断言）----
+    w_st, hub_st, mgr_st = _make_widget()
+    mgr_st.register_widget("cpu.load", w_st, ["cpu.load"])
+    w_st.show()
+    APP.processEvents()
+    size0 = (w_st.width(), w_st.height())
+    for v in (1.0, 42.0, 100.0, 9999.9):
+        hub_st.set_metric("cpu.load", v, mh.STATUS_OK)
+        w_st.update_data(hub_st.snapshot()["cpu.load"])
+    ok((w_st.width(), w_st.height()) == size0,
+       f"数据跳动尺寸不变（{size0} → {(w_st.width(), w_st.height())}）")
+    hub_st.set_metric("cpu.load", None, mh.STATUS_NEED_ADMIN)
+    w_st.update_data(hub_st.snapshot()["cpu.load"])
+    ok((w_st.width(), w_st.height()) == size0, "五态切换尺寸不变（状态小字叠加）")
+    ok(not mgr_st._width_expanded, "常规数据不触发全局扩宽")
+    w_st.close()
 
     # ---- E4 缩放：绝对像素量乘缩放，行为参数不乘 ----
     w_s1, _, _ = _make_widget(scale=1.0)
@@ -516,17 +535,17 @@ def section_e():
     w_s1.close()
     w_s2.close()
 
-    # ---- E5 动态行增删 → 高度重算 ----
+    # ---- E5 动态行增删 → 高度恒定（固定 40px，一参数一窗格口径）----
     w_d, _, _ = _make_widget()
     w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃")])
     h1 = w_d.height()
+    ok(h1 == round(mu.BASE_H * 1.0), f"单行高=基准 {mu.BASE_H}px（{h1}）")
     w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃"),
                   _row("disk.0.usage", "硬盘使用率·盘1", 38.6, "%"),
                   _row("disk.1.temp", "硬盘温度·盘2", 40.0, "℃")])
-    h3 = w_d.height()
-    ok(h3 > h1, f"3 行高 > 1 行高（{h3} > {h1}）")
+    ok(w_d.height() == h1, "多行高仍=基准（固定窗格不随行增删长高）")
     w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃")])
-    ok(w_d.height() == h1, "减行回到原高")
+    ok(w_d.height() == h1, "减行高度不变")
     w_d.close()
 
     # ---- E6 光晕像素：独立态有退晕、吸附态关闭 ----
@@ -1486,6 +1505,207 @@ def section_j():
         M._MONITOR_SETTINGS_DLG = None
 
 
+# ---------------------------------------------------------------------------
+# K. 固定窗格 + 全局扩宽同步 + 缩放磁吸重排（本轮修复）
+# ---------------------------------------------------------------------------
+def section_k():
+    print("[K] 固定窗格 / 全局扩宽同步 / 缩放磁吸重排")
+    from PySide6.QtCore import QEvent, QPoint
+
+    # ---- K1 全局扩宽：任一窗格内容超基准 → 所有窗格统一 250px ----
+    hub = FakeHub()
+    inj = make_injections()
+    mgr = mu.MonitorWindowManager(hub, **inj)
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+    wa = mu.MonitorUnitWidget("cpu.load", hub, manager=mgr, **w_inj)
+    wb = mu.MonitorUnitWidget("mem.load", hub, manager=mgr, **w_inj)
+    mgr.register_widget("cpu.load", wa, ["cpu.load"])
+    mgr.register_widget("mem.load", wb, ["mem.load"])
+    wa.show()
+    wb.show()
+    APP.processEvents()
+    ok(not mgr._width_expanded, "初始未扩宽")
+    ok(wa.width() == mu.BASE_W and wb.width() == mu.BASE_W,
+       f"初始两窗均基准宽（{wa.width()}/{wb.width()}）")
+    # 给 A 注入超长标签行（自然宽 > 200）→ 触发全局扩宽
+    wa.set_rows([_row("cpu.load", "超长标签" * 12, 42.0, "%")])
+    ok(mgr._width_expanded, "A 内容超基准 → 管理器全局扩宽标志置位")
+    ok(wa.width() == mu.BASE_W_EXPANDED, f"A 扩到 {mu.BASE_W_EXPANDED}px")
+    ok(wb.width() == mu.BASE_W_EXPANDED,
+       f"B 未超宽也同步扩到 {mu.BASE_W_EXPANDED}px（一改变就全改变）")
+    # 扩宽只升不降：短内容回注不缩回
+    wa.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
+    ok(wa.width() == mu.BASE_W_EXPANDED and wb.width() == mu.BASE_W_EXPANDED,
+       "扩宽后不缩回（会话内统一宽度）")
+    # 扩宽后新建窗格也按扩宽档渲染
+    wc = mu.MonitorUnitWidget("net.rx", hub, manager=mgr, **w_inj)
+    mgr.register_widget("net.rx", wc, ["net.rx"])
+    ok(wc.width() == mu.BASE_W_EXPANDED, "扩宽后新建窗格同宽")
+    wa.close()
+    wb.close()
+    wc.close()
+
+    # ---- K2 数据路径触发全局扩宽（update_data 真实路径）----
+    hub2 = FakeHub()
+    mgr2 = mu.MonitorWindowManager(hub2, **inj)
+    wd = mu.MonitorUnitWidget("cpu.load", hub2, manager=mgr2, **w_inj)
+    we = mu.MonitorUnitWidget("mem.load", hub2, manager=mgr2, **w_inj)
+    mgr2.register_widget("cpu.load", wd, ["cpu.load"])
+    mgr2.register_widget("mem.load", we, ["mem.load"])
+    wd.show()
+    we.show()
+    APP.processEvents()
+    # 用超长 label 的 Metric 走 update_data（label 取自 metric）
+    m_long = mh.Metric("cpu.load", "超长标签" * 12, "cpu", 42.0, "%", mh.STATUS_OK)
+    wd.update_data(m_long)
+    ok(mgr2._width_expanded, "update_data 超宽 → 全局扩宽")
+    ok(wd.width() == mu.BASE_W_EXPANDED and we.width() == mu.BASE_W_EXPANDED,
+       "数据路径扩宽两窗同步")
+    wd.close()
+    we.close()
+
+    # ---- K3 缩放重排：磁吸组缩放后仍贴合对齐 ----
+    hub3 = FakeHub()
+    scale_box = {"v": 1.0}
+    inj3 = make_injections()
+    inj3["scale_getter"] = lambda: scale_box["v"]
+    mgr3 = mu.MonitorWindowManager(hub3, **inj3)
+    w_inj3 = {k: v for k, v in inj3.items() if k != "config_io"}
+    wx = mu.MonitorUnitWidget("cpu.load", hub3, manager=mgr3, **w_inj3)
+    wy = mu.MonitorUnitWidget("mem.load", hub3, manager=mgr3, **w_inj3)
+    mgr3.register_widget("cpu.load", wx, ["cpu.load"])
+    mgr3.register_widget("mem.load", wy, ["mem.load"])
+    wx.move(100, 100)
+    wy.move(100 + wx.width(), 100)   # B 在 A 右侧贴合
+    wx.show()
+    wy.show()
+    APP.processEvents()
+    # 建组并记录贴合约束（B 的 left 边贴 A）
+    grp = mgr3.new_group()
+    grp.add(wx)
+    grp.add(wy)
+    wx._is_snapped = True
+    wy._is_snapped = True
+    wx._contact_edges = ["right"]
+    wy._contact_edges = ["left"]
+    wy._snap_constraints = [(wx, "left")]
+    # 缩放 1.0 → 2.0：窗格尺寸翻倍，rescale 后仍须贴合
+    scale_box["v"] = 2.0
+    mgr3.rescale()
+    ok(wx.width() == round(mu.BASE_W * 2.0), f"缩放后 A 宽=基准×2（{wx.width()}）")
+    ok(wy.width() == round(mu.BASE_W * 2.0), "缩放后 B 宽=基准×2")
+    x_right = wx.frameGeometry().left() + wx.frameGeometry().width()
+    ok(x_right == wy.frameGeometry().left(),
+       f"缩放后 A 右缘仍贴 B 左缘（{x_right} vs {wy.frameGeometry().left()}）")
+    ok(wx.frameGeometry().top() == wy.frameGeometry().top(),
+       "缩放后左右贴顶边仍对齐")
+    ok(wx.pos() == QPoint(100, 100), "锚点 A 位置不动")
+    # 缩回 1.0：仍贴合
+    scale_box["v"] = 1.0
+    mgr3.rescale()
+    x_right = wx.frameGeometry().left() + wx.frameGeometry().width()
+    ok(x_right == wy.frameGeometry().left(), "缩回后仍贴合")
+    wx.close()
+    wy.close()
+
+    # ---- K4 缩放重排：上下贴合左缘对齐 ----
+    hub4 = FakeHub()
+    scale_box4 = {"v": 1.0}
+    inj4 = make_injections()
+    inj4["scale_getter"] = lambda: scale_box4["v"]
+    mgr4 = mu.MonitorWindowManager(hub4, **inj4)
+    w_inj4 = {k: v for k, v in inj4.items() if k != "config_io"}
+    wp = mu.MonitorUnitWidget("cpu.load", hub4, manager=mgr4, **w_inj4)
+    wq = mu.MonitorUnitWidget("mem.load", hub4, manager=mgr4, **w_inj4)
+    mgr4.register_widget("cpu.load", wp, ["cpu.load"])
+    mgr4.register_widget("mem.load", wq, ["mem.load"])
+    wp.move(200, 200)
+    wq.move(200, 200 + wp.height())   # B 在 A 下方贴合
+    wp.show()
+    wq.show()
+    APP.processEvents()
+    grp4 = mgr4.new_group()
+    grp4.add(wp)
+    grp4.add(wq)
+    wp._is_snapped = True
+    wq._is_snapped = True
+    wp._contact_edges = ["bottom"]
+    wq._contact_edges = ["top"]
+    wq._snap_constraints = [(wp, "top")]
+    scale_box4["v"] = 1.5
+    mgr4.rescale()
+    p_bottom = wp.frameGeometry().top() + wp.frameGeometry().height()
+    ok(p_bottom == wq.frameGeometry().top(),
+       f"缩放后 A 下缘仍贴 B 上缘（{p_bottom} vs {wq.frameGeometry().top()}）")
+    ok(wp.frameGeometry().left() == wq.frameGeometry().left(),
+       "缩放后上下贴左缘仍对齐")
+    wp.close()
+    wq.close()
+
+    # ---- K5 缩放重排：屏幕边吸附重新贴边 ----
+    hub5 = FakeHub()
+    scale_box5 = {"v": 1.0}
+    inj5 = make_injections()
+    inj5["scale_getter"] = lambda: scale_box5["v"]
+    mgr5 = mu.MonitorWindowManager(hub5, **inj5)
+    w_inj5 = {k: v for k, v in inj5.items() if k != "config_io"}
+    ws = mu.MonitorUnitWidget("net.rx", hub5, manager=mgr5, **w_inj5)
+    mgr5.register_widget("net.rx", ws, ["net.rx"])
+    scr = APP.primaryScreen().availableGeometry()
+    ws.move(scr.left(), scr.top() + 300)
+    ws.show()
+    APP.processEvents()
+    ws._screen_edge = "left"
+    ws._is_snapped = True
+    scale_box5["v"] = 2.0
+    mgr5.rescale()
+    ok(ws.frameGeometry().left() == scr.left(), "缩放后仍贴屏幕左缘")
+    ws.close()
+
+    # ---- K6 解绑清约束：解绑后缩放不再误拉回 ----
+    hub6 = FakeHub()
+    scale_box6 = {"v": 1.0}
+    inj6 = make_injections()
+    inj6["scale_getter"] = lambda: scale_box6["v"]
+    mgr6 = mu.MonitorWindowManager(hub6, **inj6)
+    w_inj6 = {k: v for k, v in inj6.items() if k != "config_io"}
+    wt = mu.MonitorUnitWidget("cpu.load", hub6, manager=mgr6, **w_inj6)
+    wu = mu.MonitorUnitWidget("mem.load", hub6, manager=mgr6, **w_inj6)
+    mgr6.register_widget("cpu.load", wt, ["cpu.load"])
+    mgr6.register_widget("mem.load", wu, ["mem.load"])
+    wt.move(400, 400)
+    wu.move(400 + wt.width(), 400)
+    wt.show()
+    wu.show()
+    APP.processEvents()
+    grp6 = mgr6.new_group()
+    grp6.add(wt)
+    grp6.add(wu)
+    wt._is_snapped = True
+    wu._is_snapped = True
+    wu._snap_constraints = [(wt, "left")]
+    wu.detach_from_group()
+    ok(wu._snap_constraints == [], "解绑清贴合约束")
+    wu.move(900, 900)   # 解绑后拖远
+    scale_box6["v"] = 2.0
+    mgr6.rescale()
+    ok(wu.pos() == QPoint(900, 900), "解绑窗缩放后位置不被拉回")
+    wt.close()
+    wu.close()
+
+    # ---- K7 源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("def request_expand_width" in src and "_width_expanded" in src,
+       "全局扩宽入口与标志在位")
+    ok("def rescale" in src and "_snap_constraints" in src,
+       "缩放重排与贴合约束在位")
+    ok("_text_outgrows_cols" not in src, "旧「变宽即撑宽」逻辑已移除")
+    main_src = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+    ok("_monitor_rescale_if_changed" in main_src,
+       "main 缩放变化触发重排接线在位")
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -1497,5 +1717,6 @@ if __name__ == "__main__":
     section_h()
     section_i()
     section_j()
+    section_k()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

@@ -98,6 +98,17 @@ SNAP_STRONG_PX = 10       # 强预览档（<10px 视觉更强）
 SNAP_ANIM_MS = 280        # 松手吸附缓入缓出时长
 FUSE_DASH_PX = 1          # 融合虚线线宽（乘缩放）
 
+# ---------------------------------------------------------------------------
+# 固定窗格尺寸（用户拍板：初始 200×40px；宽度不够时整体扩到 250px，不逐数据撑宽）
+# 绝对像素量，渲染时乘 scale_getter()；数据到达/跳动不再改变窗格尺寸
+# ---------------------------------------------------------------------------
+BASE_W = 200            # 基准窗格宽（×缩放）
+BASE_W_EXPANDED = 250   # 内容自然宽超基准时的整体扩宽档（×缩放）
+BASE_H = 40             # 基准窗格高（×缩放）；状态小字叠加绘制不额外占高
+# 列宽预留样本：A 列按白名单全量标签（含动态键模板），B 列按典型值+极值，
+# C 列按白名单全量单位——数据跳动不再触发重算撑宽（旧「变宽即重算」已废弃）
+_SAMPLE_VALUES = ("--", "100.0", "9999.9", "12345", "123456")
+
 
 def fuse_color(theme: dict) -> QColor:
     """融合虚线/幽灵轮廓颜色随系统深浅色（浅色系统用深色 20%）。"""
@@ -380,6 +391,8 @@ class MonitorUnitWidget(QWidget):
         self._snap_to = QPoint()
         self._snap_animating = False
         self._snap_pending = None     # 落位后入组目标（widget 或 "screen"）
+        self._snap_screen_edge_pending = None  # 落位后屏幕贴合边（缩放重贴用）
+        self._snap_constraints: list = []  # [(目标窗, 贴合边)] 缩放重排用
         # 阶段 4：右键拖动解绑 / 轻点菜单
         self._right_dragging = False
         self._right_drag_started = False
@@ -439,37 +452,68 @@ class MonitorUnitWidget(QWidget):
         return f
 
     def update_layout(self) -> None:
-        """三列内容驱动布局：QFontMetrics 量各列最大宽，总宽由此推导。
+        """固定基准窗格布局（用户拍板：初始 200×40px，×显示缩放）。
 
-        宽 = max(label) + max(value) + max(unit) + 2*列间距 + 2*padding（乘缩放）；
-        高 = 行数*行高 + 行间距 + sparkline 预留 + 2*padding（乘缩放）。
-        不写死尺寸；末尾 adjustSize()（Qt 未 show 读尺寸是假 640x480，坑 50）。
+        宽：列宽按「白名单全量标签/典型值样本/全量单位」与当前行文本取大者
+        预留（数据跳动不再撑宽）；默认恒 BASE_W，列间富余均分；任一窗格
+        内容自然宽超基准 → 管理器把全部窗格统一切到 BASE_W_EXPANDED
+        （250px，一改变就全改变），不再逐数据无限长大。
+        高：恒 BASE_H（状态小字叠加在数值行下方绘制，不额外占高）。
+        末尾 adjustSize()（Qt 未 show 读尺寸是假 640x480，坑 50）。
         """
         try:
             s = self.scale_getter()
             fm = QFontMetrics(self._font())
             rows = self._rows
-            # 各列内容最大宽（B 列数值用 fmt 渲染文本量宽，含状态文案）
-            w_label = max((fm.horizontalAdvance(r.label) for r in rows), default=0)
-            w_value = max((fm.horizontalAdvance(self._value_text(r)) for r in rows),
-                          default=0)
-            w_unit = max((fm.horizontalAdvance(r.unit) for r in rows), default=0)
             gap = round(COL_GAP * s)
             pad_x = round(PAD_X * s)
-            pad_y = round(PAD_Y * s)
+            base_w = round(BASE_W * s)
+            expanded_w = round(BASE_W_EXPANDED * s)
+            # 扩宽判定只看「当前行真实内容自然宽」（不含白名单预留样本）：
+            # 白名单最长标签在基准档内截断适配，不触发扩宽；只有真实内容
+            # （如运行时超长标签/极值）超基准才扩。扩宽档由管理器统一持有
+            # （用户拍板：一改变就全改变，所有窗格同宽）。
+            expanded = bool(getattr(self.manager, "_width_expanded", False))
+            if not expanded and self._natural_width() > base_w:
+                request = getattr(self.manager, "request_expand_width", None)
+                if callable(request):
+                    request()
+                    expanded = bool(getattr(self.manager, "_width_expanded", False))
+            total_w = expanded_w if expanded else base_w
+            # 列宽分配：白名单全量标签/典型值样本/全量单位 + 当前行文本取大者
+            # 预留（数据跳动不撑宽）；超出窗格宽时按「数值列→名称列」顺序压缩，
+            # 名称列截断绘制（drawText 矩形裁剪），保证三列不溢出本体。
+            label_samples = [label for _k, label, _g, _u in mh.METRIC_DEFS]
+            label_samples += [mh._def(k)[1] for k in
+                              ("disk.0.temp", "disk.0.usage",
+                               "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")]
+            label_samples += [r.label for r in rows]
+            value_samples = list(_SAMPLE_VALUES) + [self._value_text(r) for r in rows]
+            unit_samples = [u for _k, _l, _g, u in mh.METRIC_DEFS]
+            unit_samples += ["℃", "%", "RPM"] + [r.unit for r in rows]
+            w_label = max(fm.horizontalAdvance(t) for t in label_samples)
+            w_value = max(fm.horizontalAdvance(t) for t in value_samples)
+            w_unit = max(fm.horizontalAdvance(t) for t in unit_samples)
+            natural_w = w_label + w_value + w_unit + 2 * gap + 2 * pad_x
+            if natural_w <= total_w:
+                # 富余均分到两个列间距：三列铺满本体，数值/单位不挤在左侧
+                gap += (total_w - natural_w) // 2
+            else:
+                over = natural_w - total_w
+                shrink = min(over, max(0, w_value - fm.horizontalAdvance("--")))
+                w_value -= shrink
+                over -= shrink
+                if over > 0:
+                    w_label = max(0, w_label - over)
             self._col_w = (w_label, w_value, w_unit)
+            self._col_gap = gap
             self._row_h = fm.height()
-            # 状态小字行高（五态非 ok 时在数值行下方显示，阶段 2）
+            # 状态小字行高（叠加绘制用，不占窗格高度）
             small = QFont(self._font())
             small.setPixelSize(max(1, round(FONT_PX * 0.72 * s)))
             self._status_h = QFontMetrics(small).height()
             self._geo_scale = s
-            n = max(1, len(rows))
-            row_gap = round(ROW_GAP * s)
-            spark_h = round(SPARK_H * s)
-            total_w = w_label + w_value + w_unit + 2 * gap + 2 * pad_x
-            total_h = (n * (self._row_h + self._status_h) + (n - 1) * row_gap
-                       + spark_h + 2 * pad_y)
+            total_h = round(BASE_H * s)
             self.setFixedSize(total_w, total_h)
             self.adjustSize()
             # 变高方向同帧 repaint 防露脏区（坑 53）
@@ -478,6 +522,21 @@ class MonitorUnitWidget(QWidget):
             self._last_h = total_h
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.update_layout", e)
+
+    def _natural_width(self) -> int:
+        """当前行内容自然宽（三列实际文本+列间距+内边距，×缩放）。
+
+        供管理器判定是否需要全局扩宽；与 update_layout 同一量宽口径。
+        """
+        fm = QFontMetrics(self._font())
+        s = self.scale_getter()
+        rows = self._rows
+        w_label = max((fm.horizontalAdvance(r.label) for r in rows), default=0)
+        w_value = max((fm.horizontalAdvance(self._value_text(r)) for r in rows),
+                      default=0)
+        w_unit = max((fm.horizontalAdvance(r.unit) for r in rows), default=0)
+        return (w_label + w_value + w_unit
+                + 2 * round(COL_GAP * s) + 2 * round(PAD_X * s))
 
     def _value_text(self, row: UnitRow) -> str:
         """B 列数值文本：纯数值（不带单位），走 hub.fmt_value（不自造换算）。
@@ -556,7 +615,7 @@ class MonitorUnitWidget(QWidget):
         """
         pad_x = round(PAD_X * s)
         pad_y = round(PAD_Y * s)
-        gap = round(COL_GAP * s)
+        gap = getattr(self, "_col_gap", round(COL_GAP * s))
         row_gap = round(ROW_GAP * s)
         w_label, w_value, w_unit = self._col_w
         x_label = body.left() + pad_x
@@ -591,18 +650,18 @@ class MonitorUnitWidget(QWidget):
             p.drawText(QRectF(x_unit, y, w_unit, self._row_h),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        row.unit)
-            # 状态小字（数值行下方，仅非 ok 显示）
+            # 状态小字（数值行下方叠加绘制，不额外占窗格高度——固定 40px 口径）
             st_text = STATUS_TEXT.get(row.status, "")
             if not row.available and st_text:
                 p.setFont(small)
                 sc = QColor(tc)
                 sc.setAlphaF(0.6)
                 p.setPen(sc)
-                p.drawText(QRectF(x_value, y + self._row_h,
+                p.drawText(QRectF(x_value, y + self._row_h - 2,
                                   w_value + gap + w_unit, self._status_h),
                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                            st_text)
-            y += self._row_h + self._status_h + row_gap
+            y += self._row_h + row_gap
         # sparkline 区域：文本行下方，每行一条折线
         self._paint_sparklines(p, body, s)
 
@@ -614,13 +673,13 @@ class MonitorUnitWidget(QWidget):
         row_gap = round(ROW_GAP * s)
         spark_h = round(SPARK_H * s)
         w_label, w_value, w_unit = self._col_w
-        gap = round(COL_GAP * s)
+        gap = getattr(self, "_col_gap", round(COL_GAP * s))
         x0 = body.left() + pad_x
         full_w = w_label + w_value + w_unit + 2 * gap
-        # sparkline 区起点 = 所有文本行（含状态小字）之后
+        # sparkline 区起点 = 所有文本行之后（状态小字叠加绘制，不占行高）
         n = max(1, len(self._rows))
         y_base = (body.top() + pad_y
-                  + n * (self._row_h + self._status_h) + (n - 1) * row_gap)
+                  + n * self._row_h + (n - 1) * row_gap)
         pen_w = max(1.0, SPARK_LINE_PX * s)
         for i, row in enumerate(self._rows):
             # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽
@@ -701,24 +760,17 @@ class MonitorUnitWidget(QWidget):
             # history：可用记值，否则 None（断线）
             row.history.append(metric.value if row.available else None)
             self._refresh_breathing()
-            # 内容驱动尺寸：文本变宽超过当前列宽 → 重算布局（窗格随之变宽）。
-            # 只在变宽时重算，避免每 tick 无谓 setFixedSize；变窄不回缩（防抖动）。
-            if self._text_outgrows_cols():
-                self.update_layout()
+            # 固定基准窗格：列宽已按白名单+样本预留，数据跳动不改变尺寸
+            # （旧「变宽即重算撑宽」已废弃——窗格随数据长大是用户反馈的问题）。
+            # 仅当内容真实宽度超基准 → 管理器把全部窗格统一扩宽（一改变就全改变）
+            if (not getattr(self.manager, "_width_expanded", False)
+                    and self._natural_width() > round(BASE_W * self.scale_getter())):
+                request = getattr(self.manager, "request_expand_width", None)
+                if callable(request):
+                    request()
             self.update()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.update_data", e)
-
-    def _text_outgrows_cols(self) -> bool:
-        """当前行文本是否已超出列宽缓存（量宽用与布局同一字体）。"""
-        fm = QFontMetrics(self._font())
-        w_label, w_value, w_unit = self._col_w
-        for r in self._rows:
-            if (fm.horizontalAdvance(r.label) > w_label
-                    or fm.horizontalAdvance(self._value_text(r)) > w_value
-                    or fm.horizontalAdvance(r.unit) > w_unit):
-                return True
-        return False
 
     def _refresh_breathing(self) -> None:
         """任一行进入最高阈值段 → 启动呼吸时钟与动画定时器；全离开 → 停。"""
@@ -942,6 +994,8 @@ class MonitorUnitWidget(QWidget):
             self._snap_to = self._preview_rect.topLeft()
             self._snap_pending = self._preview_target
             self._snap_edge_pending = self._preview_edge
+            self._snap_screen_edge_pending = (
+                self._preview_edge if self._preview_target == "screen" else None)
             self._snap_animating = True
             self._snap_clock.start()
             self._snap_anim_timer.start()
@@ -966,14 +1020,20 @@ class MonitorUnitWidget(QWidget):
             self.log_fn("monitor_ui._on_snap_anim", e)
 
     def _land_snap(self) -> None:
-        """落位后加入目标组 / 贴屏幕边，_is_snapped=True、关光晕、画融合虚线。"""
+        """落位后加入目标组 / 贴屏幕边，_is_snapped=True、关光晕、画融合虚线。
+
+        同时把贴合关系记成结构化约束 _snap_constraints（目标窗+贴合边）：
+        显示缩放改变窗格尺寸后，管理器据此重新对齐（防磁吸错位）。
+        """
         target = self._snap_pending
         edge = getattr(self, "_snap_edge_pending", None)
+        screen_edge = getattr(self, "_snap_screen_edge_pending", None)
         self._snap_pending = None
+        self._snap_screen_edge_pending = None
         self._contact_edges = [edge] if edge else []
         if target == "screen":
             # 屏幕边吸附 = 贴边停留并记 screen_edge，不入窗间组
-            self._screen_edge = edge
+            self._screen_edge = screen_edge or edge
             self._is_snapped = True
         elif isinstance(target, MonitorUnitWidget):
             self._screen_edge = None
@@ -985,6 +1045,13 @@ class MonitorUnitWidget(QWidget):
                 target._contact_edges = [self._opposite_edge(edge)]
             grp.add(self)
             self._is_snapped = True
+            # 结构化贴合约束：self 的 edge 边贴 target 的对边（缩放重排用）
+            if edge:
+                if not hasattr(self, "_snap_constraints"):
+                    self._snap_constraints = []
+                self._snap_constraints = [
+                    c for c in self._snap_constraints if c[0] is not target]
+                self._snap_constraints.append((target, edge))
         self._clear_preview()
         self.update()
         if target is not None and isinstance(target, MonitorUnitWidget):
@@ -1043,6 +1110,7 @@ class MonitorUnitWidget(QWidget):
             self._is_snapped = False
             self._contact_edges = []
             self._screen_edge = None
+            self._snap_constraints = []   # 解绑即清贴合约束（缩放重排不再引用）
             # 组剩余==1 → 解散组，剩余成员必须复位（漏这步会永久残留融合态）
             if len(grp.members) == 1:
                 last = grp.members[0]
@@ -1050,6 +1118,7 @@ class MonitorUnitWidget(QWidget):
                 last._is_snapped = False
                 last._contact_edges = []
                 last._screen_edge = None
+                last._snap_constraints = []
                 last.update()
                 self.manager.dissolve_group(grp)
             elif len(grp.members) == 0:
@@ -1170,6 +1239,9 @@ class MonitorWindowManager:
         # 阶段 A：新盘发现回调（参数级窗格下由 main 决定是否建窗）
         self.on_new_disk_keys: Optional[Callable] = None
         self._known_disk_keys: set = set()
+        # 全局扩宽档（用户拍板：任一窗格内容超基准宽 → 所有窗格统一扩宽，
+        # 避免大小不一；只升不降，会话内保持统一宽度）
+        self._width_expanded = False
 
     # ---- 阶段 2：单元窗注册与拉取节奏 ----
     def register_widget(self, unit_key: str, widget, row_keys: list,
@@ -1183,6 +1255,10 @@ class MonitorWindowManager:
             rows.append(UnitRow(key=key, label=label, value=None,
                                 unit=unit, status=mh.STATUS_STALE))
         widget.set_rows(rows)
+        # 新窗格内容超基准宽 → 全局扩宽（含本窗，所有窗格同宽）
+        if not self._width_expanded and widget._natural_width() > round(
+                BASE_W * widget.scale_getter()):
+            self.request_expand_width()
 
     @staticmethod
     def _def_of(key: str):
@@ -1256,6 +1332,111 @@ class MonitorWindowManager:
         """解散组（剩余≤1 时调用）：从组列表移除。"""
         if grp in self._groups:
             self._groups.remove(grp)
+
+    def request_expand_width(self) -> None:
+        """任一窗格内容自然宽超基准 → 全部窗格统一切到扩宽档（一改变就全改变）。
+
+        用户拍板：不允许窗格大小不一。扩宽只升不降（会话内保持统一宽度）；
+        切换后 rescale() 重算全部窗格布局并按磁吸约束重新对齐。
+        新建窗格注册时也会检查自身内容，超宽同样触发全局扩宽。
+        """
+        try:
+            if self._width_expanded:
+                return
+            self._width_expanded = True
+            self.rescale()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.request_expand_width", e)
+
+    # ---- 显示缩放变化：磁吸关系重排（防错位） ----
+    def rescale(self) -> None:
+        """显示缩放变化后：先重算全部窗格布局，再按贴合关系重新对齐。
+
+        磁吸关系以落位时记录的结构化约束为准（_snap_constraints：目标窗+
+        贴合边），不依赖绝对坐标——缩放改变窗格尺寸后，从每组锚点成员
+        （首个入组者，位置不动）出发 BFS 重定位：左右贴→顶边对齐、上下贴→
+        左缘对齐（与 _edge_candidates 口径一致）；屏幕边吸附重新贴边。
+        独立窗只重算尺寸、位置不动。由 main 在外观缩放因子变化时调用。
+        """
+        try:
+            widgets = list(self._widgets.values())
+            for w in widgets:
+                w.update_layout()
+            placed: set = set()
+            for grp in list(self._groups):
+                members = [w for w in grp.members if w.isVisible()]
+                if not members:
+                    continue
+                anchor = members[0]   # 首个入组者=锚点，缩放后位置不动
+                placed.add(id(anchor))
+                queue = [anchor]
+                while queue:
+                    cur = queue.pop(0)
+                    cur_r = cur.frameGeometry()
+                    for w in members:
+                        if id(w) in placed:
+                            continue
+                        rel = self._constraint_between(w, cur)
+                        if rel is None:
+                            continue
+                        owner, edge = rel
+                        r = w.frameGeometry()
+                        if owner is w:
+                            # w 的 edge 边贴 cur 的对边
+                            if edge == "right":
+                                pos = (cur_r.left() - r.width(), cur_r.top())
+                            elif edge == "left":
+                                pos = (cur_r.left() + cur_r.width(), cur_r.top())
+                            elif edge == "bottom":
+                                pos = (cur_r.left(), cur_r.top() - r.height())
+                            else:   # top
+                                pos = (cur_r.left(), cur_r.top() + cur_r.height())
+                        else:
+                            # cur 的 edge 边贴 w 的对边 → 反解 w 位置
+                            if edge == "right":
+                                pos = (cur_r.left() + cur_r.width(), cur_r.top())
+                            elif edge == "left":
+                                pos = (cur_r.left() - r.width(), cur_r.top())
+                            elif edge == "bottom":
+                                pos = (cur_r.left(), cur_r.top() + cur_r.height())
+                            else:   # top
+                                pos = (cur_r.left(), cur_r.top() - r.height())
+                        w.move(*pos)
+                        placed.add(id(w))
+                        queue.append(w)
+            # 屏幕边吸附：尺寸变化后重新贴边（交叉轴坐标保持）
+            for w in widgets:
+                if not w.isVisible() or w._group is not None:
+                    continue
+                edge = w._screen_edge
+                if not edge:
+                    continue
+                screen = QGuiApplication.screenAt(w.frameGeometry().center())
+                if screen is None:
+                    continue
+                avail = screen.availableGeometry()
+                r = w.frameGeometry()
+                if edge == "left":
+                    w.move(avail.left(), r.top())
+                elif edge == "right":
+                    w.move(avail.left() + avail.width() - r.width(), r.top())
+                elif edge == "top":
+                    w.move(r.left(), avail.top())
+                elif edge == "bottom":
+                    w.move(r.left(), avail.top() + avail.height() - r.height())
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.rescale", e)
+
+    @staticmethod
+    def _constraint_between(a, b):
+        """a、b 之间的贴合约束：返回 (约束持有者, 贴合边)；无约束返回 None。"""
+        for target, edge in getattr(a, "_snap_constraints", []):
+            if target is b:
+                return (a, edge)
+        for target, edge in getattr(b, "_snap_constraints", []):
+            if target is a:
+                return (b, edge)
+        return None
 
     def on_widget_hidden(self) -> None:
         """单元窗隐藏/关闭 → 全部不可见时停拉取定时器（可见性联动）。"""

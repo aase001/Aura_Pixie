@@ -3072,6 +3072,27 @@ def apply_appearance_to_config(cfg: dict) -> None:
     CONFIG["display_scale"] = normalize_scale_block(
         cfg.get("display_scale", CONFIG["display_scale"]))
     refresh_geometry(CONFIG["display_scale"])
+    _monitor_rescale_if_changed()
+
+
+def _monitor_rescale_if_changed() -> None:
+    """监视显示缩放因子变化 → 重算窗格布局并按磁吸关系重新对齐（防错位）。
+
+    磁吸窗的位置关系靠落位约束维持，缩放改变窗格尺寸后必须重排，
+    否则贴合边出现缝隙/重叠。因子未变或管理器未创建时直接跳过。
+    """
+    global _MONITOR_SCALE_APPLIED
+    try:
+        f = display_scale_factor("monitor")
+        if (_MONITOR_MGR is None
+                or (_MONITOR_SCALE_APPLIED is not None
+                    and abs(f - _MONITOR_SCALE_APPLIED) < 1e-9)):
+            _MONITOR_SCALE_APPLIED = f
+            return
+        _MONITOR_SCALE_APPLIED = f
+        _MONITOR_MGR.rescale()
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_rescale", exc)
 
 
 # ---------------------------------------------------------------- 监视配置（阶段 5）
@@ -4479,6 +4500,9 @@ class AuraBall(QWidget):
         # 手改 yaml / 导入配置后置顶要重启才生效。现在重载即按磁盘值对齐置顶
         # （apply_topmost_setting 内部已一致则跳过，不产生多余副作用）。
         self.apply_topmost_setting(topmost_enabled())
+        # 外观同步套用（导入配置/手改 yaml 路径）：缩放因子变化时监视窗
+        # 自动重排磁吸关系（_monitor_rescale_if_changed 内部判因子未变即跳过）
+        apply_appearance_to_config(load_appearance_config())
         self.update()
 
     # 双击不触发任何操作：此前双击（含双击展开的扇形）会直接退出程序，
@@ -4560,6 +4584,7 @@ _MONITOR_IDLE_TIMER = None   # 闲置停采定时器
 _MONITOR_LAST_VISIBLE = 0.0  # 上次有监视窗可见的时刻
 _MONITOR_LAYOUT_TIMER = None  # 布局记忆落盘定时器（移动停止 10s）
 _MONITOR_LAYOUT_DIRTY = False
+_MONITOR_SCALE_APPLIED = None  # 上次已生效的监视缩放因子（变化才触发磁吸重排）
 
 # 监视单元分组（unit_key → 行键集）：按指标白名单分组，每组一个迷你窗
 # 参数级窗格清单（一参数一窗格；用户拍板：废弃 sys.uptime，无值参数也罗列）。
