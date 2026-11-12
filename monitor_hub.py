@@ -173,9 +173,18 @@ class SidecarRunner:
 
     # ------------------------------------------------------------- 生命周期 --
     def start(self) -> bool:
-        """启动侧车与读取线程；返回是否成功 spawn（不代表已出帧，出帧看 latest）。"""
+        """启动侧车与读取线程；返回是否成功 spawn（不代表已出帧，出帧看 latest）。
+
+        幂等守卫（V16.2 修复）：进程已活着直接返回，绝不重复 spawn——
+        GUI 里预览采集与建窗同步会连续调 start，重复 spawn 会孤立旧读取
+        线程、覆盖进程句柄，导致数据帧读取错乱（meta 到而 frame 不到）
+        且每次泄漏一个孤儿侧车进程。
+        """
         if not self.installed:
             return False
+        if self._proc is not None and self._proc.poll() is None:
+            self.alive = True
+            return True
         self._stop.clear()
         self._reader_done.clear()
         self._restarts = 0

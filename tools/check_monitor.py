@@ -213,6 +213,20 @@ def section_a():
     r_grace._proc = _FakeProc(1)             # 进程已退出、未出帧
     ok(r_grace.is_stale() is True, "未出帧且进程已退出 → stale（触发重启）")
 
+    # 幂等守卫（V16.2 修复）：进程活着时重复 start 绝不重新 spawn——
+    # GUI 预览采集 + 建窗同步连续 start，重复 spawn 会孤立读取线程、
+    # 覆盖进程句柄致数据帧丢失（meta 到 frame 不到）并泄漏孤儿进程。
+    r_idem = mh.SidecarRunner(exe_path=__file__)
+    _spawn_calls = []
+    r_idem._spawn = lambda: _spawn_calls.append(1)   # 桩：记录 spawn 次数
+    r_idem._proc = _FakeProc(None)                   # 进程存活
+    ok(r_idem.start() is True, "进程活着 start 返回 True")
+    ok(_spawn_calls == [], "进程活着重复 start 不重新 spawn（幂等守卫）")
+    ok(r_idem.alive is True, "幂等 start 维持 alive")
+    r_idem._proc = _FakeProc(1)                      # 进程已退出
+    r_idem.start()
+    ok(len(_spawn_calls) == 1, "进程退出后 start 重新 spawn 一次")
+
 
 # ---------------------------------------------------------------------------
 # B. 真实端到端（本机制品）
