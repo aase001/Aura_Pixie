@@ -1970,6 +1970,66 @@ def section_l():
     ok("_snap_members" in src and "_snap_member_from" in src,
        "整组吸附动画成员字段在位")
 
+    # ---- L9 逐窗格磁吸目标：竖直大组旁单窗可精确吸到组内顶窗下方 ----
+    # 复现用户场景：第三列竖直堆叠 3 窗成组（包围盒高=3×窗高），第一列单窗
+    # 想贴到组内顶部单窗的下方。旧「整组包围盒」口径会把下方候选推到整摞
+    # 底下（失效）；逐窗格口径应命中顶窗底边。
+    hub9 = FakeHub()
+    mgr9 = mu.MonitorWindowManager(hub9, **inj)
+    w_inj9 = {k: v for k, v in inj.items() if k != "config_io"}
+    # 竖直堆叠 3 窗成组（x=400，y=100/100+h/100+2h）
+    stack = []
+    for i, key in enumerate(["cpu.load", "cpu.temp", "cpu.freq"]):
+        w = mu.MonitorUnitWidget(key, hub9, manager=mgr9, **w_inj9)
+        mgr9.register_widget(key, w, [key])
+        stack.append(w)
+    hh = stack[0].height()
+    for i, w in enumerate(stack):
+        w.move(400, 100 + i * hh)
+        w.show()
+    APP.processEvents()
+    g9 = mgr9.new_group()
+    for i, w in enumerate(stack):
+        g9.add(w)
+        w._is_snapped = True
+        if i > 0:
+            w._snap_constraints = [(stack[i - 1], "top")]
+    # 组包围盒高度 = 3×窗高（远大于单窗）
+    ok(g9.bounding_rect().height() == 3 * hh, "竖直组包围盒=3倍窗高")
+    # 边语义：_edge_candidates 中 "top" = 我的上边贴目标下边（我在目标下方）。
+    # 单窗放在顶窗正下方：单窗顶边距顶窗底边 8px（<20 阈值），水平对齐顶窗。
+    # 单窗左上角 y = 顶窗底边 + 8 = top.y + hh + 8。
+    # 为避免与中间窗（top.y+hh .. top.y+2hh）垂直重叠干扰，把堆叠组窗高方向
+    # 拉开：单窗只与顶窗邻近——用顶窗矩形单独算候选隔离验证。
+    single = mu.MonitorUnitWidget("mem.load", hub9, manager=mgr9, **w_inj9)
+    mgr9.register_widget("mem.load", single, ["mem.load"])
+    top = stack[0]
+    top_r = top.frameGeometry()
+    hh = top_r.height()
+    # 单窗顶边在顶窗底边下 8px
+    single.move(top_r.left(), top_r.top() + hh + 8)
+    single.show()
+    APP.processEvents()
+    my_r = single.frameGeometry()
+    grp_r = g9.bounding_rect()
+    # 核心修复点：逐窗格目标（顶窗矩形）产生 top 候选（我在顶窗下方），距离 8px 可达。
+    cand_top = single._edge_candidates(my_r, top_r)
+    top_cand = [(d, sr) for d, e, sr in cand_top if e == "top"]
+    ok(top_cand and top_cand[0][0] < 20,
+       f"逐窗格：顶窗 top 候选距离<20（下方吸附可达，{top_cand[0][0] if top_cand else 'None'}）")
+    ok(top_cand and top_cand[0][1].top() == top_r.top() + hh,
+       "逐窗格：贴合位顶边=顶窗底边（精确非整摞底边）")
+    # 旧整组包围盒口径：top 候选距离 = 单窗顶边 - 整摞底边 = (top.y+hh+8)-(top.y+3hh) = 8-2hh（绝对值 2hh-8≥20，失效）
+    cand_grp = single._edge_candidates(my_r, grp_r)
+    top_grp = [(d, sr) for d, e, sr in cand_grp if e == "top"]
+    ok(top_grp and top_grp[0][0] >= 20,
+       f"整组包围盒：top 候选距离≥20（旧口径下方失效，{top_grp[0][0] if top_grp else 'None'}）")
+    single._clear_preview()
+    for w in stack + [single]:
+        w.close()
+    ok("other.frameGeometry()" in src and "bounding_rect() if og" not in src,
+       "预览候选用逐窗格矩形（非整组包围盒，源码看守）")
+
 
 # ---------------------------------------------------------------------------
 # M. 资源监视颜色设置项 / 字色对比度 / 字体加粗 / 主题刷新（本轮需求）

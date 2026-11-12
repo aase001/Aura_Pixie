@@ -998,26 +998,25 @@ class MonitorUnitWidget(QWidget):
         return self.frameGeometry()
 
     def _update_preview(self, cursor_global: QPoint) -> None:
-        """移动中检测：以「被拖组包围盒」对其它独立窗/组包围盒四边与屏幕边算边距。
+        """移动中检测：以「被拖组包围盒」对其它每个窗格各自矩形与屏幕边算边距。
 
         <20px 记录预览目标/边/贴合位 + 画幽灵轮廓；≥20px 清预览。
-        移动中绝不改变位置去吸附。目标按组去重（多对多磁吸不重复候选）。
+        移动中绝不改变位置去吸附。
+
+        磁吸目标粒度（V16.1 修复）：对其它窗格**逐个**用其自身 frameGeometry
+        算候选，而非整组 bounding_rect——否则竖直堆叠的大组包围盒会把单窗
+        的「下方」候选推到整摞底下，导致单窗下方吸附失效（只能接上/左）。
+        逐窗格目标让新窗能精确贴到组内任一单窗的四边。
         """
         my_rect = self._drag_group_rect()
         best = None   # (dist, target, edge, snap_rect)
-        seen_groups: set = set()
-        # 其它独立窗 / 组（排除自身与自身所在组；同组只取一个代表）
+        # 其它窗格逐个算候选（排除自身与自身所在组成员）
         for other in self.manager._widgets.values():
             if other is self or not other.isVisible():
                 continue
             if self._group is not None and other._group is self._group:
                 continue
-            og = other._group
-            if og is not None:
-                if id(og) in seen_groups:
-                    continue
-                seen_groups.add(id(og))
-            target_rect = og.bounding_rect() if og is not None else other.frameGeometry()
+            target_rect = other.frameGeometry()
             cand = self._edge_candidates(my_rect, target_rect)
             for dist, edge, sr in cand:
                 if best is None or dist < best[0]:
