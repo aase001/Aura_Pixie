@@ -265,18 +265,16 @@ _applied_dark: bool | None = None   # 上次已应用的深浅模式（变更检
 def _refresh_windows_theme(app) -> None:
     """主题切换后刷新全部已开窗口（V16.2 运行时刷新）。
 
-    标题栏逐窗重着色（DWM 不随调色板自动变）；动态样式（设备名小字、
-    表格编辑器）按新主题重算——它们用样式表硬编码了颜色，调色板变了
-    样式表不会自动跟。新窗口若需主题切换刷新，在此按类型补一句即可。
+    标题栏逐窗重着色（DWM 不随调色板自动变）；动态样式（表格编辑器）
+    按新主题重算——它用样式表硬编码了颜色，调色板变了样式表不会自动跟。
+    设备名小字恒定中灰不随主题变，无需在此刷新。新窗口若需主题切换刷新，
+    在此按类型补一句即可。
     """
     for w in app.topLevelWidgets():
         if not w.isVisible():
             continue
         _apply_titlebar_theme(w)
-        if isinstance(w, MonitorSettingsDialog):
-            for lab in w._hw_labels.values():
-                lab.setStyleSheet(w._hw_style())
-        elif isinstance(w, SettingsDialog):
+        if isinstance(w, SettingsDialog):
             w._apply_table_editor_theme()
 
 
@@ -5512,23 +5510,24 @@ class MonitorSettingsDialog(QDialog):
 
     @staticmethod
     def _hw_font(base: QFont) -> QFont:
-        """设备名小字字体：固定 8px（用户拍板，比参数名小、不撑开行距）。
+        """设备名小字字体：固定 9px（用户拍板，比参数名小、不撑开行距）。
 
         关键：默认字体是「点」单位，pixelSize() 返回 -1，若直接
         max(1, pixelSize()-N) 会塌成 1px → 渲染成一条灰线（V16.2 实测根因）。
         故显式 setPixelSize 一个可读的固定值，绝不依赖 pixelSize() 现值。
         """
         f = QFont(base)
-        f.setPixelSize(8)
+        f.setPixelSize(9)
         return f
 
     @staticmethod
     def _hw_style() -> str:
-        """设备名小字颜色：取统一色板次级文字色（V16.2 统一机制）。
+        """设备名小字颜色：恒定中灰 #808080（用户拍板，V16.2）。
 
-        浅底→半透明黑、深底→半透明白，比固定 gray 在纯白/纯黑底上更清晰。
+        中灰在白底/黑底上对比度都够，不随主题变——彻底避免深浅切换时
+        半透明文字色与底色同色隐形的问题，无需主题切换刷新。
         """
-        return f"color: {theme_colors()['secondary']};"
+        return "color: #808080;"
 
     def _add_hw_label(self, key: str, parent) -> None:
         """参数复选框正下方加设备名小字 QLabel（仅有设备名的参数）。"""

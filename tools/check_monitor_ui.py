@@ -1539,15 +1539,18 @@ def section_j():
         ok(all(not lab.isEnabled() for lab in dlg._hw_labels.values()),
            "总开关关闭 → 设备名小字置灰")
         # J7b 字号防塌缩（V16.2 灰线根因）：默认字体点单位 pixelSize()=-1，
-        # 旧 max(1, pixelSize()-N) 塌成 1px 渲染成灰线；设备名固定 8px（用户拍板），
+        # 旧 max(1, pixelSize()-N) 塌成 1px 渲染成灰线；设备名固定 9px（用户拍板），
         # 须可读且小于参数名字号（改坏会红）。
         from PySide6.QtGui import QFontMetricsF as _QFMF
         _param_px = _QFMF(dlg._param_checks["cpu.load"].font()).height()
         _hw_px = {k: lab.font().pixelSize() for k, lab in dlg._hw_labels.items()}
-        ok(all(px == 8 for px in _hw_px.values()),
-           f"设备名字号固定 8px（实得 {sorted(set(_hw_px.values()))}）")
+        ok(all(px == 9 for px in _hw_px.values()),
+           f"设备名字号固定 9px（实得 {sorted(set(_hw_px.values()))}）")
         ok(all(px < _param_px for px in _hw_px.values()),
            "设备名字号小于参数名")
+        # J7c 恒定中灰（V16.2 用户拍板）：不随主题变，深浅底都可见（改坏会红）
+        ok(all("#808080" in lab.styleSheet() for lab in dlg._hw_labels.values()),
+           "设备名颜色恒定中灰 #808080（不依赖主题）")
         # J8 设备名重载：注入硬件名 → 刷新为新名（改坏会红）
         fake.set_metric("cpu.load", 10.0, mh.STATUS_OK)
         fake._frame["cpu.load"].hardware = "i7-TEST"
