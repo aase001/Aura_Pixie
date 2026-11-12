@@ -358,6 +358,11 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
     gpu_i_name: Optional[str] = None
     fam_by_hw: dict[str, str] = {}
     for h in (meta or {}).get("hwIndex", []):
+        # 仅 GPU 类型硬件参与独显/核显判定：CPU 名含 "intel"（如 11th Gen
+        # Intel Core i7）会被关键字误判核显，且 CPU order 更小会抢占目标核显，
+        # 导致真核显传感器整卡被跳过、gpu_i.* 恒 unsupported。
+        if not str(h.get("type", "")).startswith("Gpu"):
+            continue
         fam = _match_gpu_family(h.get("name", ""), h.get("type", ""))
         if fam == "dedicated":
             if gpu_d_order is None or h["order"] < gpu_d_order:

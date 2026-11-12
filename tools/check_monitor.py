@@ -119,6 +119,28 @@ def section_a():
     near(mr_multi.fixed["gpu_d.load"][0], 23.0, .01, "多独显取 order 最小首块（负载）")
     near(mr_multi.fixed["gpu_d.temp"][0], 51.0, .01, "多独显取 order 最小首块（温度）")
 
+    # 核显误判回归：CPU 名含 "intel"（11th Gen Intel Core）且 order 小于真核显，
+    # 不得抢占目标核显导致 gpu_i.* 整卡被跳过（真实机型 i7-11800H + UHD 实证）。
+    meta_igpu = {"hwIndex": [
+        {"type": "Cpu", "name": "11th Gen Intel Core i7-11800H", "order": 0, "parent": None},
+        {"type": "GpuNvidia", "name": "NVIDIA GeForce RTX 3060 Laptop GPU", "order": 1, "parent": None},
+        {"type": "GpuIntel", "name": "Intel(R) UHD Graphics", "order": 2, "parent": None},
+    ]}
+    s_igpu = [
+        {"hw": "11th Gen Intel Core i7-11800H", "hwType": "Cpu", "parent": None,
+         "sensor": "Load", "name": "CPU Total", "value": 8.0},
+        {"hw": "NVIDIA GeForce RTX 3060 Laptop GPU", "hwType": "GpuNvidia", "parent": None,
+         "sensor": "Load", "name": "GPU Core", "value": 31.0},
+        {"hw": "Intel(R) UHD Graphics", "hwType": "GpuIntel", "parent": None,
+         "sensor": "Load", "name": "D3D 3D", "value": 1.9},
+        {"hw": "Intel(R) UHD Graphics", "hwType": "GpuIntel", "parent": None,
+         "sensor": "SmallData", "name": "D3D Shared Memory Used", "value": 550.0},
+    ]
+    mr_igpu = mh.map_frame({"sensors": s_igpu}, meta_igpu)
+    near(mr_igpu.fixed["gpu_i.load"][0], 1.9, .01, "CPU 含 intel 不抢占核显（负载）")
+    near(mr_igpu.fixed["gpu_i.shared"][0], 550 / 1024, .001, "CPU 含 intel 不抢占核显（共享内存）")
+    near(mr_igpu.fixed["gpu_d.load"][0], 31.0, .01, "独显不受核显修复影响")
+
     # 非管理员空帧：无 CPU 温度族、无存储、无任何风扇行；功耗全 0
     sig = mh.map_absent_signals([
         s for s in fake_sensors()
