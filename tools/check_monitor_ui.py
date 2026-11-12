@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""monitor_ui 阶段 0+1 自检（离屏，无真实硬件/侧车依赖）。
+"""monitor_ui 阶段 0+1+2 自检（离屏，无真实硬件/侧车依赖）。
 
-五节：
+六节：
   A. 契约与骨架——注入接口、UnitRow、配置块默认、空壳冒烟
   B. 假 hub——字段与真实 Metric 完全一致、五态/序列可脚本化注入、
      snapshot 计数、list_disks 传帧复用、与真实 hub 输出交叉验证
@@ -9,6 +9,7 @@
      禁 get(key) 拉取、禁 exec() 嵌套（改坏会红）
   D. 环境看守——offscreen 平台、QApplication 先于字体加载
   E. 阶段 1 渲染与布局——窗口标志、三列内容驱动、缩放、光晕像素、动态行高
+  F. 阶段 2 数据可视化——五态、阈值插值、呼吸相位、history、一帧一映射
 
 跑法：  python tools/check_monitor_ui.py
 退出码： 0 全过 / 1 有失败
@@ -229,18 +230,18 @@ def section_a():
     ok(w._group is None and w._is_snapped is False
        and w._preview_target is None and w._preview_edge is None,
        "状态机占位初始值")
-    ok(mgr._groups == [] and mgr._widgets == {} and mgr._timer is None,
-       "管理器占位初始值")
+    ok(mgr._groups == [] and mgr._widgets == {}
+       and mgr._timer is not None and not mgr._timer.isActive(),
+       "管理器占位初始值（拉取定时器已建未启动）")
     ok(w.scale_getter() == 1.0 and w.topmost_getter() is False,
        "注入回调可调用")
 
     # 未实现方法一律 NotImplementedError（阶段边界看守；
-    # update_layout/set_rows 阶段 1 已实现，改由 E 节真实验证）
-    raises_not_implemented(lambda: w.update_data(None), "update_data 未实现")
+    # update_layout/set_rows 阶段 1、update_data/tick 阶段 2 已实现，
+    # 改由 E/F 节真实验证）
     raises_not_implemented(
         lambda: w.simulate_data_update("cpu.load", 1.0, mh.STATUS_OK),
         "simulate_data_update 未实现")
-    raises_not_implemented(lambda: mgr.tick(), "tick 未实现")
     raises_not_implemented(lambda: mgr.snap_groups(), "snap_groups 未实现")
     raises_not_implemented(lambda: mgr.simulate_drag(w, 10, 10),
                            "simulate_drag 未实现")
@@ -605,11 +606,217 @@ def section_e():
     w.close()
 
 
+# ---------------------------------------------------------------------------
+# F. 阶段 2：数据可视化层
+# ---------------------------------------------------------------------------
+def section_f():
+    print("[F] 阶段 2 数据可视化层")
+    from PySide6.QtGui import QColor
+
+    # ---- F1 阈值插值边界 ----
+    th = mu.default_thresholds("cpu.load", "%")
+    ok(th[0]["max"] == 60 and th[1]["max"] == 85 and th[2]["max"] == 100,
+       "百分比默认段 0~60/60~85/85~100（非全局 90%）")
+    c0 = mu.get_color_for_value(0.0, th)
+    ok(c0.name().upper() == mu.SEM_GREEN.upper(), "0 → 绿")
+    c100 = mu.get_color_for_value(100.0, th)
+    ok(c100.name().upper() == mu.SEM_RED.upper(), "100 → 红（最高段恒段色）")
+    c60 = mu.get_color_for_value(60.0, th)
+    ok(c60.name().upper() == mu.SEM_YELLOW.upper(), "60 → 黄（段界）")
+    # 段间线性插值：72.5 在 60~85 中点 → 黄红各半
+    cmid = mu.get_color_for_value(72.5, th)
+    y = QColor(mu.SEM_YELLOW)
+    r = QColor(mu.SEM_RED)
+    exp_r = round((y.red() + r.red()) / 2)
+    ok(abs(cmid.red() - exp_r) <= 1, f"段间线性插值（72.5 红通道 {cmid.red()}≈{exp_r}）")
+    ok(mu.get_color_for_value(None, th).red() == 150, "None → 中性灰")
+    # 温度/转速/网速各自默认段（不与百分比同）
+    ok(mu.default_thresholds("cpu.temp", "℃")[1]["max"] == 80,
+       "温度默认段（60/80）")
+    ok(mu.default_thresholds("fan.cpu.0", "RPM")[0]["max"] == 2000,
+       "转速默认段（2000/3500）")
+    ok(mu.default_thresholds("net.rx", "MB/s")[1]["max"] == 50,
+       "网速默认段（10/50）")
+    ok(not mu.in_top_segment(50.0, mu.default_thresholds("cpu.temp", "℃")),
+       "温度 50℃ 不误触发百分比阈值")
+    ok(mu.in_top_segment(90.0, th), "百分比 90 进最高段")
+    ok(not mu.in_top_segment(50.0, th), "百分比 50 不进最高段")
+
+    # ---- F2 呼吸相位随真实时间推进 ----
+    a0 = mu.breath_alpha(0.0)
+    a250 = mu.breath_alpha(250.0)    # 1Hz 正弦 1/4 周期 → 峰
+    a500 = mu.breath_alpha(500.0)    # 半周期 → 回中
+    ok(abs(a0 - 0.65) < 1e-6, f"呼吸起点中值 0.65（{a0}）")
+    ok(abs(a250 - 1.0) < 1e-6, f"1/4 周期峰值 1.0（{a250}）")
+    ok(abs(a500 - 0.65) < 1e-6, f"半周期回中值（{a500}）")
+    ok(mu.BREATH_ALPHA_MIN == 0.3 and mu.BREATH_ALPHA_MAX == 1.0,
+       "呼吸幅度 0.3↔1.0")
+    ok(mu.BREATH_HZ == 1.0, "呼吸频率 1Hz")
+
+    # ---- F3 五态驱动 + history ----
+    w, hub, mgr = _make_widget()
+    mgr.register_widget("cpu", w, ["cpu.load", "cpu.temp"])
+    w.show()
+    APP.processEvents()
+    # ok 有值
+    hub.set_metric("cpu.load", 42.0, mh.STATUS_OK)
+    hub.set_metric("cpu.temp", 63.0, mh.STATUS_OK)
+    snap = hub.snapshot()
+    for row in w._rows:
+        w.update_data(snap[row.key])
+    ok(w._rows[0].value == 42.0 and w._rows[0].available, "ok 行有值可用")
+    ok(list(w._rows[0].history) == [42.0], "history append 值")
+    # 五态：value=None 或 status!=ok → 不可用 + history None
+    for st in (mh.STATUS_NEED_ADMIN, mh.STATUS_UNSUPPORTED,
+               mh.STATUS_NOT_INSTALLED, mh.STATUS_STALE):
+        hub.set_metric("cpu.temp", None, st)
+        w.update_data(hub.snapshot()["cpu.temp"])
+        row_t = w._rows[1]
+        ok(not row_t.available, f"{st} 不可用")
+        ok(row_t.history[-1] is None, f"{st} history 记 None（断线）")
+        ok(mu.STATUS_TEXT.get(st, "") != "", f"{st} 有状态小字文案")
+    ok(mu.STATUS_TEXT[mh.STATUS_NEED_ADMIN] == "需管理员/驱动",
+       "need_admin 文案")
+    ok(mu.STATUS_TEXT[mh.STATUS_STALE] == "断流", "stale 文案")
+    ok(mu.STATUS_TEXT[mh.STATUS_NOT_INSTALLED] == "采集器缺失",
+       "not_installed 文案")
+    # status=ok 但 value=None 也不可用
+    hub.set_metric("cpu.load", None, mh.STATUS_OK)
+    w.update_data(hub.snapshot()["cpu.load"])
+    ok(not w._rows[0].available, "ok 但值 None 不可用")
+
+    # ---- F4 history 容量与 None 断线 ----
+    w2, hub2, mgr2 = _make_widget()
+    mgr2.register_widget("cpu", w2, ["cpu.load"])
+    w2.show()
+    APP.processEvents()
+    for i in range(75):
+        hub2.set_metric("cpu.load", float(i), mh.STATUS_OK)
+        w2.update_data(hub2.snapshot()["cpu.load"])
+    ok(len(w2._rows[0].history) == 60, "history 容量 60")
+    ok(w2._rows[0].history[0] == 15.0, "history 淘汰最旧")
+    # 插入 None 断线点
+    hub2.set_metric("cpu.load", None, mh.STATUS_STALE)
+    w2.update_data(hub2.snapshot()["cpu.load"])
+    ok(w2._rows[0].history[-1] is None, "断线点 None 入 history")
+
+    # ---- F5 高负载呼吸启动/停止 ----
+    w3, hub3, mgr3 = _make_widget()
+    mgr3.register_widget("cpu", w3, ["cpu.load"])
+    w3.show()
+    APP.processEvents()
+    hub3.set_metric("cpu.load", 50.0, mh.STATUS_OK)
+    w3.update_data(hub3.snapshot()["cpu.load"])
+    ok(not w3._breathing and not w3._anim_timer.isActive(),
+       "50% 未进最高段 → 不呼吸")
+    hub3.set_metric("cpu.load", 95.0, mh.STATUS_OK)
+    w3.update_data(hub3.snapshot()["cpu.load"])
+    ok(w3._breathing and w3._anim_timer.isActive(),
+       "95% 进最高段 → 启动呼吸定时器")
+    ok(w3._breath_clock.isValid(), "呼吸时钟已启动（相位取真实时间）")
+    hub3.set_metric("cpu.load", 30.0, mh.STATUS_OK)
+    w3.update_data(hub3.snapshot()["cpu.load"])
+    ok(not w3._breathing and not w3._anim_timer.isActive(),
+       "离开最高段 → 立即停呼吸")
+    # 隐藏停呼吸相位推进
+    hub3.set_metric("cpu.load", 95.0, mh.STATUS_OK)
+    w3.update_data(hub3.snapshot()["cpu.load"])
+    ok(w3._anim_timer.isActive(), "呼吸中")
+    w3.hide()
+    APP.processEvents()
+    ok(not w3._anim_timer.isActive(), "隐藏 → 停呼吸定时器")
+    w3.close()
+
+    # ---- F6 每 tick snapshot 只调一次（计数断言）----
+    w4, hub4, mgr4 = _make_widget()
+    mgr4.register_widget("cpu", w4, ["cpu.load", "cpu.temp"])
+    w5, _, _ = _make_widget()
+    mgr4.register_widget("mem", w5, ["mem.load"])
+    w4.show()
+    w5.show()
+    APP.processEvents()
+    hub4.set_metric("cpu.load", 42.0, mh.STATUS_OK)
+    hub4.set_metric("cpu.temp", 63.0, mh.STATUS_OK)
+    hub4.set_metric("mem.load", 17.0, mh.STATUS_OK)
+    before = hub4.snapshot_calls
+    mgr4.tick()
+    ok(hub4.snapshot_calls == before + 1,
+       f"每 tick 全单元共享一次 snapshot（{before}→{hub4.snapshot_calls}）")
+    ok(w4._rows[0].value == 42.0 and w5._rows[0].value == 17.0,
+       "同一帧分发到所有可见单元")
+    # list_disks 传帧复用：tick 内不额外取帧
+    ok(hub4.snapshot_calls == before + 1,
+       "tick 内 list_disks 传帧复用（无额外 snapshot）")
+
+    # ---- F7 全隐停定时器 ----
+    mgr4.start_polling(1000)
+    ok(mgr4._timer.isActive(), "有可见窗 → 拉取定时器运行")
+    w4.hide()
+    w5.hide()
+    APP.processEvents()
+    mgr4.tick()
+    ok(not mgr4._timer.isActive(), "全部不可见 → 停拉取定时器")
+    w4.close()
+    w5.close()
+
+    # ---- F8 多盘动态行同步 ----
+    w6, hub6, mgr6 = _make_widget()
+    mgr6.register_widget("disk", w6, ["disk.0.temp", "disk.0.usage"])
+    w6.show()
+    APP.processEvents()
+    hub6.set_metric("disk.0.temp", 42.0, mh.STATUS_OK)
+    hub6.set_metric("disk.0.usage", 38.6, mh.STATUS_OK)
+    hub6.set_metric("disk.1.temp", 40.0, mh.STATUS_OK)
+    hub6.set_metric("disk.1.usage", 11.4, mh.STATUS_OK)
+    mgr6.tick()
+    keys = [r.key for r in w6._rows]
+    ok(keys == ["disk.0.temp", "disk.0.usage", "disk.1.temp", "disk.1.usage"],
+       f"多盘动态行展开（{keys}）")
+    ok(w6._rows[2].value == 40.0, "盘2 温度同步")
+    w6.close()
+
+    # ---- F9 sparkline 绘制路径源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("QPainterPath" in src and "drawPath" in src,
+       "sparkline 走 QPainterPath 折线")
+    ok("started = False" in src, "None 点断开逻辑在位")
+    ok("self.hub.snapshot()" in src and "list_disks(snapshot=snap)" in src,
+       "一帧一映射 + list_disks 传帧（源码看守）")
+    ok("QElapsedTimer" in src and "breath_alpha" in src,
+       "呼吸相位取 QElapsedTimer 真实时间")
+    ok("get_color_for_value" in src and "in_top_segment" in src,
+       "语义色阈值插值与最高段判定在位")
+
+    # ---- F10 sparkline 真实渲染像素（有历史 vs 空历史）----
+    w7, hub7, mgr7 = _make_widget()
+    mgr7.register_widget("cpu", w7, ["cpu.load"])
+    w7.show()
+    APP.processEvents()
+    img_empty = _grab(w7)
+    for v in (10.0, 40.0, 70.0, 30.0, 90.0, 50.0):
+        hub7.set_metric("cpu.load", v, mh.STATUS_OK)
+        w7.update_data(hub7.snapshot()["cpu.load"])
+    img_line = _grab(w7)
+    # 逐像素差异：有折线应产生非零差异（sparkline 真实画出）
+    diff = 0
+    for yy in range(img_line.height()):
+        for xx in range(img_line.width()):
+            if img_line.pixel(xx, yy) != img_empty.pixel(xx, yy):
+                diff += 1
+    ok(diff > 20, f"sparkline 真实渲染产生像素差异（{diff} 像素）")
+    w7.close()
+
+    w.close()
+    w2.close()
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
     section_c()
     section_d()
     section_e()
+    section_f()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

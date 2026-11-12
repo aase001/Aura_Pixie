@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""资源监视 UI —— 阶段 1：契约骨架 + 单元渲染与动态布局。
+"""资源监视 UI —— 阶段 2：契约骨架 + 单元渲染 + 数据可视化层。
 
 形态（已拍板）：N 个磁吸迷你窗，每指标单元一个顶层 QWidget。
 本模块禁止 import main（main 反向 import 本模块，会循环依赖）。
@@ -9,7 +9,8 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
 阶段进度：
   - 阶段 0：UnitRow 行模型、空壳契约、monitor 配置块默认结构
   - 阶段 1：MonitorUnitWidget 三列内容驱动渲染 + 边缘虚化光晕 + 动态行高
-  - 阶段 2~5：数据可视化 / 磁吸 / 解绑收口 / 集成接线（方法留 NotImplementedError）
+  - 阶段 2：五态驱动视觉 + 语义色阈值插值 + 高负载呼吸 + sparkline + 拉取节奏
+  - 阶段 3~5：磁吸 / 解绑收口 / 集成接线（方法留 NotImplementedError）
 
 后端契约（monitor_hub.py，只读消费）：
   - 每 tick 只调一次 snapshot()，全单元共享同一帧；禁止 get(key)
@@ -19,12 +20,13 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
 """
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 import monitor_hub as mh
@@ -64,6 +66,109 @@ HALO_ALPHA = 0.15     # 光晕主题色透明度 15%
 BODY_ALPHA = 0.82     # 本体底色透明度（保证文字可读，无深色收边）
 SPARK_H = 18          # sparkline 行下方预留高（阶段 2 画折线）
 FONT_FAMILY = "Microsoft YaHei"
+
+# ---------------------------------------------------------------------------
+# 阶段 2 数据可视化常量
+# ---------------------------------------------------------------------------
+SPARK_LINE_PX = 1     # sparkline 线宽（乘缩放）
+BREATH_HZ = 1.0       # 高负载呼吸频率 1Hz
+BREATH_ALPHA_MIN = 0.3
+BREATH_ALPHA_MAX = 1.0
+STATUS_TEXT = {
+    mh.STATUS_NEED_ADMIN: "需管理员/驱动",
+    mh.STATUS_UNSUPPORTED: "不可用",
+    mh.STATUS_NOT_INSTALLED: "采集器缺失",
+    mh.STATUS_STALE: "断流",
+}
+# 语义色三档（绿/黄/红）
+SEM_GREEN = "#3FB950"
+SEM_YELLOW = "#D29922"
+SEM_RED = "#F85149"
+
+
+def default_thresholds(key: str, unit: str) -> list:
+    """按指标类别给默认阈值段（禁止全局写死 90%）。
+
+    百分比类 0~60 绿 / 60~85 黄 / 85~100 红；温度/转速/网速/频率/功耗/用量
+    各自默认段。段格式 {min, max, color}，段间线性插值（get_color_for_value）。
+    """
+    if unit == "%":
+        return [{"min": 0, "max": 60, "color": SEM_GREEN},
+                {"min": 60, "max": 85, "color": SEM_YELLOW},
+                {"min": 85, "max": 100, "color": SEM_RED}]
+    if unit == "℃":
+        return [{"min": 0, "max": 60, "color": SEM_GREEN},
+                {"min": 60, "max": 80, "color": SEM_YELLOW},
+                {"min": 80, "max": 110, "color": SEM_RED}]
+    if unit == "RPM":
+        return [{"min": 0, "max": 2000, "color": SEM_GREEN},
+                {"min": 2000, "max": 3500, "color": SEM_YELLOW},
+                {"min": 3500, "max": 6000, "color": SEM_RED}]
+    if unit == "MB/s":
+        return [{"min": 0, "max": 10, "color": SEM_GREEN},
+                {"min": 10, "max": 50, "color": SEM_YELLOW},
+                {"min": 50, "max": 200, "color": SEM_RED}]
+    if unit == "GHz":
+        return [{"min": 0, "max": 3.0, "color": SEM_GREEN},
+                {"min": 3.0, "max": 4.2, "color": SEM_YELLOW},
+                {"min": 4.2, "max": 5.5, "color": SEM_RED}]
+    if unit == "W":
+        return [{"min": 0, "max": 35, "color": SEM_GREEN},
+                {"min": 35, "max": 80, "color": SEM_YELLOW},
+                {"min": 80, "max": 150, "color": SEM_RED}]
+    if unit == "GB":
+        return [{"min": 0, "max": 8, "color": SEM_GREEN},
+                {"min": 8, "max": 16, "color": SEM_YELLOW},
+                {"min": 16, "max": 32, "color": SEM_RED}]
+    # sys.uptime（s）等无负载语义 → 单段中性色，不触发高负载呼吸
+    return [{"min": 0, "max": 1e12, "color": SEM_GREEN}]
+
+
+def get_color_for_value(value: Optional[float], thresholds: list) -> QColor:
+    """按阈值段取语义色，段间线性插值。
+
+    值落在某段内 → 在该段 [min,max] 上从段色向下一段色插值；
+    最后一段（最高段）恒段色。低于首段 min → 首段色；高于末段 max → 末段色。
+    value=None → 中性灰（调用方按五态另行灰显）。
+    """
+    if not thresholds:
+        return QColor(SEM_GREEN)
+    if value is None:
+        return QColor(150, 150, 150)
+    # 定位所在段
+    idx = 0
+    for i, seg in enumerate(thresholds):
+        if value >= seg["min"]:
+            idx = i
+    seg = thresholds[idx]
+    c0 = QColor(seg["color"])
+    if idx + 1 < len(thresholds):
+        nxt = thresholds[idx + 1]
+        span = seg["max"] - seg["min"]
+        t = 0.0 if span <= 0 else (value - seg["min"]) / span
+        t = max(0.0, min(1.0, t))
+        c1 = QColor(nxt["color"])
+        return QColor(
+            round(c0.red() + (c1.red() - c0.red()) * t),
+            round(c0.green() + (c1.green() - c0.green()) * t),
+            round(c0.blue() + (c1.blue() - c0.blue()) * t))
+    return c0
+
+
+def in_top_segment(value: Optional[float], thresholds: list) -> bool:
+    """值是否进入该指标最高阈值段（触发高负载呼吸）。"""
+    if value is None or not thresholds:
+        return False
+    top = thresholds[-1]
+    return value >= top["min"]
+
+
+def breath_alpha(elapsed_ms: float) -> float:
+    """高负载呼吸 alpha：1Hz 正弦 0.3↔1.0，相位取自真实经过时间。"""
+    phase = 2.0 * math.pi * BREATH_HZ * (elapsed_ms / 1000.0)
+    mid = (BREATH_ALPHA_MIN + BREATH_ALPHA_MAX) / 2.0
+    amp = (BREATH_ALPHA_MAX - BREATH_ALPHA_MIN) / 2.0
+    return mid + amp * math.sin(phase)
 
 
 def halo_color(theme: dict) -> QColor:
@@ -162,11 +267,25 @@ class MonitorUnitWidget(QWidget):
         self._row_h = 0               # 单行文本高
         self._geo_scale = 1.0         # 本次布局所用缩放（paint 时校验是否需重算）
         self._last_h = 0              # 上次窗高（变高方向同帧 repaint 防脏区，坑 53）
+        # 阶段 2：语义色阈值（可注入；空→按指标类别默认段）
+        self._thresholds: dict = {}   # key -> [{min,max,color}...]
+        # 阶段 2：高负载呼吸（相位取真实经过时间，QElapsedTimer）
+        self._breath_clock = QElapsedTimer()
+        self._breathing = False
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(33)   # ~30FPS 重绘驱动呼吸
+        self._anim_timer.timeout.connect(self._on_anim_tick)
         # 窗口形态（全局约束第 3 条）
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.apply_topmost()
+
+    def _on_anim_tick(self) -> None:
+        try:
+            self.update()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui._on_anim_tick", e)
 
     # ---- 窗口形态 ----
     def apply_topmost(self) -> None:
@@ -217,12 +336,16 @@ class MonitorUnitWidget(QWidget):
             pad_y = round(PAD_Y * s)
             self._col_w = (w_label, w_value, w_unit)
             self._row_h = fm.height()
+            # 状态小字行高（五态非 ok 时在数值行下方显示，阶段 2）
+            small = QFont(self._font())
+            small.setPixelSize(max(1, round(FONT_PX * 0.72 * s)))
+            self._status_h = QFontMetrics(small).height()
             self._geo_scale = s
             n = max(1, len(rows))
             row_gap = round(ROW_GAP * s)
             spark_h = round(SPARK_H * s)
             total_w = w_label + w_value + w_unit + 2 * gap + 2 * pad_x
-            total_h = (n * self._row_h + (n - 1) * row_gap
+            total_h = (n * (self._row_h + self._status_h) + (n - 1) * row_gap
                        + spark_h + 2 * pad_y)
             self.setFixedSize(total_w, total_h)
             self.adjustSize()
@@ -299,7 +422,11 @@ class MonitorUnitWidget(QWidget):
             p.drawRoundedRect(r, corner + inset, corner + inset)
 
     def _paint_rows(self, p: QPainter, body: QRectF, s: float) -> None:
-        """三列文本：A 名称左对齐 / B 数值右对齐 / C 单位左对齐，垂直居中。"""
+        """三列文本 + 状态小字：A 名称左 / B 数值右 / C 单位左，垂直居中。
+
+        可用行数值着语义色；最高阈值段触发高负载呼吸（前景 alpha 1Hz 正弦）。
+        不可用行灰显 + 状态小字（need_admin/stale/unsupported/not_installed）。
+        """
         pad_x = round(PAD_X * s)
         pad_y = round(PAD_Y * s)
         gap = round(COL_GAP * s)
@@ -310,17 +437,23 @@ class MonitorUnitWidget(QWidget):
         x_unit = x_value + w_value + gap           # C 列左界
         p.setFont(self._font())
         tc = text_color(self.theme)
+        small = QFont(self._font())
+        small.setPixelSize(max(1, round(FONT_PX * 0.72 * s)))
         y = body.top() + pad_y
         for row in self._rows:
-            row_rect = QRectF(x_label, y, body.width() - 2 * pad_x, self._row_h)
             # A 列：名称（左对齐，垂直居中）
+            p.setFont(self._font())
             p.setPen(tc)
             p.drawText(QRectF(x_label, y, w_label, self._row_h),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        row.label)
-            # B 列：数值（右对齐）；不可用灰显（阶段 2 补状态小字）
-            vc = QColor(tc)
-            if not row.available:
+            # B 列：数值（右对齐）——可用着语义色 + 呼吸；不可用灰显
+            vc = self._semantic_color(row)
+            if row.available:
+                alpha = self._row_alpha(row)
+                vc.setAlphaF(alpha)
+            else:
+                vc = QColor(tc)
                 vc.setAlphaF(0.45)
             p.setPen(vc)
             p.drawText(QRectF(x_value, y, w_value, self._row_h),
@@ -331,12 +464,149 @@ class MonitorUnitWidget(QWidget):
             p.drawText(QRectF(x_unit, y, w_unit, self._row_h),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        row.unit)
-            y += self._row_h + row_gap
-        # sparkline 区域（阶段 2 画折线）：此处仅预留，不绘制
+            # 状态小字（数值行下方，仅非 ok 显示）
+            st_text = STATUS_TEXT.get(row.status, "")
+            if not row.available and st_text:
+                p.setFont(small)
+                sc = QColor(tc)
+                sc.setAlphaF(0.6)
+                p.setPen(sc)
+                p.drawText(QRectF(x_value, y + self._row_h,
+                                  w_value + gap + w_unit, self._status_h),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           st_text)
+            y += self._row_h + self._status_h + row_gap
+        # sparkline 区域：文本行下方，每行一条折线
+        self._paint_sparklines(p, body, s)
+
+    def _paint_sparklines(self, p: QPainter, body: QRectF, s: float) -> None:
+        """文本行下方画 QPainterPath 折线：线宽 1px×缩放、当前语义色、
+        不填充不画轴、None 点断开。窗口小，全量 update 即可。"""
+        pad_x = round(PAD_X * s)
+        pad_y = round(PAD_Y * s)
+        row_gap = round(ROW_GAP * s)
+        spark_h = round(SPARK_H * s)
+        w_label, w_value, w_unit = self._col_w
+        gap = round(COL_GAP * s)
+        x0 = body.left() + pad_x
+        full_w = w_label + w_value + w_unit + 2 * gap
+        # sparkline 区起点 = 所有文本行（含状态小字）之后
+        n = max(1, len(self._rows))
+        y_base = (body.top() + pad_y
+                  + n * (self._row_h + self._status_h) + (n - 1) * row_gap)
+        pen_w = max(1.0, SPARK_LINE_PX * s)
+        for i, row in enumerate(self._rows):
+            # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽
+            band_h = spark_h / n
+            top = y_base + i * band_h
+            hist = list(row.history)
+            if len(hist) < 2:
+                continue
+            color = self._semantic_color(row)
+            if row.available:
+                color.setAlphaF(self._row_alpha(row))
+            else:
+                color = QColor(text_color(self.theme))
+                color.setAlphaF(0.35)
+            pen = QPen(color, pen_w)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            # 归一化：用历史内 min/max（忽略 None）；全 None 不画
+            vals = [v for v in hist if v is not None]
+            if not vals:
+                continue
+            lo, hi = min(vals), max(vals)
+            span = (hi - lo) or 1.0
+            path = QPainterPath()
+            started = False
+            for j, v in enumerate(hist):
+                x = x0 + full_w * (j / (len(hist) - 1))
+                if v is None:
+                    started = False   # None 点断开
+                    continue
+                yy = top + band_h * (1.0 - (v - lo) / span)
+                if not started:
+                    path.moveTo(x, yy)
+                    started = True
+                else:
+                    path.lineTo(x, yy)
+            p.drawPath(path)
 
     # ---- 阶段 2：数据可视化 ----
+    def set_thresholds(self, thresholds: dict) -> None:
+        """注入指标阈值段 {key: [{min,max,color}...]}（阶段 0 配置 threshold）。"""
+        self._thresholds = dict(thresholds or {})
+
+    def thresholds_for(self, row: UnitRow) -> list:
+        segs = self._thresholds.get(row.key)
+        if segs:
+            return segs
+        return default_thresholds(row.key, row.unit)
+
+    def _semantic_color(self, row: UnitRow) -> QColor:
+        return get_color_for_value(row.value, self.thresholds_for(row))
+
+    def _row_alpha(self, row: UnitRow) -> float:
+        """高负载呼吸：进入最高阈值段 → 1Hz 正弦 0.3↔1.0；否则恒 1.0。
+
+        只影响前景（数值/sparkline），不影响背景。离开阈值段立即恢复。
+        """
+        if in_top_segment(row.value, self.thresholds_for(row)):
+            return breath_alpha(self._breath_clock.elapsed())
+        return 1.0
+
     def update_data(self, metric) -> None:
-        raise NotImplementedError("阶段 2：五态驱动与 sparkline")
+        """接 hub 真实数据：更新对应行值/状态，history append（None 断线）。
+
+        五态：value=None 或 status!=ok → 灰显 + 状态小字，sparkline 记 None。
+        高负载呼吸由 _breathing 聚合（任一行进入最高段即启动动画定时器）。
+        """
+        try:
+            if metric is None:
+                return
+            row = next((r for r in self._rows if r.key == metric.key), None)
+            if row is None:
+                return
+            row.value = metric.value
+            row.status = metric.status
+            row.label = metric.label or row.label
+            row.unit = metric.unit or row.unit
+            # history：可用记值，否则 None（断线）
+            row.history.append(metric.value if row.available else None)
+            self._refresh_breathing()
+            self.update()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.update_data", e)
+
+    def _refresh_breathing(self) -> None:
+        """任一行进入最高阈值段 → 启动呼吸时钟与动画定时器；全离开 → 停。"""
+        any_top = any(in_top_segment(r.value, self.thresholds_for(r))
+                      for r in self._rows if r.available)
+        if any_top and not self._breathing:
+            self._breath_clock.start()
+            self._breathing = True
+            if self.isVisible():
+                self._anim_timer.start()
+        elif not any_top and self._breathing:
+            self._breathing = False
+            self._anim_timer.stop()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        """隐藏停自身呼吸相位推进（阶段 4 可见性联动）。"""
+        try:
+            self._anim_timer.stop()
+            super().hideEvent(event)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.hideEvent", e)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        try:
+            super().showEvent(event)
+            if self._breathing:
+                self._breath_clock.restart()
+                self._anim_timer.start()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.showEvent", e)
 
     # ---- 阶段 4：测试钩子（保留为公开方法）----
     def simulate_data_update(self, key: str, value, status: str) -> None:
@@ -369,11 +639,89 @@ class MonitorWindowManager:
         self.config_io = config_io
         self._groups: list = []       # SnapGroup 列表（阶段 3）
         self._widgets: dict = {}      # unit_key -> MonitorUnitWidget
-        self._timer = None            # 拉取 QTimer（阶段 2）
+        self._refresh_ms = 1000
+        self._timer = QTimer()        # 拉取 QTimer（阶段 2）
+        self._timer.setInterval(self._refresh_ms)
+        self._timer.timeout.connect(self.tick)
 
-    # ---- 阶段 2：拉取节奏 ----
+    # ---- 阶段 2：单元窗注册与拉取节奏 ----
+    def register_widget(self, unit_key: str, widget, row_keys: list,
+                        thresholds: Optional[dict] = None) -> None:
+        """注册一个单元窗及其行键集（行 label/unit 取自白名单定义）。"""
+        self._widgets[unit_key] = widget
+        widget.set_thresholds(thresholds or {})
+        rows = []
+        for key in row_keys:
+            label, _group, unit = self._def_of(key)
+            rows.append(UnitRow(key=key, label=label, value=None,
+                                unit=unit, status=mh.STATUS_STALE))
+        widget.set_rows(rows)
+
+    @staticmethod
+    def _def_of(key: str):
+        for k, label, group, unit in mh.METRIC_DEFS:
+            if k == key:
+                return label, group, unit
+        d = mh._def(key)   # 动态键（disk/fan）按模板还原
+        return d[1], d[2], d[3]
+
+    def start_polling(self, refresh_ms: int = 1000) -> None:
+        self._refresh_ms = max(200, int(refresh_ms))
+        self._timer.setInterval(self._refresh_ms)
+        if self._any_visible():
+            self._timer.start()
+
+    def stop_polling(self) -> None:
+        self._timer.stop()
+
+    def _any_visible(self) -> bool:
+        return any(w.isVisible() for w in self._widgets.values())
+
     def tick(self) -> None:
-        raise NotImplementedError("阶段 2：每 tick 一次 snapshot 全单元共享")
+        """每 tick 只调一次 snapshot()，同一帧分发给所有可见单元。
+
+        list_disks 传入该帧复用（禁止不传帧再取一帧）。窗口全部不可见 → 停定时器。
+        """
+        try:
+            if not self._any_visible():
+                self._timer.stop()
+                return
+            snap = self.hub.snapshot()          # 一帧一映射
+            disks = self.hub.list_disks(snapshot=snap)
+            self._sync_disk_rows(snap, disks)
+            for w in self._widgets.values():
+                if not w.isVisible():
+                    continue
+                for row in w._rows:
+                    m = snap.get(row.key)
+                    if m is not None:
+                        w.update_data(m)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.tick", e)
+
+    def _sync_disk_rows(self, snap: dict, disks: list) -> None:
+        """多盘动态行：按 list_disks 结果增删 disk 单元的行（保留 history）。"""
+        for unit_key, w in self._widgets.items():
+            if not any(r.key.startswith("disk.") for r in w._rows):
+                continue
+            want = []
+            for d in disks:
+                i = d["index"]
+                want.append(f"disk.{i}.temp")
+                want.append(f"disk.{i}.usage")
+            have = [r.key for r in w._rows]
+            if have == want:
+                continue
+            old = {r.key: r for r in w._rows}
+            rows = []
+            for key in want:
+                if key in old:
+                    rows.append(old[key])
+                else:
+                    label, _g, unit = self._def_of(key)
+                    rows.append(UnitRow(key=key, label=label, value=None,
+                                        unit=unit, status=mh.STATUS_STALE))
+            w.set_rows(rows)
 
     # ---- 阶段 3：磁吸 ----
     def snap_groups(self) -> list:
