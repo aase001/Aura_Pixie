@@ -486,9 +486,17 @@ class MonitorUnitWidget(QWidget):
             self.log_fn("monitor_ui.apply_topmost", e)
 
     def show_at(self, anchor_rect) -> None:
-        """首次显示：先定位（place_fn）再 show；尺寸已在构造/布局末尾 adjustSize。"""
+        """首次显示：管理器防重叠摆放（V16.2）再 show。
+
+        旧实现每个窗格都 place_fn 到球体旁同一坐标 → 首启全部重叠；
+        现由管理器统一摆放：有布局记忆用记忆位，无记忆按首位窗格向右排开。
+        """
         try:
-            self.place_fn(self, anchor_rect)
+            place = getattr(self.manager, "place_for_show", None)
+            if callable(place):
+                place(self, anchor_rect)
+            else:
+                self.place_fn(self, anchor_rect)
             self.show()
             self.raise_()
         except Exception as e:  # noqa: BLE001
@@ -1175,6 +1183,8 @@ class MonitorUnitWidget(QWidget):
             self.manager.hide_ghost()
         else:
             self._clear_preview()
+            # V16.2：无磁吸目标松手 → 若与他窗重叠，自动归位到首位窗格右边
+            self.manager.check_overlap_after_drop(self)
 
     def _on_snap_anim(self) -> None:
         try:
@@ -1238,6 +1248,8 @@ class MonitorUnitWidget(QWidget):
             w.update()
         if isinstance(target, MonitorUnitWidget):
             target.update()
+        # V16.2：落位后若仍与他窗重叠（如贴屏幕边压住他窗）→ 归位首位窗格右边
+        self.manager.check_overlap_after_drop(self)
 
     def _merge_into_target(self, target, edge, moving) -> None:
         """把被拖移动单元（moving）并入目标 target 所在组，旧组解散。
@@ -1489,6 +1501,7 @@ class MonitorWindowManager:
         self.config_io = config_io
         self._groups: list = []       # SnapGroup 列表（阶段 3）
         self._widgets: dict = {}      # unit_key -> MonitorUnitWidget
+        self._widget_order: list = []  # 创建顺序（V16.2 首位窗格=最先创建者）
         self._refresh_ms = 1000
         self._timer = QTimer()        # 拉取 QTimer（阶段 2）
         self._timer.setInterval(self._refresh_ms)
@@ -1513,6 +1526,8 @@ class MonitorWindowManager:
                         thresholds: Optional[dict] = None) -> None:
         """注册一个单元窗及其行键集（行 label/unit 取自白名单定义）。"""
         self._widgets[unit_key] = widget
+        if widget not in self._widget_order:
+            self._widget_order.append(widget)
         widget.set_thresholds(thresholds or {})
         rows = []
         for key in row_keys:
@@ -1611,6 +1626,184 @@ class MonitorWindowManager:
             self._last_hw_names = names
             if self.on_hardware_names is not None:
                 self.on_hardware_names(dict(names))
+
+    # ---- V16.2：禁止重叠 + 首位窗格归位 + 重启恢复组 ----
+    def first_widget(self, exclude=()):
+        """首位窗格 = 最先创建的可见窗格（用户拍板）；无可见窗返回 None。
+
+        exclude：排除的窗格集（归位时排除被移动组自身成员）。
+        """
+        ex = set(id(t) for t in exclude)
+        for w in self._widget_order:
+            if w.isVisible() and id(w) not in ex:
+                return w
+        return None
+
+    @staticmethod
+    def _rects_overlap(a: QRect, b: QRect) -> bool:
+        """严格相交才算重叠（边贴边不算）。"""
+        return (a.left() < b.left() + b.width()
+                and a.left() + a.width() > b.left()
+                and a.top() < b.top() + b.height()
+                and a.top() + a.height() > b.top())
+
+    def _screen_avail_for(self, anchor_rect: QRect):
+        """锚点所在屏可用区；screenAt 取不到时回退 screens()[0]（离屏自检）。"""
+        screen = QGuiApplication.screenAt(anchor_rect.center())
+        if screen is None:
+            screens = QGuiApplication.screens()
+            screen = screens[0] if screens else None
+        return screen.availableGeometry() if screen is not None else None
+
+    def place_for_show(self, widget, anchor_rect: QRect) -> None:
+        """显示前防重叠摆放（V16.2）：有布局记忆用记忆位（冲突顺延），
+        无记忆以首位窗格为基准向右依次排开、超屏换行，互不重叠。"""
+        try:
+            layout = {}
+            try:
+                layout = (self.config_io["read"]().get("layout") or {})
+            except Exception:  # noqa: BLE001
+                layout = {}
+            rec = layout.get(widget.unit_key)
+            if isinstance(rec, dict):
+                try:
+                    x, y = float(rec.get("x")), float(rec.get("y"))
+                    if math.isfinite(x) and math.isfinite(y):
+                        widget.move(round(x), round(y))
+                        if self._overlaps_others(widget):
+                            self._relocate_right_of_first(widget)
+                        return
+                except (TypeError, ValueError):
+                    pass
+            first = self.first_widget()
+            if first is None or first is widget:
+                # 首位窗格：按注入 place_fn 定位（球体旁空间大侧）
+                widget.place_fn(widget, anchor_rect)
+                return
+            fr = first.frameGeometry()
+            wr = widget.frameGeometry()
+            avail = self._screen_avail_for(fr)
+            pos = self._find_free_slot(
+                fr.left() + fr.width(), fr.top(), wr.width(), wr.height(),
+                avail, exclude=(widget,))
+            widget.move(*pos)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.place_for_show", e)
+
+    def _overlaps_others(self, widget) -> bool:
+        """widget 是否与其他可见窗格重叠（自身组成员除外——整组刚性移动）。"""
+        r = widget.frameGeometry()
+        grp = widget._group
+        for other in self._widgets.values():
+            if other is widget or not other.isVisible():
+                continue
+            if grp is not None and other._group is grp:
+                continue
+            if self._rects_overlap(r, other.frameGeometry()):
+                return True
+        return False
+
+    def _find_free_slot(self, x: int, y: int, w: int, h: int,
+                        avail, exclude=()):
+        """从 (x,y) 起找不与任何可见窗格重叠的空位：向右顺延，超屏换行。"""
+        ex = set(id(t) for t in exclude)
+        others = [o.frameGeometry() for o in self._widgets.values()
+                  if o.isVisible() and id(o) not in ex]
+        cx, cy = x, y
+        start_x = x
+        for _ in range(4096):
+            cand = QRect(cx, cy, w, h)
+            if not any(self._rects_overlap(cand, r) for r in others):
+                return (cx, cy)
+            cx += w
+            if avail is not None and cx + w > avail.left() + avail.width():
+                cx = start_x if start_x >= avail.left() else avail.left()
+                cy += h
+        return (x, y)
+
+    def _relocate_right_of_first(self, widget) -> None:
+        """重叠归位：把窗格（整组）磁吸到首位窗格右边，被占则顺延空位。"""
+        try:
+            members = (list(widget._group.members)
+                       if widget._group is not None else [widget])
+            first = self.first_widget(exclude=members)
+            if first is None:
+                return
+            fr = first.frameGeometry()
+            br = widget._group.bounding_rect() if widget._group is not None \
+                else widget.frameGeometry()
+            avail = self._screen_avail_for(fr)
+            pos = self._find_free_slot(
+                fr.left() + fr.width(), fr.top(), br.width(), br.height(),
+                avail, exclude=members)
+            delta = QPoint(*pos) - br.topLeft()
+            for w in members:
+                w.move(w.pos() + delta)
+                w.update()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui._relocate_right_of_first", e)
+
+    def check_overlap_after_drop(self, widget) -> None:
+        """松手落位后检测：与他窗重叠 → 自动磁吸到首位窗格右边（V16.2）。"""
+        try:
+            if widget._snap_animating or not widget.isVisible():
+                return
+            if self._overlaps_others(widget):
+                self._relocate_right_of_first(widget)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.check_overlap_after_drop", e)
+
+    def restore_groups(self, layout: dict) -> None:
+        """重启恢复磁吸组（V16.2）：按布局记忆 group_id 重建组与贴合约束。
+
+        约束按落位几何重建（相邻边贴合检测，容差 2px）；恢复后做重叠校验，
+        冲突窗格按归位规则磁吸到首位窗格右边。
+        """
+        try:
+            by_gid: dict = {}
+            for key, w in self._widgets.items():
+                rec = (layout or {}).get(key)
+                gid = rec.get("group_id") if isinstance(rec, dict) else None
+                if gid and w.isVisible():
+                    by_gid.setdefault(gid, []).append(w)
+            for gid, members in by_gid.items():
+                if len(members) < 2:
+                    continue
+                grp = SnapGroup(gid)
+                self._groups.append(grp)
+                for w in members:
+                    grp.add(w)
+                    w._is_snapped = True
+                    w._snap_constraints = []
+                    w._contact_edges = []
+                # 相邻边贴合检测重建约束（左右贴→顶对齐、上下贴→左对齐口径）
+                for i, a in enumerate(members):
+                    ra = a.frameGeometry()
+                    for b in members[i + 1:]:
+                        rb = b.frameGeometry()
+                        edge = None
+                        if (abs(ra.left() + ra.width() - rb.left()) <= 2
+                                and abs(ra.top() - rb.top()) <= 2):
+                            edge = "right"   # a 右贴 b 左
+                        elif (abs(rb.left() + rb.width() - ra.left()) <= 2
+                                and abs(ra.top() - rb.top()) <= 2):
+                            edge = "left"    # a 左贴 b 右
+                        elif (abs(ra.top() + ra.height() - rb.top()) <= 2
+                                and abs(ra.left() - rb.left()) <= 2):
+                            edge = "top"     # a 上贴 b 下（a 在 b 下方）
+                        elif (abs(rb.top() + rb.height() - ra.top()) <= 2
+                                and abs(ra.left() - rb.left()) <= 2):
+                            edge = "bottom"  # a 下贴 b 上（a 在 b 上方）
+                        if edge:
+                            a._snap_constraints.append((b, edge))
+                            a._contact_edges = [edge]
+                            b._contact_edges = [self._opposite_edge(edge)]
+            # 恢复后重叠校验：冲突窗格归位到首位窗格右边
+            for w in list(self._widget_order):
+                if w.isVisible() and self._overlaps_others(w):
+                    self._relocate_right_of_first(w)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.restore_groups", e)
 
     # ---- 阶段 3：磁吸 ----
     def new_group(self) -> SnapGroup:

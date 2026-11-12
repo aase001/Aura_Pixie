@@ -1165,11 +1165,20 @@ def section_h():
     wa.move(500, 500)
     wb.move(500 + wa.width(), 500)
     APP.processEvents()
-    mgr.simulate_drag(wa, 60, 40, button=Qt.MouseButton.RightButton)
+    # 远距离解绑（落点远离 wb 与屏幕边，无磁吸目标）→ 独立跟手原位停留
+    mgr.simulate_drag(wa, 400, 300, button=Qt.MouseButton.RightButton)
     ok(wa._group is None, "右键拖动解绑自身")
     ok(wb._group is None and not wb._is_snapped,
        "右键拖动解绑 → 剩余成员复位")
-    ok(wa.pos() == QPoint(560, 540), f"右键解绑后独立跟手（{wa.pos()}）")
+    ok(wa.pos() == QPoint(900, 800), f"右键解绑后独立跟手（{wa.pos()}）")
+    # V16.2 防重叠：把解绑窗摆到与 wb 重叠处 → 归位首位窗格(wb)右边
+    wa.move(500 + wa.width() - 20, 500)
+    APP.processEvents()
+    ok(mgr._overlaps_others(wa), "解绑窗与剩余窗重叠")
+    mgr.check_overlap_after_drop(wa)
+    ok(not mgr._overlaps_others(wa), "重叠归位后无重叠")
+    ok(wa.frameGeometry().left() >= wb.frameGeometry().left() + wb.width(),
+       "归位到首位窗格右边")
 
     # ---- H4 右键轻点（位移≤4px）不拆组 + 弹菜单 ----
     wa.move(700, 700)
@@ -2455,6 +2464,142 @@ def section_n():
        "main 独显动态键与迁移接线在位")
 
 
+# ---------------------------------------------------------------------------
+# O. 禁止重叠 + 首位窗格归位 + 重启恢复组（V16.2 本轮需求）
+# ---------------------------------------------------------------------------
+def section_o():
+    print("[O] 禁止重叠 / 首位窗格归位 / 重启恢复组")
+    import time as _t
+    from PySide6.QtCore import QEvent, QPoint, QRect
+
+    # ---- O1 首次批量建窗零重叠（无布局记忆，首位窗格向右排开）----
+    hub = FakeHub()
+    inj = make_injections()
+    mgr = mu.MonitorWindowManager(hub, **inj)
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+    keys = ["cpu.load", "cpu.temp", "mem.load", "mem.used", "net.rx"]
+    ws = []
+    anchor = QRect(900, 500, 60, 60)
+    for key in keys:
+        w = mu.MonitorUnitWidget(key, hub, manager=mgr, **w_inj)
+        mgr.register_widget(key, w, [key])
+        w.show_at(anchor)   # 全部同一锚点——旧实现会叠在一起
+        ws.append(w)
+    APP.processEvents()
+    ok(mgr.first_widget() is ws[0], "首位窗格=最先创建者")
+    overlaps = [(a.unit_key, b.unit_key)
+                for i, a in enumerate(ws) for b in ws[i + 1:]
+                if mgr._rects_overlap(a.frameGeometry(), b.frameGeometry())]
+    ok(not overlaps, f"批量建窗零重叠（冲突对 {overlaps}）")
+    ok(ws[1].frameGeometry().left() == ws[0].frameGeometry().left() + ws[0].width(),
+       "第二窗格在首位窗格右边")
+    ok(ws[1].frameGeometry().top() == ws[0].frameGeometry().top(),
+       "向右排开顶边对齐")
+
+    # ---- O2 松手重叠 → 自动归位到首位窗格右边 ----
+    mover = ws[2]
+    first_r = ws[0].frameGeometry()
+    # 直接摆到首位窗格身上（完全重叠），模拟松手落位
+    mover.move(first_r.left() + 5, first_r.top() + 5)
+    APP.processEvents()
+    ok(mgr._overlaps_others(mover), "落位与首位窗格重叠")
+    mgr.check_overlap_after_drop(mover)
+    ok(not mgr._overlaps_others(mover), "归位后不再重叠")
+    ok(mover.frameGeometry().left() >= first_r.left() + first_r.width(),
+       "归位到首位窗格右边（含顺延空位）")
+    ok(mover.frameGeometry().top() == first_r.top(), "归位顶边对齐首位窗格")
+
+    # ---- O3 拖动松手全链路：无磁吸目标的重叠落位自动归位 ----
+    # 部分重叠（压住首位窗格右半、上下错开）：四边候选距离均 ≥20px 不触发
+    # 磁吸预览 → 松手无目标 → 重叠检测归位。完全重叠会命中距离 0 的贴合
+    # 候选走正常合并（既有磁吸语义），不属于本用例口径。
+    first = ws[0]
+    for w in ws[1:]:
+        w.move(3000, 3000 + ws.index(w) * 200)
+    APP.processEvents()
+    m2 = ws[3]
+    fr = first.frameGeometry()
+    target = QPoint(fr.left() + fr.width() - 40, fr.top() + 40)
+    delta = target - m2.frameGeometry().topLeft()
+    mgr.simulate_drag(m2, delta.x(), delta.y())
+    t0 = _t.perf_counter()
+    while m2._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    APP.processEvents()
+    ok(not mgr._overlaps_others(m2), "拖动重叠松手 → 归位后无重叠")
+    ok(m2.frameGeometry().left() >= fr.left() + fr.width(),
+       "拖动归位到首位窗格右边")
+
+    # ---- O4 重启恢复组：group_id 重建组与约束 ----
+    hub2 = FakeHub()
+    mgr2 = mu.MonitorWindowManager(hub2, **inj)
+    wa = mu.MonitorUnitWidget("cpu.load", hub2, manager=mgr2, **w_inj)
+    wb = mu.MonitorUnitWidget("cpu.temp", hub2, manager=mgr2, **w_inj)
+    wc = mu.MonitorUnitWidget("mem.load", hub2, manager=mgr2, **w_inj)
+    mgr2.register_widget("cpu.load", wa, ["cpu.load"])
+    mgr2.register_widget("cpu.temp", wb, ["cpu.temp"])
+    mgr2.register_widget("mem.load", wc, ["mem.load"])
+    # 布局记忆：wa/wb 同组水平贴合，wc 独立
+    wa.move(100, 100)
+    wb.move(100 + wa.width(), 100)
+    wc.move(100, 100 + wa.height() + 40)
+    for w in (wa, wb, wc):
+        w.show()
+    APP.processEvents()
+    layout_mem = {
+        "cpu.load": {"x": 100, "y": 100, "group_id": "g7"},
+        "cpu.temp": {"x": 100 + wa.width(), "y": 100, "group_id": "g7"},
+        "mem.load": {"x": 100, "y": 100 + wa.height() + 40, "group_id": None},
+    }
+    mgr2.restore_groups(layout_mem)
+    ok(wa._group is not None and wa._group is wb._group, "重启恢复：wa/wb 同组")
+    ok(wa._group.group_id == "g7", "重启恢复：组 id 来自布局记忆")
+    ok(wc._group is None, "重启恢复：独立窗不入组")
+    ok(wa._is_snapped and wb._is_snapped, "重启恢复：吸附态复位")
+    ok(any(t is wb for t, e in wa._snap_constraints), "重启恢复：贴合约束重建")
+    # 整组移动行为一致：拖 wa → wb 同步偏移
+    p0 = wb.pos()
+    start = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wa, QEvent.Type.MouseButtonPress, start)
+    _send(wa, QEvent.Type.MouseMove, start + QPoint(40, 0))
+    ok(wb.pos() == p0 + QPoint(40, 0), "重启恢复后整组刚性移动")
+    _send(wa, QEvent.Type.MouseButtonRelease, start + QPoint(40, 0))
+    t0 = _t.perf_counter()
+    while wa._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+
+    # ---- O5 恢复后重叠校验：记忆位冲突 → 归位首位窗格右边 ----
+    hub3 = FakeHub()
+    mgr3 = mu.MonitorWindowManager(hub3, **inj)
+    wx = mu.MonitorUnitWidget("cpu.load", hub3, manager=mgr3, **w_inj)
+    wy = mu.MonitorUnitWidget("mem.load", hub3, manager=mgr3, **w_inj)
+    mgr3.register_widget("cpu.load", wx, ["cpu.load"])
+    mgr3.register_widget("mem.load", wy, ["mem.load"])
+    wx.move(200, 200)
+    wy.move(205, 205)   # 记忆位故意重叠
+    wx.show()
+    wy.show()
+    APP.processEvents()
+    mgr3.restore_groups({"cpu.load": {"x": 200, "y": 200, "group_id": None},
+                         "mem.load": {"x": 205, "y": 205, "group_id": None}})
+    ok(not mgr3._rects_overlap(wx.frameGeometry(), wy.frameGeometry()),
+       "恢复后重叠校验 → 冲突窗格归位不重叠")
+
+    # ---- O6 源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok("def place_for_show" in src and "def _relocate_right_of_first" in src,
+       "防重叠摆放与归位方法在位")
+    ok("def restore_groups" in src and "def check_overlap_after_drop" in src,
+       "组恢复与落位重叠检测在位")
+    main_src = open(os.path.join(root, "main.py"), encoding="utf-8").read()
+    ok("mgr.restore_groups(layout)" in main_src, "main 首开接线组恢复")
+    for w in ws + [wa, wb, wc, wx, wy]:
+        w.close()
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -2470,5 +2615,6 @@ if __name__ == "__main__":
     section_l()
     section_m()
     section_n()
+    section_o()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

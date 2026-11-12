@@ -4949,6 +4949,8 @@ def _monitor_sync_windows(cfg: dict) -> None:
             if key not in want and w.isVisible():
                 w.hide()
         if first_open:
+            # V16.2：重启恢复磁吸组（布局记忆 group_id 重建组与约束）
+            mgr.restore_groups(layout)
             _MONITOR_HUB.start()
             _monitor_backfill_history()
         if want:
