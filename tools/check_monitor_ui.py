@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""monitor_ui 阶段 0+1+2 自检（离屏，无真实硬件/侧车依赖）。
+"""monitor_ui 阶段 0+1+2+3 自检（离屏，无真实硬件/侧车依赖）。
 
-六节：
+七节：
   A. 契约与骨架——注入接口、UnitRow、配置块默认、空壳冒烟
   B. 假 hub——字段与真实 Metric 完全一致、五态/序列可脚本化注入、
      snapshot 计数、list_disks 传帧复用、与真实 hub 输出交叉验证
@@ -10,6 +10,7 @@
   D. 环境看守——offscreen 平台、QApplication 先于字体加载
   E. 阶段 1 渲染与布局——窗口标志、三列内容驱动、缩放、光晕像素、动态行高
   F. 阶段 2 数据可视化——五态、阈值插值、呼吸相位、history、一帧一映射
+  G. 阶段 3 磁吸——拖动→预览→松手落位→入组、移动中不吸附、幽灵穿透、屏幕边
 
 跑法：  python tools/check_monitor_ui.py
 退出码： 0 全过 / 1 有失败
@@ -25,7 +26,7 @@ import time  # noqa: E402
 from collections import deque  # noqa: E402
 from dataclasses import fields  # noqa: E402
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QPointF, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from PySide6.QtGui import QFontDatabase, QImage  # noqa: E402
 
@@ -237,14 +238,11 @@ def section_a():
        "注入回调可调用")
 
     # 未实现方法一律 NotImplementedError（阶段边界看守；
-    # update_layout/set_rows 阶段 1、update_data/tick 阶段 2 已实现，
-    # 改由 E/F 节真实验证）
+    # update_layout/set_rows 阶段 1、update_data/tick 阶段 2、
+    # snap_groups/simulate_drag 阶段 3 已实现，改由 E/F/G 节真实验证）
     raises_not_implemented(
         lambda: w.simulate_data_update("cpu.load", 1.0, mh.STATUS_OK),
         "simulate_data_update 未实现")
-    raises_not_implemented(lambda: mgr.snap_groups(), "snap_groups 未实现")
-    raises_not_implemented(lambda: mgr.simulate_drag(w, 10, 10),
-                           "simulate_drag 未实现")
 
     # 阶段 0 不碰 hub 生命周期（start/stop 归 main.py 阶段 5）
     ok(hub.start_calls == 0 and hub.stop_calls == 0,
@@ -811,6 +809,201 @@ def section_f():
     w2.close()
 
 
+# ---------------------------------------------------------------------------
+# G. 阶段 3：磁吸预览与松手吸附
+# ---------------------------------------------------------------------------
+def _mouse_ev(etype, gpos):
+    from PySide6.QtGui import QMouseEvent
+    return QMouseEvent(etype, QPointF(gpos), QPointF(gpos),
+                       Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier)
+
+
+def _send(w, etype, gpos):
+    APP.sendEvent(w, _mouse_ev(etype, gpos))
+
+
+def _two_widgets(mgr, hub):
+    """建两个注册到同一 manager 的单元窗（离屏显式摆放）。"""
+    inj = make_injections()
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+    wa = mu.MonitorUnitWidget("cpu", hub, manager=mgr, **w_inj)
+    wb = mu.MonitorUnitWidget("mem", hub, manager=mgr, **w_inj)
+    mgr.register_widget("cpu", wa, ["cpu.load"])
+    mgr.register_widget("mem", wb, ["mem.load"])
+    return wa, wb
+
+
+def section_g():
+    print("[G] 阶段 3 磁吸预览与松手吸附")
+    from PySide6.QtCore import QEvent, QPoint, QRect
+    from PySide6.QtGui import QMouseEvent  # noqa: F401
+
+    hub = FakeHub()
+    inj = make_injections()
+    mgr = mu.MonitorWindowManager(hub, **inj)
+    wa, wb = _two_widgets(mgr, hub)
+    # 显式摆放：A 在 (100,100)，B 在 A 右侧远处
+    wa.move(100, 100)
+    wb.move(600, 100)
+    wa.show()
+    wb.show()
+    APP.processEvents()
+    wa_w = wa.width()
+    wa_h = wa.height()
+
+    # ---- G1 SnapGroup 基本行为 ----
+    g = mgr.new_group()
+    ok(g.group_id and g.members == [], "新组空成员")
+    g.add(wa)
+    ok(wa._group is g and wa in g.members, "入组指向组")
+    g.add(wa)
+    ok(len(g.members) == 1, "重复入组不叠加")
+    br = g.bounding_rect()
+    ok(br == wa.frameGeometry(), "单成员包围盒=自身")
+    g.remove(wa)
+    ok(wa._group is None and wa not in g.members, "出组清指向")
+
+    # ---- G2 拖动阈值：位移<4px 不成立 ----
+    start = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wa, QEvent.Type.MouseButtonPress, start)
+    _send(wa, QEvent.Type.MouseMove, start + QPoint(2, 0))
+    ok(not wa._drag_started, "位移 2px<4 不成立拖动")
+    ok(wa.pos() == QPoint(100, 100), "未拖动位置不变")
+    _send(wa, QEvent.Type.MouseButtonRelease, start + QPoint(2, 0))
+
+    # ---- G3 移动中预览出现，但位置不被吸附改写 ----
+    # 把 B 摆到 A 右边附近（A 右缘 + 15px 间隙），拖 A 向右靠近 B
+    wb.move(100 + wa_w + 15, 100)
+    APP.processEvents()
+    start = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wa, QEvent.Type.MouseButtonPress, start)
+    # 拖动 A 使其右缘距 B 左缘 < 20px：A 移到 x=100+wa_w+15-wa_w-5 = 110? 直接算
+    # 目标：A.right 与 B.left 间隙 10px → A.x = B.x - wa_w - 10
+    target_x = wb.x() - wa_w - 10
+    move_to = QPoint(target_x + 5, 105)   # grab 偏移 5,5
+    _send(wa, QEvent.Type.MouseMove, move_to)
+    ok(wa._drag_started, "位移超阈值拖动成立")
+    ok(wa._preview_target is wb, f"预览目标=B（{wa._preview_target}）")
+    ok(wa._preview_edge == "right", f"预览贴合边=right（{wa._preview_edge}）")
+    ok(not wa._preview_strong, "间隙 10px 属弱档（10~20px，非 <10）")
+    # 关键：移动中位置=跟手位置，绝不被吸附改写
+    ok(wa.pos() == QPoint(target_x, 100),
+       f"移动中位置不被吸附改写（{wa.pos()} vs {(target_x, 100)}）")
+    ok(mgr._ghost.isVisible(), "幽灵轮廓可见")
+    ok(mgr._ghost.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents),
+       "幽灵窗鼠标穿透")
+    ok(mgr._ghost.geometry() == wa._preview_rect, "幽灵窗画在贴合位")
+
+    # ---- G4 松手吸附：280ms 动画落位入组 ----
+    _send(wa, QEvent.Type.MouseButtonRelease, move_to)
+    ok(wa._snap_animating, "松手启动吸附动画")
+    ok(not mgr._ghost.isVisible(), "松手即藏幽灵")
+    # 动画期间禁止再次拖动打断
+    _send(wa, QEvent.Type.MouseButtonPress, move_to)
+    ok(not wa._dragging, "动画期间按下不启动拖动")
+    _send(wa, QEvent.Type.MouseButtonRelease, move_to)
+    # 推进动画到结束（真实 QTimer 相位法，processEvents 驱动）
+    import time as _t
+    t0 = _t.perf_counter()
+    while wa._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    ok(not wa._snap_animating, "动画在 280ms 量级结束")
+    # 落位：A 右缘贴 B 左缘（left+width 口径，无 1px 缝）
+    a_right = wa.frameGeometry().left() + wa.frameGeometry().width()
+    ok(a_right == wb.frameGeometry().left(),
+       f"落位 A 右缘贴 B 左缘（{a_right} vs {wb.frameGeometry().left()}）")
+    ok(wa._is_snapped and wb._is_snapped, "落位双方吸附态")
+    ok(wa._group is not None and wa._group is wb._group, "落位同组")
+    ok(wa in wa._group.members and wb in wa._group.members, "组成员齐全")
+    ok(wa._contact_edges == ["right"], f"A 接触边 right（{wa._contact_edges}）")
+    ok(wb._contact_edges == ["left"], f"B 接触边 left（{wb._contact_edges}）")
+    ok(wa._preview_target is None and wa._preview_rect is None, "落位清预览")
+
+    # ---- G5 吸附态关光晕（像素）----
+    img_snapped = _grab(wa)
+    halo = round(mu.HALO_PX * 1.0)
+    # 吸附态本体外围光晕带 alpha 应很低（光晕关闭）
+    a_band = _alpha(img_snapped, wa.width() // 2, max(1, halo // 2))
+    ok(a_band < 40, f"吸附态光晕关闭（带 alpha={a_band}）")
+
+    # ---- G6 组内拖动同步偏移 ----
+    grp = wa._group
+    wa_pos_before = wa.pos()
+    wb_pos_before = wb.pos()
+    start = wa.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wa, QEvent.Type.MouseButtonPress, start)
+    _send(wa, QEvent.Type.MouseMove, start + QPoint(40, 30))
+    ok(wa.pos() == wa_pos_before + QPoint(40, 30), "组内拖动 A 偏移")
+    ok(wb.pos() == wb_pos_before + QPoint(40, 30), "组内拖动 B 同步偏移")
+    _send(wa, QEvent.Type.MouseButtonRelease, start + QPoint(40, 30))
+
+    # ---- G7 屏幕边吸附语义（贴边记 screen_edge，不入窗间组）----
+    wc = mu.MonitorUnitWidget("net", hub, manager=mgr,
+                              **{k: v for k, v in inj.items() if k != "config_io"})
+    mgr.register_widget("net", wc, ["net.rx"])
+    # 摆到屏幕左上角附近，向左拖到贴左边
+    scr = APP.primaryScreen().availableGeometry()
+    wc.move(scr.left() + 12, scr.top() + 200)
+    wc.show()
+    APP.processEvents()
+    start = wc.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wc, QEvent.Type.MouseButtonPress, start)
+    _send(wc, QEvent.Type.MouseMove, QPoint(scr.left() + 5 + 3, scr.top() + 205))
+    ok(wc._preview_target == "screen", f"屏幕边预览目标=screen（{wc._preview_target}）")
+    ok(wc._preview_edge == "left", f"屏幕边=left（{wc._preview_edge}）")
+    _send(wc, QEvent.Type.MouseButtonRelease, QPoint(scr.left() + 8, scr.top() + 205))
+    t0 = _t.perf_counter()
+    while wc._snap_animating and _t.perf_counter() - t0 < 2.0:
+        APP.processEvents()
+        _t.sleep(0.01)
+    ok(wc._screen_edge == "left", f"屏幕边吸附记 screen_edge（{wc._screen_edge}）")
+    ok(wc._group is None, "屏幕边吸附不入窗间组")
+    ok(wc._is_snapped, "屏幕边吸附态")
+    ok(wc.frameGeometry().left() == scr.left(), "贴屏幕左缘")
+    wc.close()
+
+    # ---- G8 无预览目标松手 → 原地停留 ----
+    wd = mu.MonitorUnitWidget("gpu_d", hub, manager=mgr,
+                              **{k: v for k, v in inj.items() if k != "config_io"})
+    mgr.register_widget("gpu_d", wd, ["gpu_d.load"])
+    wd.move(2000, 2000)   # 远离其它窗与屏幕边
+    wd.show()
+    APP.processEvents()
+    pos_before = wd.pos()
+    start = wd.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(wd, QEvent.Type.MouseButtonPress, start)
+    _send(wd, QEvent.Type.MouseMove, start + QPoint(30, 20))
+    ok(wd._preview_target is None, "远处无预览目标")
+    _send(wd, QEvent.Type.MouseButtonRelease, start + QPoint(30, 20))
+    ok(not wd._snap_animating, "无目标不启动吸附动画")
+    ok(wd.pos() == pos_before + QPoint(30, 20), "无目标原地停留（跟手位）")
+    ok(not wd._is_snapped, "无目标不进吸附态")
+    wd.close()
+
+    # ---- G9 源码看守（改坏会红）----
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    # 只查真实代码调用（剔除注释行），文档里「不用 primaryScreen」说明不误伤
+    code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    code_only = "\n".join(code_lines)
+    ok("screenAt" in code_only and "primaryScreen(" not in code_only,
+       "屏幕判定用 screenAt 非 primaryScreen（坑 58）")
+    ok("SNAP_ANIM_MS" in src and "3 - 2 * t" in src,
+       "松手 280ms 缓入缓出（smoothstep 相位法）")
+    ok("WA_TransparentForMouseEvents" in src, "幽灵窗鼠标穿透属性")
+    ok("class SnapGroup" in src and "class GhostOverlay" in src,
+       "SnapGroup 普通类 + 独立幽灵 overlay")
+    ok("_clear_preview" in src and "hide_ghost" in src,
+       "预览清理路径在位")
+    ok("DRAG_THRESHOLD_PX" in src and "manhattanLength" in src,
+       "拖动判定阈值 4px（行为参数不乘缩放）")
+
+    wa.close()
+    wb.close()
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -818,5 +1011,6 @@ if __name__ == "__main__":
     section_d()
     section_e()
     section_f()
+    section_g()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""资源监视 UI —— 阶段 2：契约骨架 + 单元渲染 + 数据可视化层。
+"""资源监视 UI —— 阶段 3：契约骨架 + 单元渲染 + 数据可视化 + 磁吸吸附。
 
 形态（已拍板）：N 个磁吸迷你窗，每指标单元一个顶层 QWidget。
 本模块禁止 import main（main 反向 import 本模块，会循环依赖）。
@@ -10,7 +10,8 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
   - 阶段 0：UnitRow 行模型、空壳契约、monitor 配置块默认结构
   - 阶段 1：MonitorUnitWidget 三列内容驱动渲染 + 边缘虚化光晕 + 动态行高
   - 阶段 2：五态驱动视觉 + 语义色阈值插值 + 高负载呼吸 + sparkline + 拉取节奏
-  - 阶段 3~5：磁吸 / 解绑收口 / 集成接线（方法留 NotImplementedError）
+  - 阶段 3：SnapGroup + 拖动跟手 + 幽灵轮廓预览 + 松手 280ms 缓入缓出吸附
+  - 阶段 4~5：解绑收口 / 集成接线（方法留 NotImplementedError）
 
 后端契约（monitor_hub.py，只读消费）：
   - 每 tick 只调一次 snapshot()，全单元共享同一帧；禁止 get(key)
@@ -25,8 +26,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QElapsedTimer, QPoint, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QPainter,
+                           QPainterPath, QPen)
 from PySide6.QtWidgets import QWidget
 
 import monitor_hub as mh
@@ -84,6 +86,93 @@ STATUS_TEXT = {
 SEM_GREEN = "#3FB950"
 SEM_YELLOW = "#D29922"
 SEM_RED = "#F85149"
+
+# ---------------------------------------------------------------------------
+# 阶段 3 磁吸行为参数（行为参数，不乘缩放）
+# ---------------------------------------------------------------------------
+DRAG_THRESHOLD_PX = 4     # 拖动判定阈值
+SNAP_PREVIEW_PX = 20      # 移动中预览阈值（<20px 出幽灵轮廓）
+SNAP_STRONG_PX = 10       # 强预览档（<10px 视觉更强）
+SNAP_ANIM_MS = 280        # 松手吸附缓入缓出时长
+FUSE_DASH_PX = 1          # 融合虚线线宽（乘缩放）
+
+
+def fuse_color(theme: dict) -> QColor:
+    """融合虚线/幽灵轮廓颜色随系统深浅色（浅色系统用深色 20%）。"""
+    if theme.get("system_dark_mode"):
+        return QColor(235, 238, 245, int(255 * 0.5))
+    return QColor(30, 32, 40, int(255 * 0.2))
+
+
+class SnapGroup:
+    """吸附组：普通 Python 类（members 列表 + group_id）。
+
+    不用 QObject 父子窗口（避免 Z 序问题）；由 MonitorWindowManager 统一持有。
+    """
+
+    def __init__(self, group_id: str):
+        self.group_id = group_id
+        self.members: list = []
+
+    def add(self, widget) -> None:
+        if widget not in self.members:
+            self.members.append(widget)
+        widget._group = self
+
+    def remove(self, widget) -> None:
+        if widget in self.members:
+            self.members.remove(widget)
+        if widget._group is self:
+            widget._group = None
+
+    def bounding_rect(self) -> QRect:
+        """组包围盒（成员 frameGeometry 并集）。"""
+        rect = QRect()
+        for w in self.members:
+            rect = rect.united(w.frameGeometry())
+        return rect
+
+
+class GhostOverlay(QWidget):
+    """幽灵轮廓：独立透明顶层窗，画目标贴合位置的虚线框。
+
+    Frameless|Tool|透明、WA_TransparentForMouseEvents 鼠标穿透。
+    顶层窗 paintEvent 画不出自身边界外，故用独立 overlay 而非在单元窗上画别处。
+    """
+
+    def __init__(self, theme: dict, scale_getter: ScaleGetter):
+        super().__init__()
+        self.theme = theme
+        self.scale_getter = scale_getter
+        self._strong = False
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+    def show_at(self, rect: QRect, strong: bool) -> None:
+        self._strong = strong
+        self.setGeometry(rect)
+        self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = fuse_color(self.theme)
+        # 两档视觉强弱：<10px 强（更实），10~20px 弱（更虚）
+        alpha = 0.85 if self._strong else 0.45
+        c.setAlphaF(alpha)
+        pen = QPen(c, max(1.0, FUSE_DASH_PX * self.scale_getter()))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        p.drawRoundedRect(r, CORNER_PX * self.scale_getter(),
+                          CORNER_PX * self.scale_getter())
+        p.end()
 
 
 def default_thresholds(key: str, unit: str) -> list:
@@ -256,12 +345,31 @@ class MonitorUnitWidget(QWidget):
         self.topmost_getter = topmost_getter
         self.log_fn = log_fn
         self.manager = manager
-        # 状态机占位（阶段 3/4 消费）
+        # 状态机（阶段 3 磁吸 / 阶段 4 解绑消费）
         self._group = None            # 所属 SnapGroup；None=独立
         self._is_snapped = False      # 吸附态（关光晕、画融合虚线）
-        self._preview_target = None   # 移动中预览目标（窗/屏幕边）
-        self._preview_edge = None     # 预览贴合边
+        self._preview_target = None   # 移动中预览目标（widget 或 "screen"）
+        self._preview_edge = None     # 预览贴合边（left/right/top/bottom）
+        self._preview_rect = None     # 预览贴合位（QRect，幽灵轮廓画此处）
+        self._preview_strong = False  # <10px 强预览档
+        self._screen_edge = None      # 屏幕边吸附记录（不入窗间组）
+        self._contact_edges: list = []  # 吸附接触边（画融合虚线）
         self._rows: list[UnitRow] = []
+        # 拖动状态（阶段 3）
+        self._dragging = False
+        self._drag_started = False    # 位移超阈值才成立
+        self._grab_offset = QPoint()
+        self._press_global = QPoint()
+        self._drag_members: list = []  # 组内同步偏移的成员
+        # 松手吸附动画（QTimer 相位法，280ms 缓入缓出）
+        self._snap_anim_timer = QTimer(self)
+        self._snap_anim_timer.setInterval(16)
+        self._snap_anim_timer.timeout.connect(self._on_snap_anim)
+        self._snap_clock = QElapsedTimer()
+        self._snap_from = QPoint()
+        self._snap_to = QPoint()
+        self._snap_animating = False
+        self._snap_pending = None     # 落位后入组目标（widget 或 "screen"）
         # 布局几何缓存（update_layout 重算，paintEvent 消费；缩放每次现查）
         self._col_w = (0, 0, 0)       # A 名称 / B 数值 / C 单位 列宽
         self._row_h = 0               # 单行文本高
@@ -396,6 +504,8 @@ class MonitorUnitWidget(QWidget):
             p.setBrush(bc)
             p.drawRoundedRect(body, corner, corner)
             self._paint_rows(p, body, s)
+            if self._is_snapped:
+                self._paint_fuse(p, s)
             p.end()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.paintEvent", e)
@@ -608,6 +718,237 @@ class MonitorUnitWidget(QWidget):
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.showEvent", e)
 
+    # ---- 阶段 3：拖动跟手 + 磁吸预览 + 松手吸附 ----
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # 动画期间禁止再次拖动打断产生残留
+                if self._snap_animating:
+                    return
+                self._press_global = event.globalPosition().toPoint()
+                self._grab_offset = self._press_global - self.frameGeometry().topLeft()
+                self._dragging = True
+                self._drag_started = False
+                # 组内成员拖动时同步偏移全组
+                if self._group is not None:
+                    self._drag_members = list(self._group.members)
+                else:
+                    self._drag_members = [self]
+                event.accept()
+            else:
+                super().mousePressEvent(event)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.mousePressEvent", e)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        try:
+            if not self._dragging:
+                super().mouseMoveEvent(event)
+                return
+            gp = event.globalPosition().toPoint()
+            if not self._drag_started:
+                if (gp - self._press_global).manhattanLength() < DRAG_THRESHOLD_PX:
+                    return
+                self._drag_started = True
+            # 直接 move 跟手（无弹簧）；组内同步偏移
+            new_top = gp - self._grab_offset
+            delta = new_top - self.frameGeometry().topLeft()
+            for w in self._drag_members:
+                w.move(w.pos() + delta)
+            # 移动中检测预览（绝不改变位置去吸附）
+            self._update_preview(gp)
+            event.accept()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.mouseMoveEvent", e)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        try:
+            if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+                self._dragging = False
+                if self._drag_started:
+                    self._finish_drag()
+                self._drag_started = False
+                event.accept()
+            else:
+                super().mouseReleaseEvent(event)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.mouseReleaseEvent", e)
+
+    def _update_preview(self, cursor_global: QPoint) -> None:
+        """移动中检测：对其它独立窗/组包围盒四边与屏幕可用区四边算最小边距。
+
+        <20px 记录预览目标/边/贴合位 + 画幽灵轮廓；≥20px 清预览。
+        移动中绝不改变位置去吸附。
+        """
+        my_rect = self.frameGeometry()
+        best = None   # (dist, target, edge, snap_rect)
+        # 其它独立窗 / 组（排除自身与自身所在组）
+        for other in self.manager._widgets.values():
+            if other is self or not other.isVisible():
+                continue
+            if self._group is not None and other._group is self._group:
+                continue
+            target_rect = (other._group.bounding_rect()
+                           if other._group is not None else other.frameGeometry())
+            cand = self._edge_candidates(my_rect, target_rect)
+            for dist, edge, sr in cand:
+                if best is None or dist < best[0]:
+                    best = (dist, other, edge, sr)
+        # 屏幕可用区四边（screenAt 光标，不用 primaryScreen，坑 58）
+        screen = QGuiApplication.screenAt(cursor_global)
+        if screen is not None:
+            avail = screen.availableGeometry()
+            for dist, edge, sr in self._screen_candidates(my_rect, avail):
+                if best is None or dist < best[0]:
+                    best = (dist, "screen", edge, sr)
+        if best is not None and best[0] < SNAP_PREVIEW_PX:
+            dist, target, edge, sr = best
+            self._preview_target = target
+            self._preview_edge = edge
+            self._preview_rect = sr
+            self._preview_strong = dist < SNAP_STRONG_PX
+            self.manager.show_ghost(sr, self._preview_strong)
+        else:
+            self._clear_preview()
+
+    def _edge_candidates(self, my: QRect, target: QRect):
+        """窗间四边贴合候选：(边距, 贴合边, 贴合位 QRect)。
+
+        水平方向需垂直投影有重叠，垂直方向需水平投影有重叠，避免斜角误吸。
+        """
+        out = []
+        v_overlap = my.top() < target.bottom() and my.bottom() > target.top()
+        h_overlap = my.left() < target.right() and my.right() > target.left()
+        # 贴合位用 left()+width() 口径（QRect.right()=left+width-1，避免 1px 缝）
+        if v_overlap:
+            # 我右边贴目标左边：my.left+my.width == target.left
+            d = abs((my.left() + my.width()) - target.left())
+            sr = QRect(target.left() - my.width(), my.top(), my.width(), my.height())
+            out.append((d, "right", sr))
+            # 我左边贴目标右边：my.left == target.left+target.width
+            d = abs(my.left() - (target.left() + target.width()))
+            sr = QRect(target.left() + target.width(), my.top(),
+                       my.width(), my.height())
+            out.append((d, "left", sr))
+        if h_overlap:
+            # 我下边贴目标上边：my.top+my.height == target.top
+            d = abs((my.top() + my.height()) - target.top())
+            sr = QRect(my.left(), target.top() - my.height(), my.width(), my.height())
+            out.append((d, "bottom", sr))
+            # 我上边贴目标下边：my.top == target.top+target.height
+            d = abs(my.top() - (target.top() + target.height()))
+            sr = QRect(my.left(), target.top() + target.height(),
+                       my.width(), my.height())
+            out.append((d, "top", sr))
+        return out
+
+    def _screen_candidates(self, my: QRect, avail: QRect):
+        """屏幕可用区四边贴边候选（贴边停留，记 screen_edge，不入窗间组）。"""
+        return [
+            (abs(my.left() - avail.left()), "left",
+             QRect(avail.left(), my.top(), my.width(), my.height())),
+            (abs((my.left() + my.width()) - (avail.left() + avail.width())), "right",
+             QRect(avail.left() + avail.width() - my.width(), my.top(),
+                   my.width(), my.height())),
+            (abs(my.top() - avail.top()), "top",
+             QRect(my.left(), avail.top(), my.width(), my.height())),
+            (abs((my.top() + my.height()) - (avail.top() + avail.height())), "bottom",
+             QRect(my.left(), avail.top() + avail.height() - my.height(),
+                   my.width(), my.height())),
+        ]
+
+    def _clear_preview(self) -> None:
+        self._preview_target = None
+        self._preview_edge = None
+        self._preview_rect = None
+        self._preview_strong = False
+        self.manager.hide_ghost()
+
+    def _finish_drag(self) -> None:
+        """松手：有预览目标 → 280ms 缓入缓出滑到贴合位；无目标 → 原地停留。"""
+        if self._preview_target is not None and self._preview_rect is not None:
+            self._snap_from = self.pos()
+            self._snap_to = self._preview_rect.topLeft()
+            self._snap_pending = self._preview_target
+            self._snap_edge_pending = self._preview_edge
+            self._snap_animating = True
+            self._snap_clock.start()
+            self._snap_anim_timer.start()
+            self.manager.hide_ghost()
+        else:
+            self._clear_preview()
+
+    def _on_snap_anim(self) -> None:
+        try:
+            t = min(1.0, self._snap_clock.elapsed() / SNAP_ANIM_MS)
+            # 缓入缓出（smoothstep）：两端慢、中段快
+            e = t * t * (3 - 2 * t)
+            x = round(self._snap_from.x() + (self._snap_to.x() - self._snap_from.x()) * e)
+            y = round(self._snap_from.y() + (self._snap_to.y() - self._snap_from.y()) * e)
+            self.move(x, y)
+            if t >= 1.0:
+                self._snap_anim_timer.stop()
+                self._snap_animating = False
+                self.move(self._snap_to)
+                self._land_snap()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui._on_snap_anim", e)
+
+    def _land_snap(self) -> None:
+        """落位后加入目标组 / 贴屏幕边，_is_snapped=True、关光晕、画融合虚线。"""
+        target = self._snap_pending
+        edge = getattr(self, "_snap_edge_pending", None)
+        self._snap_pending = None
+        self._contact_edges = [edge] if edge else []
+        if target == "screen":
+            # 屏幕边吸附 = 贴边停留并记 screen_edge，不入窗间组
+            self._screen_edge = edge
+            self._is_snapped = True
+        elif isinstance(target, MonitorUnitWidget):
+            self._screen_edge = None
+            grp = target._group
+            if grp is None:
+                grp = self.manager.new_group()
+                grp.add(target)
+                target._is_snapped = True
+                target._contact_edges = [self._opposite_edge(edge)]
+            grp.add(self)
+            self._is_snapped = True
+        self._clear_preview()
+        self.update()
+        if target is not None and isinstance(target, MonitorUnitWidget):
+            target.update()
+
+    @staticmethod
+    def _opposite_edge(edge: Optional[str]) -> Optional[str]:
+        return {"left": "right", "right": "left",
+                "top": "bottom", "bottom": "top"}.get(edge)
+
+    def _paint_fuse(self, p: QPainter, s: float) -> None:
+        """吸附态接触边画融合虚线（DashLine 1px×缩放，颜色随主题）。"""
+        if not self._contact_edges:
+            return
+        c = fuse_color(self.theme)
+        pen = QPen(c, max(1.0, FUSE_DASH_PX * s))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        r = QRectF(self.rect())
+        halo = round(HALO_PX * s)
+        body = r.adjusted(halo, halo, -halo, -halo)
+        for edge in self._contact_edges:
+            if edge == "left":
+                p.drawLine(QPointF(body.left(), body.top()),
+                           QPointF(body.left(), body.bottom()))
+            elif edge == "right":
+                p.drawLine(QPointF(body.right(), body.top()),
+                           QPointF(body.right(), body.bottom()))
+            elif edge == "top":
+                p.drawLine(QPointF(body.left(), body.top()),
+                           QPointF(body.right(), body.top()))
+            elif edge == "bottom":
+                p.drawLine(QPointF(body.left(), body.bottom()),
+                           QPointF(body.right(), body.bottom()))
+
     # ---- 阶段 4：测试钩子（保留为公开方法）----
     def simulate_data_update(self, key: str, value, status: str) -> None:
         raise NotImplementedError("阶段 4：无后端演示钩子")
@@ -643,6 +984,9 @@ class MonitorWindowManager:
         self._timer = QTimer()        # 拉取 QTimer（阶段 2）
         self._timer.setInterval(self._refresh_ms)
         self._timer.timeout.connect(self.tick)
+        # 阶段 3：幽灵轮廓 overlay（独立透明穿透顶层窗）
+        self._ghost = GhostOverlay(theme, scale_getter)
+        self._group_seq = 0
 
     # ---- 阶段 2：单元窗注册与拉取节奏 ----
     def register_widget(self, unit_key: str, widget, row_keys: list,
@@ -724,9 +1068,41 @@ class MonitorWindowManager:
             w.set_rows(rows)
 
     # ---- 阶段 3：磁吸 ----
+    def new_group(self) -> SnapGroup:
+        self._group_seq += 1
+        grp = SnapGroup(f"g{self._group_seq}")
+        self._groups.append(grp)
+        return grp
+
     def snap_groups(self) -> list:
-        raise NotImplementedError("阶段 3：吸附组管理")
+        return list(self._groups)
+
+    def show_ghost(self, rect: QRect, strong: bool) -> None:
+        try:
+            self._ghost.show_at(rect, strong)
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.show_ghost", e)
+
+    def hide_ghost(self) -> None:
+        try:
+            self._ghost.hide()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.hide_ghost", e)
 
     # ---- 阶段 4：测试钩子（保留为公开方法）----
     def simulate_drag(self, widget, dx: float, dy: float) -> None:
-        raise NotImplementedError("阶段 4：离屏拖动演示钩子")
+        """离屏拖动演示钩子：sendEvent 驱动 按下→移动→松手 全链路。"""
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent
+        start = widget.frameGeometry().topLeft() + QPoint(5, 5)
+        end = start + QPoint(int(dx), int(dy))
+
+        def ev(etype, gpos):
+            return QMouseEvent(etype, QPointF(gpos), QPointF(gpos),
+                               Qt.MouseButton.LeftButton,
+                               Qt.MouseButton.LeftButton,
+                               Qt.KeyboardModifier.NoModifier)
+        from PySide6.QtWidgets import QApplication as _QApp
+        _QApp.sendEvent(widget, ev(QEvent.Type.MouseButtonPress, start))
+        _QApp.sendEvent(widget, ev(QEvent.Type.MouseMove, end))
+        _QApp.sendEvent(widget, ev(QEvent.Type.MouseButtonRelease, end))
