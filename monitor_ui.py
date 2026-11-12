@@ -1675,6 +1675,12 @@ class MonitorWindowManager:
                         return
                 except (TypeError, ValueError):
                     pass
+            elif widget.pos() != QPoint(0, 0):
+                # 调用方已按布局记忆 move 过（_monitor_restore_layout 先例）：
+                # 尊重现位，仅冲突时归位，不覆盖记忆坐标
+                if self._overlaps_others(widget):
+                    self._relocate_right_of_first(widget)
+                return
             first = self.first_widget()
             if first is None or first is widget:
                 # 首位窗格：按注入 place_fn 定位（球体旁空间大侧）
