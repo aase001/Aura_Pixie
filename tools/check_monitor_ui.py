@@ -118,8 +118,7 @@ class FakeHub:
             return d[1], d[2], d[3]
         if parts[0] == "disk" and len(parts) == 3:
             label = "硬盘温度" if parts[2] == "temp" else "硬盘使用率"
-            return f"{label}·盘{int(parts[1]) + 1}", "disk", (
-                "℃" if parts[2] == "temp" else "%")
+            return label, "disk", ("℃" if parts[2] == "temp" else "%")
         if parts[0] == "fan" and len(parts) == 3:
             return mh._def(key)[1], "fan", "RPM"
         raise KeyError(key)
@@ -502,9 +501,9 @@ def section_e():
     # 扩宽档（250px）下白名单最长标签与典型值可完整预留不截断
     w_exp, _, mgr_exp = _make_widget()
     mgr_exp._width_expanded = True
-    w_exp.set_rows([_row("gpu_d.vram_load", "GPU(独显)显存使用率", 88.8, "%")])
+    w_exp.set_rows([_row("gpu_d.vram_load", "GPU显存使用率", 88.8, "%")])
     ok(w_exp.width() == mu.BASE_W_EXPANDED, f"扩宽档窗格 {mu.BASE_W_EXPANDED}px")
-    ok(w_exp._col_w[0] >= fm.horizontalAdvance("GPU(独显)显存使用率"),
+    ok(w_exp._col_w[0] >= fm.horizontalAdvance("GPU显存使用率"),
        "扩宽档 A 列完整显示当前行最长标签")
     # 当前行真实内容（88.8）必须完整显示不截断（列宽优先保全当前行）
     ok(w_exp._col_w[1] >= fm.horizontalAdvance(w_exp._value_text(w_exp._rows[0])),
@@ -554,14 +553,14 @@ def section_e():
 
     # ---- E5 动态行增删 → 高度恒定（固定 40px，一参数一窗格口径）----
     w_d, _, _ = _make_widget()
-    w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃")])
+    w_d.set_rows([_row("disk.0.temp", "硬盘温度", 42.0, "℃")])
     h1 = w_d.height()
     ok(h1 == round(mu.BASE_H * 1.0), f"单行高=基准 {mu.BASE_H}px（{h1}）")
-    w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃"),
-                  _row("disk.0.usage", "硬盘使用率·盘1", 38.6, "%"),
-                  _row("disk.1.temp", "硬盘温度·盘2", 40.0, "℃")])
+    w_d.set_rows([_row("disk.0.temp", "硬盘温度", 42.0, "℃"),
+                  _row("disk.0.usage", "硬盘使用率", 38.6, "%"),
+                  _row("disk.1.temp", "硬盘温度", 40.0, "℃")])
     ok(w_d.height() == h1, "多行高仍=基准（固定窗格不随行增删长高）")
-    w_d.set_rows([_row("disk.0.temp", "硬盘温度·盘1", 42.0, "℃")])
+    w_d.set_rows([_row("disk.0.temp", "硬盘温度", 42.0, "℃")])
     ok(w_d.height() == h1, "减行高度不变")
     w_d.close()
 
@@ -1514,6 +1513,38 @@ def section_j():
         ok(not any(w.isVisible() for w in mgr._widgets.values()),
            "总开关关闭保存 → 全窗关")
         ok(fake.stop_calls >= 1, "总开关关闭保存 → 停采")
+        # J7 设备名小字（V16.2）：有设备名的参数下方均有小字标签
+        _hw_keys = {k for k in dlg._param_checks
+                    if k.startswith(("cpu.", "gpu_i.", "gpu_d.", "disk."))}
+        ok(set(dlg._hw_labels) == _hw_keys,
+           f"设备名小字覆盖全部有设备名参数（{len(dlg._hw_labels)} 项）")
+        ok(all(k not in dlg._hw_labels for k in dlg._param_checks
+               if k.startswith(("mem.", "net.", "fan."))),
+           "内存/网络/风扇无设备名小字")
+        ok(all(lab.text() == "—" for lab in dlg._hw_labels.values()),
+           "无快照时设备名显示占位符而非旧名")
+        ok(all(not lab.isEnabled() for lab in dlg._hw_labels.values()),
+           "总开关关闭 → 设备名小字置灰")
+        # J8 设备名重载：注入硬件名 → 刷新为新名（改坏会红）
+        fake.set_metric("cpu.load", 10.0, mh.STATUS_OK)
+        fake._frame["cpu.load"].hardware = "i7-TEST"
+        fake.set_metric("disk.0.temp", 40.0, mh.STATUS_OK)
+        fake._frame["disk.0.temp"].hardware = "FakeDisk0"
+        dlg.refresh_hardware_names()
+        ok(dlg._hw_labels["cpu.load"].text() == "i7-TEST",
+           "设备名从实时快照重载（CPU）")
+        ok(dlg._hw_labels["disk.0.temp"].text() == "FakeDisk0",
+           "设备名从实时快照重载（硬盘）")
+        # J9 换设备名再刷新 → 跟随变化（防残留旧名）
+        fake._frame["cpu.load"].hardware = "i7-NEW"
+        dlg.refresh_hardware_names()
+        ok(dlg._hw_labels["cpu.load"].text() == "i7-NEW", "换设备名后刷新为新名")
+        # J10 设备名不落盘：配置与布局文件中不含设备名字段
+        cfg_txt = open(M.CONFIG_PATH, encoding="utf-8").read()
+        ok("i7-NEW" not in cfg_txt and "FakeDisk0" not in cfg_txt,
+           "设备名不写入配置文件")
+        # J11 管理器硬件名变化回调接线在位
+        ok(mgr.on_hardware_names is not None, "硬件名变化回调已注入管理器")
         dlg.close()
     finally:
         for w in list(mgr._widgets.values()):
@@ -2220,10 +2251,10 @@ def section_n():
     w.close()
 
     # ---- N2 独显全量枚举：动态键定义 + 多卡标签 ----
-    ok(mh._def("gpu_d.0.load")[1] == "GPU(独显)使用率", "独显卡0标签不带后缀")
-    ok(mh._def("gpu_d.1.load")[1] == "GPU(独显)使用率·卡2", "独显卡1标签带卡号")
+    ok(mh._def("gpu_d.0.load")[1] == "GPU使用率", "独显卡0标签（V16.2 无括号无卡号）")
+    ok(mh._def("gpu_d.1.load")[1] == "GPU使用率", "独显卡1标签不带卡号（设备名区分）")
     ok(mh._def("gpu_d.0.vram_used")[3] == "GB", "独显显存用量单位 GB")
-    ok(mh._def("gpu_d.2.temp")[1] == "GPU(独显)温度·卡3", "独显卡2温度标签")
+    ok(mh._def("gpu_d.2.temp")[1] == "GPU温度", "独显卡2温度标签（V16.2 无后缀）")
     # 快照多卡产出
     hub2 = FakeHub()
     for i in range(2):

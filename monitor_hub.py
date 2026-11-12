@@ -113,7 +113,7 @@ METRIC_DEFS: list[tuple[str, str, str, str]] = [
     ("cpu.power",       "CPU功耗",             "cpu",   "W"),
     ("mem.load",        "内存使用率",          "mem",   "%"),
     ("mem.used",        "内存用量",            "mem",   "GB"),
-    ("gpu_i.load",      "GPU(核显)使用率",     "gpu_i", "%"),
+    ("gpu_i.load",      "GPU使用率",           "gpu_i", "%"),
     ("gpu_i.shared",    "共享内存用量",        "gpu_i", "GB"),
     ("net.tx",          "网络发送速率",        "net",   "MB/s"),
     ("net.rx",          "网络接收速率",        "net",   "MB/s"),
@@ -121,10 +121,10 @@ METRIC_DEFS: list[tuple[str, str, str, str]] = [
 ]
 
 # 独显全量枚举（用户拍板，参照硬盘）：每块独显 4 参数，多卡直接加设置项进组
-_GPU_D_DEFS = [("gpu_d.{i}.load",      "GPU(独显)使用率",     "gpu_d", "%"),
-               ("gpu_d.{i}.temp",      "GPU(独显)温度",       "gpu_d", "℃"),
-               ("gpu_d.{i}.vram_load", "GPU(独显)显存使用率", "gpu_d", "%"),
-               ("gpu_d.{i}.vram_used", "GPU(独显)显存用量",   "gpu_d", "GB")]
+_GPU_D_DEFS = [("gpu_d.{i}.load",      "GPU使用率",     "gpu_d", "%"),
+               ("gpu_d.{i}.temp",      "GPU温度",       "gpu_d", "℃"),
+               ("gpu_d.{i}.vram_load", "GPU显存使用率", "gpu_d", "%"),
+               ("gpu_d.{i}.vram_used", "GPU显存用量",   "gpu_d", "GB")]
 _GPU_D_SUFFIX = {"load": "使用率", "temp": "温度",
                  "vram_load": "显存使用率", "vram_used": "显存用量"}
 _DISK_DEFS = [("disk.{i}.temp", "硬盘温度", "disk", "℃"),
@@ -1067,14 +1067,11 @@ def _def(key: str) -> tuple[str, str, str, str]:
         if row[0] == key:
             return row
     parts = key.split(".")
-    # 独显动态键 gpu_d.{i}.{suffix}：单卡（i=0）标签不带后缀（避免长标签
-    # 触发全局扩宽），多卡第 2 张起带「·卡N」区分（全量枚举，参照硬盘）。
+    # 独显动态键 gpu_d.{i}.{suffix}：标签不带（独显）与「·卡N」后缀
+    # （V16.2 用户拍板：设备名小字已能区分多卡，标签统一精简）。
     if (len(parts) == 3 and parts[0] == "gpu_d" and parts[1].isdigit()
             and parts[2] in _GPU_D_SUFFIX):
-        i = int(parts[1])
-        label = "GPU(独显)" + _GPU_D_SUFFIX[parts[2]]
-        if i > 0:
-            label += f"·卡{i + 1}"
+        label = "GPU" + _GPU_D_SUFFIX[parts[2]]
         unit = {"load": "%", "temp": "℃", "vram_load": "%", "vram_used": "GB"}[parts[2]]
         return (key, label, "gpu_d", unit)
     for tpl, label, group, unit in _DISK_DEFS:
@@ -1083,12 +1080,13 @@ def _def(key: str) -> tuple[str, str, str, str]:
         tparts = tpl.split(".")
         if (len(parts) == len(tparts) == 3 and parts[0] == tparts[0]
                 and parts[1].isdigit() and parts[2] == tparts[2]):
-            return (key, f"{label}·盘{int(parts[1]) + 1}", group, unit)
+            # V16.2：不带「·盘N」后缀（设备名小字区分多盘）
+            return (key, label, group, unit)
     if key.startswith("fan."):
         parts = key.split(".")
         slot = parts[1]
         idx = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-        label = {"cpu": "CPU风扇", "gpu_d": "GPU(独显)风扇", "mobo": "主板风扇"}.get(slot, slot)
+        label = {"cpu": "CPU风扇", "gpu_d": "GPU风扇", "mobo": "主板风扇"}.get(slot, slot)
         if idx > 0:
             label += f"·{idx + 1}"
         return (key, label + "转速", "fan", "RPM")

@@ -2520,7 +2520,8 @@ CODE_HELP_TEXT = (
     "■ 参数复选框（按 CPU/内存/GPU核显/GPU独显/硬盘/风扇/网络 分组）\n"
     "  · 勾选即实时弹出对应窗格，取消即实时关闭（以界面总开关状态为准）。\n"
     "  · 每个参数一个独立窗格；无值参数也罗列（换台式机可用），默认全不勾选。\n"
-    "  · GPU独显与硬盘按实际硬件全量枚举：多独显/多盘自动增加参数项。\n\n"
+    "  · GPU独显与硬盘按实际硬件全量枚举：多独显/多盘自动增加参数项。\n"
+    "  · 参数名下方小字标注对应设备名（每次运行实时读取，换机自动更新）。\n\n"
     "■ 窗格显示\n"
     "  · 三列「名称 | 数值 | 单位」，数值按阈值范围着语义色（绿/黄/红），\n"
     "    进入最高阈值段时数值与曲线 1Hz 呼吸闪烁。\n"
@@ -4853,6 +4854,7 @@ def _ensure_monitor_manager():
     )
     _MONITOR_MGR.on_new_disk_keys = _monitor_on_new_disk_keys
     _MONITOR_MGR.on_new_gpu_d_keys = _monitor_on_new_gpu_d_keys
+    _MONITOR_MGR.on_hardware_names = _monitor_on_hardware_names
     # 闲置停采定时器：每秒检查是否连续 idle_stop_sec 无监视窗
     _MONITOR_IDLE_TIMER = QTimer()
     _MONITOR_IDLE_TIMER.setInterval(1000)
@@ -4998,6 +5000,18 @@ def _monitor_on_new_gpu_d_keys(new_keys: list) -> None:
         _log_crash("monitor_new_gpu_d", exc)
 
 
+def _monitor_on_hardware_names(names: dict) -> None:
+    """硬件名变化（采集运行中）：刷新已打开设置窗的设备名小字。
+
+    设备名每次运行从实时快照重取、不落盘（V16.2 用户拍板，防换机残留旧名）。
+    """
+    try:
+        if _MONITOR_SETTINGS_DLG is not None and _MONITOR_SETTINGS_DLG.isVisible():
+            _MONITOR_SETTINGS_DLG.refresh_hardware_names(names)
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_hardware_names", exc)
+
+
 def _monitor_backfill_history() -> None:
     """重开时把 hub 历史环形缓冲回填到各行 sparkline（秒回曲线）。"""
     try:
@@ -5123,6 +5137,7 @@ class MonitorSettingsDialog(QDialog):
         self.setModal(False)
         self._cfg = load_monitor_config()
         self._param_checks: dict = {}
+        self._hw_labels: dict = {}   # key -> 设备名小字 QLabel（不落盘，每次运行重载）
         self._build_ui()
         self._load_to_ui()
         self.adjustSize()
@@ -5167,6 +5182,7 @@ class MonitorSettingsDialog(QDialog):
                 chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
                 self._param_checks[key] = chk
                 self._param_layout.addWidget(chk)
+                self._add_hw_label(key, inner)
         self._param_layout.addStretch(1)
         scroll.setWidget(inner)
         scroll.setMinimumWidth(280)
@@ -5222,12 +5238,52 @@ class MonitorSettingsDialog(QDialog):
 
     @staticmethod
     def _param_label(key: str) -> str:
-        """参数显示名：固定键取白名单中文名；动态键带盘号/槽位。"""
+        """参数显示名：固定键取白名单中文名；动态键按模板还原（V16.2 无盘/卡后缀）。"""
         for k, label, _g, _u in monitor_hub.METRIC_DEFS:
             if k == key:
                 return label
         d = monitor_hub._def(key)
         return d[1]
+
+    # ---- 设备名小字（V16.2：标签去后缀后靠设备名区分；每次运行重载不落盘）----
+    @staticmethod
+    def _hw_capable(key: str) -> bool:
+        """该参数是否有设备名（CPU/核显/独显/硬盘；内存/网络/风扇无）。"""
+        return key.startswith(("cpu.", "gpu_i.", "gpu_d.", "disk."))
+
+    def _add_hw_label(self, key: str, parent) -> None:
+        """参数复选框正下方加最小字号设备名 QLabel（仅有设备名的参数）。"""
+        if not self._hw_capable(key):
+            return
+        lab = QLabel("—", parent)
+        f = lab.font()
+        f.setPixelSize(max(1, f.pixelSize() - 3))   # 最小字号（比参数名小一档）
+        lab.setFont(f)
+        lab.setStyleSheet("color: gray;")
+        lab.setContentsMargins(20, 0, 0, 2)   # 与复选框文字左缘大致对齐
+        self._hw_labels[key] = lab
+        self._param_layout.addWidget(lab)
+
+    def refresh_hardware_names(self, names: dict | None = None) -> None:
+        """从实时快照重取全部设备名（每次运行重载，防换机/换设备残留旧名）。
+
+        names 缺省时现查 hub 快照；无快照/无对应硬件 → 显示「—」，
+        绝不显示上次运行缓存的名字（设备名一律不落盘）。
+        """
+        try:
+            if names is None:
+                names = {}
+                if _MONITOR_HUB is not None:
+                    try:
+                        names = {k: m.hardware
+                                 for k, m in _MONITOR_HUB.snapshot().items()
+                                 if getattr(m, "hardware", "")}
+                    except Exception:  # noqa: BLE001
+                        names = {}
+            for key, lab in self._hw_labels.items():
+                lab.setText(names.get(key) or "—")
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_refresh_hw_names", exc)
 
     # ---- 载入/置灰 ----
     def _load_to_ui(self) -> None:
@@ -5242,10 +5298,13 @@ class MonitorSettingsDialog(QDialog):
         on = self.chk_enable.isChecked()
         for chk in self._param_checks.values():
             chk.setEnabled(on)
+        for lab in self._hw_labels.values():
+            lab.setEnabled(on)
 
     def refresh_disk_params(self) -> None:
         """采集中发现新盘 → 把新盘参数补进复选框清单（保留已有勾选）。"""
         try:
+            added = False
             for key in self._disk_keys_for_ui():
                 if key in self._param_checks:
                     continue
@@ -5257,12 +5316,26 @@ class MonitorSettingsDialog(QDialog):
                 idx = self._param_layout.count() - 1  # stretch 之前
                 self._param_layout.insertWidget(idx, chk)
                 chk.setEnabled(self.chk_enable.isChecked())
+                if self._hw_capable(key):
+                    lab = QLabel("—", self)
+                    f = lab.font()
+                    f.setPixelSize(max(1, f.pixelSize() - 3))
+                    lab.setFont(f)
+                    lab.setStyleSheet("color: gray;")
+                    lab.setContentsMargins(20, 0, 0, 2)
+                    lab.setEnabled(self.chk_enable.isChecked())
+                    self._hw_labels[key] = lab
+                    self._param_layout.insertWidget(idx + 1, lab)
+                added = True
+            if added:
+                self.refresh_hardware_names()
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_refresh_disk_params", exc)
 
     def refresh_gpu_d_params(self) -> None:
         """采集中发现新独显卡 → 把新卡参数补进复选框清单（保留已有勾选）。"""
         try:
+            added = False
             for key in self._gpu_d_keys_for_ui():
                 if key in self._param_checks:
                     continue
@@ -5273,6 +5346,19 @@ class MonitorSettingsDialog(QDialog):
                 idx = self._param_layout.count() - 1  # stretch 之前
                 self._param_layout.insertWidget(idx, chk)
                 chk.setEnabled(self.chk_enable.isChecked())
+                if self._hw_capable(key):
+                    lab = QLabel("—", self)
+                    f = lab.font()
+                    f.setPixelSize(max(1, f.pixelSize() - 3))
+                    lab.setFont(f)
+                    lab.setStyleSheet("color: gray;")
+                    lab.setContentsMargins(20, 0, 0, 2)
+                    lab.setEnabled(self.chk_enable.isChecked())
+                    self._hw_labels[key] = lab
+                    self._param_layout.insertWidget(idx + 1, lab)
+                added = True
+            if added:
+                self.refresh_hardware_names()
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_refresh_gpu_d_params", exc)
 
@@ -5318,6 +5404,8 @@ class MonitorSettingsDialog(QDialog):
         try:
             super().showEvent(event)
             self._load_to_ui()
+            # 设备名每次运行重载（V16.2）：从当前实时快照重取，不落盘不缓存旧名
+            self.refresh_hardware_names()
             if _MONITOR_BALL is not None:
                 _place_dialog_near_rect(self, _MONITOR_BALL._outer_frame_rect(),
                                         _MONITOR_BALL)

@@ -1444,6 +1444,9 @@ class MonitorWindowManager:
         self._known_disk_keys: set = set()
         self.on_new_gpu_d_keys: Optional[Callable] = None
         self._known_gpu_d_keys: set = set()
+        # V16.2：硬件名变化回调（设置窗设备名小字每次运行重载，不落盘）
+        self.on_hardware_names: Optional[Callable] = None
+        self._last_hw_names: dict = {}
         # 全局扩宽档（用户拍板：任一窗格内容超基准宽 → 所有窗格统一扩宽，
         # 避免大小不一；只升不降，会话内保持统一宽度）
         self._width_expanded = False
@@ -1499,6 +1502,7 @@ class MonitorWindowManager:
             self._notify_new_disks(disks)
             gpus_d = self.hub.list_gpus_d(snapshot=snap)
             self._notify_new_gpus_d(gpus_d)
+            self._notify_hardware_names(snap)
             for w in self._widgets.values():
                 if not w.isVisible():
                     continue
@@ -1537,6 +1541,19 @@ class MonitorWindowManager:
             self._known_gpu_d_keys = keys
             if self.on_new_gpu_d_keys is not None:
                 self.on_new_gpu_d_keys(sorted(new))
+
+    def _notify_hardware_names(self, snap: dict) -> None:
+        """V16.2：硬件名变化 → 回调 main 刷新设置窗设备名小字。
+
+        设备名每次运行从实时快照重取（不落盘）；仅名称集合变化时回调，
+        避免每帧刷新设置窗。无设备名的键不进集合。
+        """
+        names = {k: m.hardware for k, m in snap.items()
+                 if getattr(m, "hardware", "")}
+        if names != self._last_hw_names:
+            self._last_hw_names = names
+            if self.on_hardware_names is not None:
+                self.on_hardware_names(dict(names))
 
     # ---- 阶段 3：磁吸 ----
     def new_group(self) -> SnapGroup:
