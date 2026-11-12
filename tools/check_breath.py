@@ -1153,6 +1153,22 @@ def main() -> int:
     check("应用级调色板已套用（设置窗去灰底）",
           _QApp.instance().palette().color(_C.Window).name().upper()
           == M.themed_palette().color(_C.Window).name().upper(), "", failures)
+    # 标题栏深浅色（V16.2）：DWM 着色函数 + 全局过滤器在位（改坏会红）
+    check("标题栏着色函数与过滤器安装函数在位",
+          callable(getattr(M, "_apply_titlebar_theme", None))
+          and callable(getattr(M, "install_titlebar_theme", None)), "", failures)
+    M.install_titlebar_theme(_QApp.instance())
+    check("标题栏主题过滤器已安装（保引用非空）",
+          len(M._titlebar_filter_keep) >= 1, "", failures)
+    # 着色函数对真实窗口可调用不抛异常（离屏 winId 可能为 0，函数应静默兜底）
+    _dlg_tb = M.build_code_help_dialog()
+    try:
+        M._apply_titlebar_theme(_dlg_tb)   # 不应抛异常
+        check("标题栏着色对真实窗口调用不抛异常", True, "", failures)
+    except Exception as _e_tb:  # noqa: BLE001
+        check("标题栏着色对真实窗口调用不抛异常", False, repr(_e_tb), failures)
+    finally:
+        _dlg_tb.deleteLater()
 
     # 帮助里的多行示例必须能直接复制执行（用户验收点：示例粘贴即用）
     help_py = ("py:\nimport subprocess, os\np = os.path.join(os.environ['TEMP'], "

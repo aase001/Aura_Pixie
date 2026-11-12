@@ -47,7 +47,7 @@ import yaml
 import monitor_hub
 import monitor_ui
 from PySide6.QtCore import (QByteArray, QElapsedTimer, QEvent, QLibraryInfo,
-                            QMimeData, QPoint,
+                            QMimeData, QObject, QPoint,
                             QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer,
                             QTranslator, Signal)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -190,6 +190,55 @@ def app_executable() -> str:
 BASE_DIR = os.path.dirname(app_executable())   # exe/脚本所在目录（迁移源、图标、crash.log 位置）
 
 _zh_translators_keep: list = []   # 翻译器实例须长期持有，否则被回收后 Qt 自动卸载
+_titlebar_filter_keep: list = []  # 标题栏主题过滤器须长期持有（同翻译器保引用）
+
+
+def _apply_titlebar_theme(widget: QWidget) -> None:
+    """按系统深浅色给窗口标题栏着色（浅白深黑，V16.2 用户拍板）。
+
+    标题栏由 Windows DWM 绘制，Qt 调色板管不到——用 DwmSetWindowAttribute
+    设沉浸式深色模式（Win10 1809+ 属性 20，Win11 22000+ 生效）。这只是给已有
+    窗口设属性，非手写 WndProc 回调窗口（坑 19 禁的是后者，会原生崩溃）。
+    复用球体休眠同款 system_dark_mode() 判定；失败静默（旧系统标题栏保持默认）。
+    """
+    try:
+        hwnd = int(widget.winId())
+        if not hwnd:
+            return
+        dark = ctypes.c_int(1 if system_dark_mode() else 0)
+        # 属性 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（19 为 1809~1903 旧编号，兜底）
+        for attr in (20, 19):
+            hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(dark), ctypes.sizeof(dark))
+            if hr == 0:
+                break
+    except Exception:   # noqa: BLE001 - 标题栏着色失败不影响主流程
+        pass
+
+
+class _TitlebarThemeFilter(QObject):
+    """全局事件过滤器：顶层窗口显示时按系统深浅色着色标题栏（V16.2）。
+
+    监听 Show/WinIdChange，覆盖全部设置窗与对话框（含监视设置窗）；
+    球体是无边框窗无标题栏，着色无副作用。
+    """
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        try:
+            if (isinstance(obj, QWidget) and obj.isWindow()
+                    and event.type() in (QEvent.Type.Show, QEvent.Type.WinIdChange)):
+                _apply_titlebar_theme(obj)
+        except Exception:   # noqa: BLE001 - 过滤器异常不阻断事件
+            pass
+        return False
+
+
+def install_titlebar_theme(app) -> None:
+    """安装标题栏主题过滤器（应用级，全部窗口生效）；实例模块级保引用。"""
+    _titlebar_filter_keep.clear()
+    flt = _TitlebarThemeFilter(app)
+    app.installEventFilter(flt)
+    _titlebar_filter_keep.append(flt)
 
 
 def install_chinese_buttons(app) -> None:
@@ -5362,14 +5411,14 @@ class MonitorSettingsDialog(QDialog):
 
     @staticmethod
     def _hw_font(base: QFont) -> QFont:
-        """设备名小字字体：固定 6px（用户拍板，比参数名小、不撑开行距）。
+        """设备名小字字体：固定 8px（用户拍板，比参数名小、不撑开行距）。
 
         关键：默认字体是「点」单位，pixelSize() 返回 -1，若直接
         max(1, pixelSize()-N) 会塌成 1px → 渲染成一条灰线（V16.2 实测根因）。
         故显式 setPixelSize 一个可读的固定值，绝不依赖 pixelSize() 现值。
         """
         f = QFont(base)
-        f.setPixelSize(6)
+        f.setPixelSize(8)
         return f
 
     @staticmethod
@@ -5771,6 +5820,8 @@ def main(argv: list[str]) -> int:
     # 应用级深浅色主题（V16.2 用户拍板）：浅色=白底黑字、深色=黑底白字，
     # 复用球体休眠同款 system_dark_mode() 判定，全部设置窗与控件继承，去灰底。
     app.setPalette(themed_palette())
+    # 标题栏深浅色（V16.2 用户拍板）：DWM 标题栏随系统浅白深黑，覆盖全部设置窗
+    install_titlebar_theme(app)
     # 标准对话框按钮中文（确定/取消/关闭/是/否）：装在 QApplication 之后、
     # 任何窗口之前，覆盖全部 QMessageBox 与未就地 setText 的按钮盒。
     install_chinese_buttons(app)
