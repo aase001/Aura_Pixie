@@ -1396,8 +1396,8 @@ def section_i():
     # ---- I7 内置扇区动作 monitor: 前缀识别 ----
     ok("monitor:" in main_src and "open_monitor" in main_src,
        "扇区 monitor: 动作入口在位")
-    ok("act_monitor" in main_src and "资源监视" in main_src,
-       "右键菜单资源监视入口在位")
+    ok("act_monitor" in main_src and 'menu.addAction("监视")' in main_src,
+       "右键菜单监视入口在位（已改名）")
     ok("aboutToQuit.connect(shutdown_monitor)" in main_src,
        "退出钩子接线在位")
 

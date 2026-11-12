@@ -2520,35 +2520,41 @@ class SettingsDialog(QDialog):
             self.table.rowCount(), {"name": "新功能", "code": "", "active": False}))
         btn_del.clicked.connect(self._delete_current)
 
-        # 底部按钮行（自定义）：外观 | 帮助 ……… 保存 | 取消
-        # 帮助窗与设置窗同级（非模态 show），打开帮助不阻塞操作设置；
-        # 点 Save 时若帮助窗还开着会一并关闭。
+        # 底部按钮行（自定义）：外观 | 监视 | 导入导出 ……… 保存 | 取消
+        # 监视按钮打开监视设置窗（总开关 + 参数复选，阶段 A/B）；
+        # 帮助按钮挪到顶部 -1 旁（用户拍板）。帮助窗与设置窗同级（非模态 show），
+        # 打开帮助不阻塞操作设置；点 Save 时若帮助窗还开着会一并关闭。
         btn_appearance = QPushButton("外观", self)
+        btn_monitor = QPushButton("监视", self)
         btn_help = QPushButton("帮助", self)
         btn_save = QPushButton("保存", self)
         btn_save.setDefault(True)
         btn_cancel = QPushButton("取消", self)
-        # 导入/导出配置（位于帮助按钮右侧；导出为 .yaml.bak，导入则覆盖当前配置）
+        # 导入/导出配置（位于监视按钮右侧；导出为 .yaml.bak，导入则覆盖当前配置）
         btn_transfer = QPushButton("导入/导出配置", self)
         btn_appearance.clicked.connect(self._open_appearance_settings)
+        btn_monitor.clicked.connect(lambda: QTimer.singleShot(0, open_monitor_settings))
         btn_save.clicked.connect(self._on_save)
         btn_help.clicked.connect(self._show_code_help)
         btn_transfer.clicked.connect(self._transfer_config)
         btn_cancel.clicked.connect(self.reject)
         self.btn_appearance, self.btn_save, self.btn_help = btn_appearance, btn_save, btn_help
+        self.btn_monitor = btn_monitor
         self.btn_transfer = btn_transfer
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(btn_appearance)
-        btn_row.addWidget(btn_help)
+        btn_row.addWidget(btn_monitor)
         btn_row.addWidget(btn_transfer)
         btn_row.addStretch(1)
         btn_row.addWidget(btn_save)
         btn_row.addWidget(btn_cancel)
+        self.btn_row = btn_row   # 布局引用：自检断言「监视按钮在底行、帮助不在底行」用
 
         bar = QHBoxLayout()
         bar.addWidget(btn_add)
         bar.addWidget(btn_del)
+        bar.addWidget(btn_help)   # 帮助挪到 -1 旁（用户拍板）
         bar.addStretch(1)
         # —— 保持球体置顶（默认不勾选；勾选后写 window.always_on_top 并立即生效）——
         self.chk_topmost = QCheckBox("保持球体置顶", self)
@@ -4399,7 +4405,7 @@ class AuraBall(QWidget):
             # V10：右键不再触发次级扇形（改由单击），任何位置一律弹默认菜单
             menu = QMenu(self)
             act_settings = menu.addAction("设置")
-            act_monitor = menu.addAction("资源监视")
+            act_monitor = menu.addAction("监视")
             act_reload = menu.addAction("重载")
             act_disappear = menu.addAction("消失")
             act_quit = menu.addAction("退出")

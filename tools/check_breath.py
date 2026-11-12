@@ -1138,6 +1138,23 @@ def main() -> int:
     check("设置框含 保存/帮助/外观/+1/-1 按钮",
           has_save and has_help and has_theme and has_add and has_del,
           f"（按钮：{sorted(texts)}）", failures)
+    # 阶段 B：监视按钮在底部按钮行（占帮助原位），帮助挪到顶部 -1 旁
+    has_monitor = any(t == "监视" for t in texts)
+    check("设置框含 监视 按钮", has_monitor, f"（按钮：{sorted(texts)}）", failures)
+    _btn_row_texts = [dlg_tmp.btn_row.itemAt(i).widget().text()
+                      for i in range(dlg_tmp.btn_row.count())
+                      if dlg_tmp.btn_row.itemAt(i).widget() is not None]
+    check("监视按钮在底部按钮行（外观之后）",
+          "监视" in _btn_row_texts and "帮助" not in _btn_row_texts,
+          f"（底行：{_btn_row_texts}）", failures)
+    _bar_texts = [dlg_tmp.bar.itemAt(i).widget().text()
+                  for i in range(dlg_tmp.bar.count())
+                  if dlg_tmp.bar.itemAt(i).widget() is not None
+                  and hasattr(dlg_tmp.bar.itemAt(i).widget(), "text")]
+    check("帮助按钮挪到顶部 -1 旁",
+          "帮助" in _bar_texts and "-1" in _bar_texts
+          and _bar_texts.index("帮助") == _bar_texts.index("-1") + 1,
+          f"（顶行：{_bar_texts}）", failures)
     # 设置窗与帮助同级：帮助是非模态 show（不再用 exec 阻塞设置窗）
     dlg_tmp._show_code_help()  # noqa: SLF001
     help_dlg = dlg_tmp._help_dlg  # noqa: SLF001
