@@ -165,7 +165,7 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     # 镜像 main() 的应用级图标与深浅色主题（V16.2），供图标/主题断言验证
     app.setWindowIcon(M.app_icon())
-    app.setPalette(M.themed_palette())
+    M.apply_app_theme(app)
     M.ensure_settings(base=_SELFTEST_SOURCE_DIR)   # 隔离目录：不会触碰项目根目录真实配置
     failures: list[str] = []
     size = M.ACTIVE_SIZE
@@ -1153,6 +1153,13 @@ def main() -> int:
     check("应用级调色板已套用（设置窗去灰底）",
           _QApp.instance().palette().color(_C.Window).name().upper()
           == M.themed_palette().color(_C.Window).name().upper(), "", failures)
+    # Fusion 样式（V16.2 主题割裂修复）：原生 windows11 样式把底色交给系统画
+    # 导致「文字变了底色没变」，必须切 Fusion 全量吃调色板（改坏会红）
+    check("应用级样式为 Fusion（主题割裂修复）",
+          _QApp.instance().style().objectName().lower() == "fusion",
+          f"（实得 {_QApp.instance().style().objectName()}）", failures)
+    check("统一主题入口 apply_app_theme 在位",
+          callable(getattr(M, "apply_app_theme", None)), "", failures)
     # 标题栏深浅色（V16.2）：DWM 着色函数 + 全局过滤器在位（改坏会红）
     check("标题栏着色函数与过滤器安装函数在位",
           callable(getattr(M, "_apply_titlebar_theme", None))

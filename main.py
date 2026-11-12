@@ -83,6 +83,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QScrollArea,
     QSlider,
+    QStyleFactory,
     QStyledItemDelegate,
     QTableWidgetItem,
     QTableWidget,
@@ -239,6 +240,25 @@ def install_titlebar_theme(app) -> None:
     flt = _TitlebarThemeFilter(app)
     app.installEventFilter(flt)
     _titlebar_filter_keep.append(flt)
+
+
+def apply_app_theme(app) -> None:
+    """应用级深浅色主题统一入口（V16.2 修复主题割裂）。
+
+    根因：windows11 原生样式把窗口底色/部分控件交给系统主题绘制，只吃
+    调色板里的文字色 → 「文字变了、底色没变、复选框半变」的割裂状态。
+    修复：切 Fusion 样式（100% 由调色板驱动）+ colorScheme 与判定一致 +
+    白底黑字/黑底白字调色板 + DWM 标题栏着色，一次到位全部窗口生效。
+    复用球体休眠同款 system_dark_mode() 判定，不另起逻辑。
+    """
+    dark = system_dark_mode()
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
+    app.styleHints().setColorScheme(
+        Qt.ColorScheme.Dark if dark else Qt.ColorScheme.Light)
+    app.setPalette(themed_palette())
+    install_titlebar_theme(app)
 
 
 def install_chinese_buttons(app) -> None:
@@ -5817,11 +5837,9 @@ def main(argv: list[str]) -> int:
     app = QApplication(argv)
     # 应用级图标（V16.2）：全部窗口（含监视设置窗等对话框）继承，修复左上角图标丢失
     app.setWindowIcon(app_icon())
-    # 应用级深浅色主题（V16.2 用户拍板）：浅色=白底黑字、深色=黑底白字，
-    # 复用球体休眠同款 system_dark_mode() 判定，全部设置窗与控件继承，去灰底。
-    app.setPalette(themed_palette())
-    # 标题栏深浅色（V16.2 用户拍板）：DWM 标题栏随系统浅白深黑，覆盖全部设置窗
-    install_titlebar_theme(app)
+    # 应用级深浅色主题（V16.2）：Fusion 样式 + 白底黑字/黑底白字 + DWM 标题栏，
+    # 统一入口修复原生样式主题割裂，全部设置窗与控件继承
+    apply_app_theme(app)
     # 标准对话框按钮中文（确定/取消/关闭/是/否）：装在 QApplication 之后、
     # 任何窗口之前，覆盖全部 QMessageBox 与未就地 setText 的按钮盒。
     install_chinese_buttons(app)
