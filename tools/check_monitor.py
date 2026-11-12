@@ -153,6 +153,12 @@ def section_a():
     ok(mh.MetricsHub.fmt(m_na) == "需管理员", "fmt need_admin")
     ok(mh.MetricsHub.uptime_fmt(3725) == "1:02:05", "uptime H:MM:SS")
     ok(mh.MetricsHub.uptime_fmt(90061) == "25:01:01", "uptime 跨天小时进位")
+    # fmt_value：纯数值（不带单位），监视窗 B 列用
+    ok(mh.MetricsHub.fmt_value(m_ok) == "63.2", "fmt_value 纯数值")
+    ok(mh.MetricsHub.fmt_value(m_na) == "--", "fmt_value 无读数 --")
+    m_fan = mh.Metric("fan.cpu.0", "x", "fan", 2400.0, "RPM", mh.STATUS_OK)
+    ok(mh.MetricsHub.fmt_value(m_fan) == "2400", "fmt_value 风扇整数")
+    ok(mh.MetricsHub.fmt_value(None) == "--", "fmt_value None → --")
 
     # 断流口径：侧车 stale 时旧帧里的硬盘温度/使用率一律标 stale（与 GPU 同口径）
     hub_m = mh.MetricsHub(sidecar_path=__file__)   # 假路径：installed 但永不出帧
@@ -194,17 +200,19 @@ def section_b():
         time.sleep(2.2)  # 至少 2 帧 + psutil 差分窗口
         snap = hub.snapshot()
         keys = set(snap)
-        for k in ("sys.uptime", "cpu.load", "cpu.freq", "cpu.temp", "cpu.power",
+        for k in ("cpu.load", "cpu.freq", "cpu.temp", "cpu.power",
                   "mem.load", "mem.used", "gpu_i.load", "gpu_i.shared",
                   "gpu_d.load", "gpu_d.temp", "gpu_d.vram_load", "gpu_d.vram_used",
                   "net.tx", "net.rx"):
             ok(k in keys, f"快照含 {k}")
+        ok("sys.uptime" not in keys, "运行时间已废弃：快照不再产出该键")
         ok(snap["cpu.load"].status == mh.STATUS_OK and 0 <= snap["cpu.load"].value <= 100,
            "cpu.load 合理")
         near_v = snap["mem.used"].value
         ok(near_v is not None and 0 < near_v < 1024, "内存用量 GB 量级")
-        up = snap["sys.uptime"].value
-        ok(up is not None and up > 0, "运行时间>0")
+        # 运行时间采集能力保留（uptime() 仍可用，只是不进监视白名单）
+        up_secs, up_str = hub.uptime()
+        ok(up_secs is not None and up_secs > 0, "uptime() 采集能力保留")
         # 权限决定温度可见性，两种路径都必须有明确状态
         t = snap["cpu.temp"]
         if hub.runner.elevated:

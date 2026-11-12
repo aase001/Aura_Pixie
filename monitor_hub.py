@@ -104,7 +104,8 @@ class Metric:
 # 指标定义表 = 白名单（加/减指标只改这里，UI 按 group 分组渲染）
 # (key, label, group, unit)
 METRIC_DEFS: list[tuple[str, str, str, str]] = [
-    ("sys.uptime",      "系统运行时间",        "sys",   "s"),
+    # sys.uptime（系统运行时间）已废弃（用户拍板）：不再列入监视白名单；
+    # psutil 采集与 uptime()/uptime_fmt() 能力保留，未来需要可恢复。
     ("cpu.load",        "CPU使用率",           "cpu",   "%"),
     ("cpu.freq",        "CPU频率",             "cpu",   "GHz"),
     ("cpu.temp",        "CPU温度",             "cpu",   "℃"),
@@ -832,9 +833,7 @@ class MetricsHub:
                           unit=d[3], status=status, source=source, ts=now)
 
         # ---- 固定键：优先侧车，psutil 兜底 ----
-        v, t = self._ps("sys.uptime")
-        out["sys.uptime"] = mk("sys.uptime", v, "psutil",
-                               STATUS_OK if v is not None else STATUS_STALE)
+        # sys.uptime 已废弃：不再产出快照键（_ps_cache 仍采集，uptime() 能力保留）
 
         # CPU 使用率：psutil 为准（与任务管理器同口径、采样连续），侧车仅作 psutil 缺失兜底
         v_ps, v_ps_ts = self._ps("cpu.load")
@@ -988,6 +987,19 @@ class MetricsHub:
         h, rem = divmod(int(secs), 3600)
         m, s = divmod(rem, 60)
         return f"{h}:{m:02d}:{s:02d}"
+
+    @staticmethod
+    def fmt_value(m: Optional[Metric], nd: int = 1) -> str:
+        """纯数值文本（不带单位）——监视窗 B 列数值用，单位独立画在 C 列。
+
+        无读数返回 "--"（状态文案由 UI 的状态小字呈现，不占数值列）。
+        换算口径与 fmt 完全一致（风扇整数 RPM、其余 nd 位小数）。
+        """
+        if m is None or m.value is None:
+            return "--"
+        if m.key.startswith("fan."):
+            return f"{m.value:.0f}"
+        return f"{m.value:.{nd}f}"
 
 
 def _def(key: str) -> tuple[str, str, str, str]:
