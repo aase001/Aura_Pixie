@@ -23,6 +23,7 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -59,7 +60,7 @@ SPARKLINE_POINTS = 60  # sparkline 点数 ≈ 1 分钟（侧车 ~1.1s/帧）
 # 阶段 1 渲染常量（均为绝对像素量，渲染时乘 scale_getter()；
 # 行为参数——吸附阈值/拖动判定/时间常量——不在此列、不乘缩放）
 # ---------------------------------------------------------------------------
-FONT_PX = 13          # 基础字号
+FONT_PX = 15          # 基础字号（V16.3 用户拍板 13→15，字更粗饱满、视觉更好）
 PAD_X = 10            # 左右内边距
 PAD_Y = 8             # 上下内边距
 COL_GAP = 8           # 列间距
@@ -79,6 +80,8 @@ FONT_FAMILY = "Microsoft YaHei"
 # 阶段 2 数据可视化常量
 # ---------------------------------------------------------------------------
 SPARK_LINE_PX = 1     # sparkline 线宽（乘缩放）
+# V16.3 纵坐标阈值分档：高值档持续该秒数无高值则回落（防曲线剧烈跳变）
+SPARK_Y_DECAY_S = 5.0
 BREATH_HZ = 1.0       # 高负载呼吸频率 1Hz
 BREATH_ALPHA_MIN = 0.3
 BREATH_ALPHA_MAX = 1.0
@@ -391,6 +394,10 @@ class UnitRow:
     total: Optional[float] = None  # 容量总量（与 value 同单位；用量类按比例配色，V16.2）
     history: deque = field(
         default_factory=lambda: deque(maxlen=SPARKLINE_POINTS))
+    # V16.3 纵坐标阈值分档状态：0=绿档 1=黄档 2=上限；_y_high_since 记录
+    # 最近一次高值时刻（time.time），超 SPARK_Y_DECAY_S 无高值则回落。
+    _y_level: int = 0
+    _y_high_since: float = 0.0
 
     @property
     def available(self) -> bool:
@@ -875,12 +882,20 @@ class MonitorUnitWidget(QWidget):
             pen = QPen(color, pen_w)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
-            # 归一化：用历史内 min/max（忽略 None）；全 None 不画
+            # 归一化（V16.3）：网络保留动态 min/max；其余用阈值分档固定
+            # 上界（绿/黄/上限），lo=0 → 低值波动小、不剧烈跳变。全 None 不画。
             vals = [v for v in hist if v is not None]
             if not vals:
                 continue
-            lo, hi = min(vals), max(vals)
-            span = (hi - lo) or 1.0
+            if row.key in ("net.tx", "net.rx"):
+                lo, hi = min(vals), max(vals)
+                span = (hi - lo) or 1.0
+                norm = lambda v: (v - lo) / span  # noqa: E731
+            else:
+                g, y, t = self._spark_bounds(row)
+                hi = (g, y, t)[min(row._y_level, 2)]
+                span = hi or 1.0
+                norm = lambda v: min(max(v / span, 0.0), 1.0)  # noqa: E731
             path = QPainterPath()
             started = False
             for j, v in enumerate(hist):
@@ -888,7 +903,7 @@ class MonitorUnitWidget(QWidget):
                 if v is None:
                     started = False   # None 点断开
                     continue
-                yy = top + band_h * (1.0 - (v - lo) / span)
+                yy = top + band_h * (1.0 - norm(v))
                 if not started:
                     path.moveTo(x, yy)
                     started = True
@@ -925,6 +940,43 @@ class MonitorUnitWidget(QWidget):
                 return QColor(150, 150, 150)   # 总量缺失：中性色，不误闪红
             return get_color_for_value(ratio, default_thresholds(row.key, "%"))
         return get_color_for_value(row.value, self.thresholds_for(row))
+
+    def _spark_bounds(self, row: UnitRow):
+        """阈值三段边界 (green_max, yellow_max, top_max)，供纵坐标分档。"""
+        th = self.thresholds_for(row)
+        g = th[0]["max"] if len(th) > 0 else 60
+        y = th[1]["max"] if len(th) > 1 else g
+        t = th[-1]["max"] if th else y
+        return g, y, t
+
+    def _update_y_level(self, row: UnitRow) -> None:
+        """V16.3 纵坐标阈值分档 + 高值回落（网络发送/接收保留动态不在此列）。
+
+        默认绿档；值超绿档升黄档、超黄档升上限；高值档持续
+        SPARK_Y_DECAY_S 无高值则逐级回落。纵坐标上界=当前档边界，
+        未超档不抬升 → 低值曲线波动小、不剧烈跳变。
+        """
+        if row.key in ("net.tx", "net.rx"):
+            return  # 网络保留动态 min/max
+        v = self._color_value(row)
+        if v is None:
+            return
+        g, y, _t = self._spark_bounds(row)
+        if v > y:
+            req = 2
+        elif v > g:
+            req = 1
+        else:
+            req = 0
+        now = time.time()
+        if req > row._y_level:
+            row._y_level = req
+            row._y_high_since = now
+        elif req == row._y_level and req > 0:
+            row._y_high_since = now   # 持续高值，刷新回落计时
+        elif row._y_level > 0 and now - row._y_high_since > SPARK_Y_DECAY_S:
+            row._y_level -= 1         # 超时无高值 → 逐级回落
+            row._y_high_since = now
 
     def _row_alpha(self, row: UnitRow) -> float:
         """高负载呼吸：进入最高阈值段 → 1Hz 正弦 0.3↔1.0；否则恒 1.0。
@@ -963,6 +1015,7 @@ class MonitorUnitWidget(QWidget):
             row.total = getattr(metric, "total", None)   # 用量类按比例配色（V16.2）
             # history：可用记值，否则 None（断线；网速记 canonical MB/s）
             row.history.append(metric.value if row.available else None)
+            self._update_y_level(row)   # V16.3 纵坐标阈值分档+回落
             self._refresh_breathing()
             # 网速 KB↔MB 切换 → 单位列宽变化，重算布局（其余数据跳动不重算）
             if self._display_unit(row) != old_unit:

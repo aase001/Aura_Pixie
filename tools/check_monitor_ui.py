@@ -911,6 +911,40 @@ def section_f():
        "底部锚定常量在位（固定 SPARK_H 预留已废弃）")
     w8.close()
 
+    # ---- F12 纵坐标阈值分档+回落（V16.3），网络保留动态；字号12 ----
+    ok(mu.FONT_PX == 15, "基础字号 15（V16.3 用户拍板 13→15）")
+    w9, hub9, mgr9 = _make_widget()
+    mgr9.register_widget("cpu.load", w9, ["cpu.load"])
+    r9 = w9._rows[0]
+    hub9.set_metric("cpu.load", 30.0, mh.STATUS_OK)
+    w9.update_data(hub9.snapshot()["cpu.load"])
+    ok(r9._y_level == 0, "低值(30<绿60) → 纵坐标绿档")
+    ok(w9._spark_bounds(r9)[0] == 60, "绿档上界=60")
+    hub9.set_metric("cpu.load", 70.0, mh.STATUS_OK)
+    w9.update_data(hub9.snapshot()["cpu.load"])
+    ok(r9._y_level == 1, "超绿(70>60) → 升黄档")
+    hub9.set_metric("cpu.load", 90.0, mh.STATUS_OK)
+    w9.update_data(hub9.snapshot()["cpu.load"])
+    ok(r9._y_level == 2, "超黄(90>85) → 升上限")
+    # 回落：低值 + 高值计时超时 → 逐级回落
+    hub9.set_metric("cpu.load", 10.0, mh.STATUS_OK)
+    w9.update_data(hub9.snapshot()["cpu.load"])
+    r9._y_high_since = time.time() - mu.SPARK_Y_DECAY_S - 1
+    w9._update_y_level(r9)
+    ok(r9._y_level == 1, "超时无高值 → 上限回落黄档")
+    r9._y_high_since = time.time() - mu.SPARK_Y_DECAY_S - 1
+    w9._update_y_level(r9)
+    ok(r9._y_level == 0, "再次超时 → 黄档回落绿档")
+    # 网络保留动态：_update_y_level 不改变网络行档位
+    w9n, hub9n, mgr9n = _make_widget()
+    mgr9n.register_widget("net.tx", w9n, ["net.tx"])
+    rn = w9n._rows[0]
+    hub9n.set_metric("net.tx", 90.0, mh.STATUS_OK)
+    w9n.update_data(hub9n.snapshot()["net.tx"])
+    ok(rn._y_level == 0, "网络行纵坐标不分档（保留动态 min/max）")
+    w9.close()
+    w9n.close()
+
     w.close()
     w2.close()
 
