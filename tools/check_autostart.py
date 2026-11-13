@@ -74,7 +74,8 @@ class FakeTasks:
             if "/ARG" in a:
                 self.assert_fail.append("/ARG 不是 schtasks 合法参数")
             tn, tr = a[a.index("/TN") + 1], a[a.index("/TR") + 1]
-            self.tasks[tn] = tr.replace('\\"', '"')
+            # /TR 现为普通引号包裹（无 \" 转义，V16.3），按原样入库
+            self.tasks[tn] = tr
         elif verb == "/Delete":
             self.tasks.pop(a[a.index("/TN") + 1], None)
         elif verb == "/Query":
@@ -181,6 +182,15 @@ M.set_autostart(True)
 check("开启后计划任务存在且名为 AuraPixie", _TN in ft.tasks, f"（{ft.tasks}）")
 check("任务命令行 = 当前 exe", ft.tasks.get(_TN) == f'"{_EXE}"',
       f"（{ft.tasks.get(_TN)}）")
+# V16.3 回归：/TR 不再做 \" 转义——subprocess 直传下反斜杠会被 schtasks
+# 存成字面字符，任务目标变 \"路径\" 找不到程序。假库按原样入库，
+# 若转义回归则下面两条与「任务命令行 = 当前 exe」必红。
+check("/TR 为普通引号包裹、无 \\\" 转义（目标程序可被找到）",
+      ft.tasks.get(_TN) == f'"{_EXE}"' and '\\"' not in ft.tasks.get(_TN, ""),
+      f"（{ft.tasks.get(_TN)}）")
+check("_task_tr_value 不含反斜杠转义（源码口径看守）",
+      '\\"' not in M._task_tr_value() and M._task_tr_value() == M._run_value(),
+      f"（{M._task_tr_value()}）")
 check("创建参数含 ONLOGON / HIGHEST / F，且无非法 /ARG",
       not ft.assert_fail, f"（{ft.assert_fail}）")
 check("旧注册表启动项被清理（避免双份自启）", _TN not in reg.data[_RUN_SUB])

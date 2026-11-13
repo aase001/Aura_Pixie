@@ -1574,7 +1574,8 @@ def _schtasks(argv: list[str]) -> subprocess.CompletedProcess:
     if _autostart_dryrun():
         a = argv
         if a and a[0] == "/Create":
-            _dry_tasks[a[a.index("/TN") + 1]] = a[a.index("/TR") + 1].replace('\\"', '"')
+            # /TR 现为普通引号包裹（无 \" 转义，V16.3），按原样入库
+            _dry_tasks[a[a.index("/TN") + 1]] = a[a.index("/TR") + 1]
         elif a and a[0] == "/Delete":
             _dry_tasks.pop(a[a.index("/TN") + 1], None)
         elif a and a[0] == "/Query":
@@ -1648,8 +1649,14 @@ def _xml_unescape(s: str) -> str:
 
 
 def _task_tr_value() -> str:
-    """/TR 参数值：schtasks 要求内层引号转义为 \\"，否则带空格路径会被截断。"""
-    return _run_value().replace('"', '\\"')
+    """/TR 参数值：普通双引号包裹路径（带空格路径不被截断）。
+
+    不做反斜杠转义：本程序经 subprocess 列表直传 schtasks（无 shell），
+    list2cmdline 会把 \\" 再转义一层，schtasks 将反斜杠当字面字符存进
+    任务动作 → 目标变成 \\"路径\\" 找不到程序（V16.3 修复）。
+    普通引号由 CRT 命令行解析正确还原，schtasks 存入 Command 为纯路径。
+    """
+    return _run_value()
 
 
 def _task_create_argv() -> list[str]:
