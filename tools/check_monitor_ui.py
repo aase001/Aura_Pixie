@@ -53,15 +53,7 @@ def ok(cond, msg):
         print(f"  FAIL: {msg}")
 
 
-def raises_not_implemented(fn, msg):
-    try:
-        fn()
-    except NotImplementedError:
-        ok(True, msg)
-    except Exception as e:  # noqa: BLE001
-        ok(False, f"{msg}（抛了 {type(e).__name__} 而非 NotImplementedError）")
-    else:
-        ok(False, f"{msg}（未抛 NotImplementedError，空壳提前实现了？）")
+
 
 
 # ---------------------------------------------------------------------------

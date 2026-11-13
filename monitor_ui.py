@@ -12,7 +12,7 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
   - 阶段 2：五态驱动视觉 + 语义色阈值插值 + 高负载呼吸 + sparkline + 拉取节奏
   - 阶段 3：SnapGroup + 拖动跟手 + 幽灵轮廓预览 + 松手 280ms 缓入缓出吸附
   - 阶段 4：右键拖拽解绑 + 组解散复位 + 最小菜单 + 四层残留清扫 + 可见性联动
-  - 阶段 5：集成接线（方法留 NotImplementedError）
+  - 阶段 5：集成接线（已实现，归 main.py 驱动；本模块无遗留空壳方法）
 
 后端契约（monitor_hub.py，只读消费）：
   - 每 tick 只调一次 snapshot()，全单元共享同一帧；禁止 get(key)
@@ -745,21 +745,6 @@ class MonitorUnitWidget(QWidget):
             self._last_h = total_h
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.update_layout", e)
-
-    def _natural_width(self) -> int:
-        """当前行内容自然宽（三列实际文本+列间距+内边距，×缩放）。
-
-        供管理器判定是否需要全局扩宽；与 update_layout 同一量宽口径。
-        """
-        fm = QFontMetrics(self._font())
-        s = self.scale_getter()
-        rows = self._rows
-        w_label = max((fm.horizontalAdvance(r.label) for r in rows), default=0)
-        w_value = max((fm.horizontalAdvance(self._value_text(r)) for r in rows),
-                      default=0)
-        w_unit = max((fm.horizontalAdvance(r.unit) for r in rows), default=0)
-        return (w_label + w_value + w_unit
-                + 2 * round(COL_GAP * s) + 2 * round(PAD_X * s))
 
     def _label_natural_width(self) -> int:
         """仅标签（结构性内容）的自然宽，供扩宽判据（V16.3）。
