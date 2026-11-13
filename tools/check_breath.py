@@ -1252,6 +1252,13 @@ def main() -> int:
     M.install_theme_watcher(_QApp.instance())
     check("主题监视器已安装（保引用非空）",
           len(M._theme_watcher_keep) >= 1, "", failures)
+    # 中文翻译双 .qm 都装（坑 52）：qtbase 覆盖标准按钮词条，qt 补充其余词条。
+    # 回归判据：旧实现外层 `if loaded: break` 在 qtbase 装成功后跳出，qt_zh_CN
+    # 永不安装——两个 base 都必须尝试加载（找到各自目录即停，互不短路）。
+    M.install_chinese_buttons(_QApp.instance())
+    check("中文翻译 qtbase + qt 两个都安装（保引用 ≥2）",
+          len(M._zh_translators_keep) >= 2,
+          f"（实装 {len(M._zh_translators_keep)} 个）", failures)
     # 模拟系统切深色 → 回调应整体重应用为黑底白字（改坏会红）
     _orig_dark2 = M.system_dark_mode
     _orig_applied = M._applied_dark

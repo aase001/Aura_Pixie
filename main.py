@@ -354,17 +354,16 @@ def install_chinese_buttons(app) -> None:
     # qtbase_zh_CN.qm，否则散落消息框按钮回退英文（坑 52）。
     tdirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "translations"),
              QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)]
+    # 两个 base 都要装：qtbase 覆盖标准按钮词条、qt 补充其余词条（坑 52）。
+    # 每个 base 找到首个可用目录即停（内层 break），但 base 之间互不短路——
+    # 旧实现外层 `if loaded: break` 会在 qtbase 装成功后跳过 qt_zh_CN。
     for base in ("qtbase_zh_CN", "qt_zh_CN"):
-        loaded = False
         for tdir in tdirs:
             tr = QTranslator(app)
             if tr.load(base, tdir):
                 app.installTranslator(tr)
                 _zh_translators_keep.append(tr)
-                loaded = True
                 break
-        if loaded:
-            break
 
 # 配置文件主位置：从本版本起迁移到 %LOCALAPPDATA%\Aura_Pixie\setting.yaml
 # （exe 目录可能只读；用户配置统一放系统为当前用户保留的本地应用数据目录）
