@@ -2752,8 +2752,8 @@ CODE_HELP_TEXT = (
     "  · 参数名下方小字标注对应设备名（每次运行实时读取，换机自动更新）。\n\n"
     "■ 重置按钮（「保存」左侧）\n"
     "  · 一键取消勾选全部参数并清除窗口位置记忆（总开关不受影响）。\n"
-    "  · 重置后再次勾选参数，窗格从初始位置重新排开（首位窗格在球体旁，\n"
-    "    其余向右依次排开），用于窗格位置混乱/丢失时找回。\n\n"
+    "  · 重置后再次勾选参数，窗格统一在球体左边重叠显示，由你手动拖开/\n"
+    "    磁吸排列，用于窗格位置混乱/丢失时找回。\n\n"
     "■ 窗格显示\n"
     "  · 三列「名称 | 数值 | 单位」，数值按阈值范围着语义色（绿/黄/红），\n"
     "    进入最高阈值段时数值与曲线 1Hz 呼吸闪烁。\n"
@@ -2765,10 +2765,13 @@ CODE_HELP_TEXT = (
     "  · 网速不足 1MB/s 自动切 KB/s 显示。\n"
     "  · 无读数指标灰显 + 状态小字（需管理员/驱动、断流、不可用、采集器缺失）。\n\n"
     "■ 磁吸交互\n"
+    "  · 无记忆位置的窗格（首次勾选/重置后/手动多选）统一在球体左边重叠\n"
+    "    显示，由你手动拖开排列；有记忆位置的窗格按记忆位恢复。\n"
     "  · 左键拖动窗格即时跟手；靠近另一窗/组（<20px）出现虚线幽灵预览。\n"
     "  · 松手平滑吸附：左右贴→顶边对齐，上下贴→左缘对齐；整组刚性移动。\n"
     "  · 拖一组靠近另一组 → 两组合并；靠近屏幕边 → 整组贴边。\n"
-    "  · 右键轻点窗格 = 菜单（关闭本窗 / 打开设置）；右键拖动 >4px = 解绑出组。\n\n"
+    "  · 右键轻点窗格 = 菜单（关闭本窗 / 打开设置）；右键拖动 >4px = 解绑出组。\n"
+    "  · 「关闭本窗」会同步取消监视设置里对应复选框（再勾选才重新建窗）。\n\n"
     "■ 生命周期\n"
     "  · 关窗不停采（短时间重开数据连续、曲线秒回）；关闭所有窗格静置约 5 分钟停采。\n"
     "  · 退出主程序必停采集侧车。\n\n"
@@ -3813,6 +3816,8 @@ class AuraBall(QWidget):
         self._state = "hidden"          # hidden | expanding | open | collapsing
         self._progress = 0.0
         self._highlight = -1
+        # V16.3：右键菜单期间抑制悬停展开/收起重开，防扇形挡菜单
+        self._menu_active = False
         self._fill_color = center_color_at(0.0)
         self._flash: dict | None = None
         self._settings_dlg: SettingsDialog | None = None
@@ -4411,6 +4416,16 @@ class AuraBall(QWidget):
                 if self._progress <= 0.0:
                     self._on_hidden()
             return
+        # V16.3：右键菜单期间——不计悬停、不展开、收起不重开，
+        # 但收起动画继续推进（防扇形挡菜单/半开卡住）。
+        if self._menu_active:
+            self._highlight = -1
+            self._hover_ms = 0.0
+            if self._state == "collapsing":
+                self._progress = max(0.0, self._progress - dt_ms / CONFIG["collapse_ms"])
+                if self._progress <= 0.0:
+                    self._on_hidden()
+            return
         self._highlight = sector_index_at(dx, dy, len(self._sectors)) if in_ring else -1
 
         if self._state == "hidden":
@@ -4833,6 +4848,14 @@ class AuraBall(QWidget):
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         try:
+            # V16.3：右键先收扇形——置顶展开的扇形会挡住右键菜单。
+            # 打断等待中的次级展开 + 进入收起；菜单期间 _menu_active 抑制
+            # 悬停重开（_evaluate），菜单结束（exec 返回）恢复。
+            if self._sub_launching or self._pending_sub_sector is not None:
+                self._abort_sub_launch()
+            if self._state != "hidden":
+                self._enter_collapsing()
+            self._menu_active = True
             # V10：右键不再触发次级扇形（改由单击），任何位置一律弹默认菜单
             menu = QMenu(self)
             act_settings = menu.addAction("设置")
@@ -4840,7 +4863,10 @@ class AuraBall(QWidget):
             act_reload = menu.addAction("重载")
             act_disappear = menu.addAction("消失")
             act_quit = menu.addAction("退出")
-            chosen = menu.exec(event.globalPos())
+            try:
+                chosen = menu.exec(event.globalPos())
+            finally:
+                self._menu_active = False
             if chosen is act_settings:
                 # 崩溃根因修复：绝不能在 QMenu.exec 的模态栈还没退出时再嵌一层
                 # QDialog.exec —— 嵌套模态窗在 Windows 上会中断主事件循环、程序整体退出。
@@ -5393,9 +5419,22 @@ def _get_monitor_settings_dialog():
     return _MONITOR_SETTINGS_DLG
 
 
-def open_monitor_settings() -> None:
-    """监视窗「打开设置」入口：打开监视设置窗（非模态）。"""
+def open_monitor_settings(close_key: str | None = None) -> None:
+    """监视窗「打开设置」入口：打开监视设置窗（非模态）。
+
+    close_key（V16.3）：窗格右键「关闭本窗」传入自身键 → 取消对应复选框
+    并关窗（走 _on_param_toggled 同步配置），不打开设置窗。
+    """
     try:
+        if close_key is not None:
+            dlg = _get_monitor_settings_dialog()
+            chk = dlg._param_checks.get(close_key)
+            if chk is not None:
+                if chk.isChecked():
+                    chk.setChecked(False)   # _on_param_toggled 同步配置+关窗
+                else:
+                    _monitor_sync_windows(dlg._cfg)
+            return
         dlg = _get_monitor_settings_dialog()
         dlg.show()
         dlg.raise_()

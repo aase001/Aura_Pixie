@@ -1447,18 +1447,46 @@ class MonitorUnitWidget(QWidget):
 
         菜单回调一律 QTimer.singleShot(0, ...) 非模态触发，禁 exec() 嵌套（坑 6）。
         用 popup（非模态）而非 exec；不得整体屏蔽 contextMenuEvent。
+        V16.3：菜单必须保引用（_min_menu）——局部变量函数返回即被 GC，
+        原生菜单留在屏幕上卡死；aboutToHide 时 deleteLater 安全释放。
+        「关闭本窗」走 _close_via_settings（同步设置窗复选框），不再裸 close。
         """
         try:
+            if getattr(self, "_min_menu", None) is not None:
+                self._min_menu.deleteLater()
             menu = QMenu(self)
+            self._min_menu = menu
             act_close = menu.addAction("关闭本窗")
             act_settings = menu.addAction("打开设置")
             act_close.triggered.connect(
-                lambda: QTimer.singleShot(0, self.close))
+                lambda: QTimer.singleShot(0, self._close_via_settings))
             act_settings.triggered.connect(
                 lambda: QTimer.singleShot(0, self._open_settings))
+            menu.aboutToHide.connect(self._release_min_menu)
             menu.popup(global_pos)
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui._show_min_menu", e)
+
+    def _release_min_menu(self) -> None:
+        """菜单隐藏后安全释放（保引用解除，防卡屏/防泄漏）。"""
+        menu = getattr(self, "_min_menu", None)
+        self._min_menu = None
+        if menu is not None:
+            menu.deleteLater()
+
+    def _close_via_settings(self) -> None:
+        """关闭本窗：有设置回调走设置同步（取消复选框+关窗），无则裸关。
+
+        V16.3：裸 self.close 只藏窗不改配置，设置窗复选框仍勾着，
+        用户再取消勾选反而把窗又建出来。统一走 _on_param_toggled(False)。
+        """
+        try:
+            if self._settings_callback is not None:
+                self._settings_callback(close_key=self.unit_key)
+            else:
+                self.close()
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui._close_via_settings", e)
 
     def _open_settings(self) -> None:
         try:
@@ -1742,20 +1770,28 @@ class MonitorWindowManager:
                 if self._overlaps_others(widget):
                     self._relocate_right_of_first(widget)
                 return
-            first = self.first_widget()
-            if first is None or first is widget:
-                # 首位窗格：按注入 place_fn 定位（球体旁空间大侧）
-                widget.place_fn(widget, anchor_rect)
-                return
-            fr = first.frameGeometry()
-            wr = widget.frameGeometry()
-            avail = self._screen_avail_for(fr)
-            pos = self._find_free_slot(
-                fr.left() + fr.width(), fr.top(), wr.width(), wr.height(),
-                avail, exclude=(widget,))
-            widget.move(*pos)
+            # V16.3 用户拍板：无记忆位置的窗格（首建/重置后/手动多选）
+            # 统一在球体左边重叠显示，由用户手动排列——取代旧的
+            # 「首位球旁 + 向右依次排开」（实测排列混乱：重叠/球右/换行下排）。
+            # 有记忆位仍走上面的记忆分支（尊重已恢复位置）。
+            self._place_left_of_ball(widget, anchor_rect)
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.place_for_show", e)
+
+    def _place_left_of_ball(self, widget, anchor_rect: QRect) -> None:
+        """无记忆窗格统一摆球体左边、垂直居中，多窗重叠由用户手动排列。
+
+        夹进锚点所在屏可用区（球贴左缘时不越屏）。重叠是有意设计，
+        不做防重叠归位（用户自行拖开/磁吸）。
+        """
+        wr = widget.frameGeometry()
+        x = anchor_rect.left() - wr.width()
+        y = anchor_rect.center().y() - wr.height() // 2
+        avail = self._screen_avail_for(anchor_rect)
+        if avail is not None:
+            x = min(max(x, avail.left()), avail.right() - wr.width() + 1)
+            y = min(max(y, avail.top()), avail.bottom() - wr.height() + 1)
+        widget.move(x, y)
 
     def _overlaps_others(self, widget) -> bool:
         """widget 是否与其他可见窗格重叠（自身组成员除外——整组刚性移动）。"""

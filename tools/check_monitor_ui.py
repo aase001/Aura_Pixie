@@ -629,14 +629,13 @@ def section_e():
        f"update_layout 异常经 log_fn（{logged}）")
     w_log.close()
 
-    # ---- E10 show_at 调 place_fn 再 show ----
-    placed = []
-    w_p, _, _ = _make_widget()
-    w_p.place_fn = lambda widget, anchor: placed.append((widget, anchor))
+    # ---- E10 show_at 走管理器摆放（V16.3 无记忆→球左重叠）再 show ----
+    w_p, _, mgr_p = _make_widget()
     w_p.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
-    w_p.show_at("ANCHOR")
-    ok(len(placed) == 1 and placed[0][1] == "ANCHOR",
-       "show_at 调 place_fn(widget, anchor)")
+    anchor_p = QRect(900, 500, 60, 60)
+    w_p.show_at(anchor_p)
+    ok(w_p.frameGeometry().right() <= anchor_p.left(),
+       "show_at 无记忆 → 球左重叠（管理器摆放）")
     ok(w_p.isVisible(), "show_at 后窗口可见")
     w_p.close()
 
@@ -1711,6 +1710,25 @@ def section_j():
            f"重勾走初始摆放而非旧记忆位（{w_cpu.pos()}）")
         dlg._param_checks["cpu.load"].setChecked(False)
         APP.processEvents()
+        # J19 右键「关闭本窗」→ 设置复选框同步取消（V16.3）
+        # 真实路径走设置窗单例（_get_monitor_settings_dialog），故注册单例
+        M._MONITOR_SETTINGS_DLG = dlg
+        dlg._param_checks["cpu.load"].setChecked(True)
+        APP.processEvents()
+        w_cpu = mgr._widgets["cpu.load"]
+        ok(w_cpu.isVisible() and dlg._param_checks["cpu.load"].isChecked(),
+           "J19 前置：窗格可见且复选框勾选")
+        w_cpu._close_via_settings()
+        APP.processEvents()
+        ok(not dlg._param_checks["cpu.load"].isChecked(),
+           "关闭本窗 → 设置复选框同步取消")
+        ok(not w_cpu.isVisible(), "关闭本窗 → 窗格隐藏")
+        ok(not M.load_monitor_config()["units"]["cpu.load"]["enabled"],
+           "关闭本窗 → 配置同步停用")
+        # 再取消勾选（已 unchecked）不会把窗又建出来
+        dlg._param_checks["cpu.load"].setChecked(False)
+        APP.processEvents()
+        ok(not w_cpu.isVisible(), "复选框已取消后再操作不会重建窗格")
         dlg.close()
     finally:
         for w in list(mgr._widgets.values()):
@@ -2586,7 +2604,7 @@ def section_o():
     import time as _t
     from PySide6.QtCore import QEvent, QPoint, QRect
 
-    # ---- O1 首次批量建窗零重叠（无布局记忆，首位窗格向右排开）----
+    # ---- O1 无记忆批量建窗 → 球左重叠（V16.3 用户拍板，手动排列）----
     hub = FakeHub()
     inj = make_injections()
     mgr = mu.MonitorWindowManager(hub, **inj)
@@ -2597,18 +2615,25 @@ def section_o():
     for key in keys:
         w = mu.MonitorUnitWidget(key, hub, manager=mgr, **w_inj)
         mgr.register_widget(key, w, [key])
-        w.show_at(anchor)   # 全部同一锚点——旧实现会叠在一起
+        w.show_at(anchor)   # 无记忆 → 统一球左重叠
         ws.append(w)
     APP.processEvents()
     ok(mgr.first_widget() is ws[0], "首位窗格=最先创建者")
-    overlaps = [(a.unit_key, b.unit_key)
-                for i, a in enumerate(ws) for b in ws[i + 1:]
-                if mgr._rects_overlap(a.frameGeometry(), b.frameGeometry())]
-    ok(not overlaps, f"批量建窗零重叠（冲突对 {overlaps}）")
-    ok(ws[1].frameGeometry().left() == ws[0].frameGeometry().left() + ws[0].width(),
-       "第二窗格在首位窗格右边")
-    ok(ws[1].frameGeometry().top() == ws[0].frameGeometry().top(),
-       "向右排开顶边对齐")
+    # 球左：右缘贴球左缘、垂直居中
+    ok(all(w.frameGeometry().right() <= anchor.left() for w in ws),
+       "无记忆窗格统一在球体左边")
+    ok(all(w.frameGeometry().top() == anchor.center().y() - w.height() // 2
+           for w in ws), "球左垂直居中")
+    # 重叠是有意设计（用户手动排列）
+    ok(all(mgr._rects_overlap(ws[0].frameGeometry(), w.frameGeometry())
+           for w in ws[1:]), "无记忆窗格重叠显示（用户手动排列）")
+    # 球贴左缘 → 夹进屏幕不越界
+    w_edge = mu.MonitorUnitWidget("net.tx", hub, manager=mgr, **w_inj)
+    mgr.register_widget("net.tx", w_edge, ["net.tx"])
+    w_edge.show_at(QRect(0, 500, 60, 60))
+    APP.processEvents()
+    ok(w_edge.frameGeometry().left() >= 0, "球贴左缘 → 窗格夹进屏幕不越界")
+    w_edge.close()
 
     # ---- O2 松手重叠 → 自动归位到首位窗格右边 ----
     mover = ws[2]
