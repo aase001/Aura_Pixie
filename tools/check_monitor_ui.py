@@ -605,7 +605,14 @@ def section_e():
     ok(mu.text_color({"system_dark_mode": False}).lightness() < 128,
        "浅色系统 → 深字（白字不可见问题）")
     ok(mu.halo_color({"color_mid": "#FF0000"}).name().upper() == "#FF0000",
-       "光晕基色=主题过渡色")
+       "光晕基色=主题过渡色（无监视色回退）")
+    # V16.3 修复：监视色同时参与中心填充与边缘虚化（同色）
+    ok(mu.halo_color({"monitor_color": "#181A20", "color_mid": "#FF0000"})
+       .name().upper() == "#181A20",
+       "边缘虚化优先用资源监视色（不再只用呼吸中色）")
+    ok(mu.halo_color({"monitor_color": "#181A20"}).name().upper()
+       == mu.body_color({"monitor_color": "#181A20"}).name().upper(),
+       "边缘虚化与中心填充同色（监视色参与整体）")
 
     # ---- E8 数值格式化走 hub.fmt_value（纯数值，单位独立 C 列）----
     w_f, _, _ = _make_widget()

@@ -344,7 +344,14 @@ def breath_alpha(elapsed_ms: float) -> float:
 
 
 def halo_color(theme: dict) -> QColor:
-    """光晕/本体基色 = 主题过渡色（呼吸三色之中色）。"""
+    """边缘虚化基色（V16.3 修复）：优先取「资源监视」颜色设置项
+    （theme.monitor_color），与中心填充 body_color 同色——颜色值同时参与
+    整个窗格的填充与边缘虚化；无该设置时回退主题过渡色（呼吸三色之中色）。"""
+    mc = theme.get("monitor_color")
+    if mc:
+        c = QColor(str(mc))
+        if c.isValid():
+            return c
     c = QColor(str(theme.get("color_mid", "#283FFE")))
     return c if c.isValid() else QColor("#283FFE")
 
