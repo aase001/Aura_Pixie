@@ -730,8 +730,9 @@ _KIND_RE = re.compile(r"^\s*(py|python|cmd|ps|powershell|pwsh|pwsh7|ps7)\s*:\s?(
 def classify_code(text: str) -> tuple[str, str, str]:
     """把功能代码归一成 (kind, payload, err)。
 
-    kind: "py" | "cmd" | "ps"；err 非空表示未通过校验、不应执行。
-    无标记默认为 py；cmd 多行会合并为一行（换行→" & "，cmd 的链接方式）。
+    kind: "py" | "cmd" | "ps" | "pwsh"；err 非空表示未通过校验、不应执行。
+    无标记默认为 py；cmd 多行由 run_code 写 .bat 逐行执行（仅 GBK 兜底通道
+    才用 " & " 连接成一行），本函数只做格式归类不改写换行。
     """
     body = (text or "").strip()
     if not body:

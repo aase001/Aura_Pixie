@@ -629,7 +629,8 @@ class MonitorUnitWidget(QWidget):
         """首次显示：管理器防重叠摆放（V16.2）再 show。
 
         旧实现每个窗格都 place_fn 到球体旁同一坐标 → 首启全部重叠；
-        现由管理器统一摆放：有布局记忆用记忆位，无记忆按首位窗格向右排开。
+        现由管理器统一摆放：有布局记忆用记忆位，无记忆统一在球体左边重叠
+        （V16.3 用户拍板，由用户手动拖开/磁吸排列）。
         """
         try:
             place = getattr(self.manager, "place_for_show", None)
@@ -650,12 +651,12 @@ class MonitorUnitWidget(QWidget):
         return f
 
     def update_layout(self) -> None:
-        """固定基准窗格布局（用户拍板：初始 200×40px，×显示缩放）。
+        """固定基准窗格布局（用户拍板：初始 250×80px，×显示缩放）。
 
         宽：列宽按「白名单全量标签/典型值样本/全量单位」与当前行文本取大者
         预留（数据跳动不再撑宽）；默认恒 BASE_W，列间富余均分；任一窗格
-        内容自然宽超基准 → 管理器把全部窗格统一切到 BASE_W_EXPANDED
-        （250px，一改变就全改变），不再逐数据无限长大。
+        标签自然宽超基准 → 管理器把全部窗格统一切到 BASE_W_EXPANDED
+        （350px，一改变就全改变），不再逐数据无限长大。
         高：恒 BASE_H（状态小字叠加在数值行下方绘制，不额外占高）。
         末尾 adjustSize()（Qt 未 show 读尺寸是假 640x480，坑 50）。
         """
@@ -884,7 +885,7 @@ class MonitorUnitWidget(QWidget):
             p.drawText(QRectF(x_unit, y, w_unit, self._row_h),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        self._display_unit(row))
-            # 状态小字（数值行下方叠加绘制，不额外占窗格高度——固定 40px 口径）
+            # 状态小字（数值行下方叠加绘制，不额外占窗格高度——固定 80px 口径）
             st_text = STATUS_TEXT.get(row.status, "")
             if not row.available and st_text:
                 p.setFont(small)
@@ -1490,7 +1491,7 @@ class MonitorUnitWidget(QWidget):
             b._contact_edges = [self._opposite_edge(edge)]
             a._snap_constraints = [c for c in a._snap_constraints if c[0] is not b]
             a._snap_constraints.append((b, edge))
-        # 其余成员接触边清空（仅接触窗对画融合虚线）
+        # 其余成员接触边清空（接触边仅作元数据保留；融合虚线已废除 V16.3）
         for w in keep_grp.members:
             if w is not a and w is not b:
                 w._contact_edges = []
@@ -1871,8 +1872,8 @@ class MonitorWindowManager:
         return screen.availableGeometry() if screen is not None else None
 
     def place_for_show(self, widget, anchor_rect: QRect) -> None:
-        """显示前防重叠摆放（V16.2）：有布局记忆用记忆位（冲突顺延），
-        无记忆以首位窗格为基准向右依次排开、超屏换行，互不重叠。"""
+        """显示前摆放（V16.3）：有布局记忆用记忆位（冲突外排），
+        无记忆统一在球体左边重叠显示，由用户手动拖开/磁吸排列。"""
         try:
             layout = {}
             try:
@@ -2060,7 +2061,7 @@ class MonitorWindowManager:
 
         隐藏全部窗格、解散所有磁吸组、逐窗清吸附状态并把位置归零。
         位置 (0,0) 是「未摆放」哨兵——重勾参数时 place_for_show 走
-        「首位窗格球旁定位 + 向右依次排开」的初始渲染链路，而不是
+        「球体左边重叠」的初始摆放链路（V16.3），而不是
         「尊重现位」分支（否则重置后重勾会回到旧位置）。
         实例与历史缓冲保留（重勾秒回曲线）；扩宽档 _width_expanded
         不重置（内容驱动、只升不降的既定口径）。
