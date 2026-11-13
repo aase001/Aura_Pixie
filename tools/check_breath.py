@@ -2131,11 +2131,36 @@ def main() -> int:
     os.remove(top_tmp)
 
     dlg_top = M.SettingsDialog([{"name": "a", "code": "", "active": False}])
-    idx_t = dlg_top.bar.indexOf(dlg_top.chk_topmost)   # noqa: SLF001
-    idx_a = dlg_top.bar.indexOf(dlg_top.chk_autostart)  # noqa: SLF001
-    check("设置窗含「保持球体置顶」且位于开机自启动左侧",
-          idx_t >= 0 and idx_t < idx_a, f"（topmost@{idx_t} autostart@{idx_a}）", failures)
+    check("设置窗不再含「保持球体置顶」（V16.4 迁至外观窗）",
+          not hasattr(dlg_top, "chk_topmost"), "", failures)
     dlg_top.deleteLater()
+    # V16.4：置顶复选框在外观窗、与球体呼吸同行；保存写 window 块并即时生效
+    dlg_tp = M.AppearanceSettingsDialog()
+    check("外观窗含「保持球体置顶」且与球体呼吸同行",
+          dlg_tp.chk_topmost.text() == "保持球体置顶"
+          and dlg_tp.chk_topmost.parent() is dlg_tp
+          and dlg_tp.chk_breath.parent() is dlg_tp, "", failures)
+    _gl_tp = dlg_tp.layout().itemAt(0).layout()
+    _row0 = _gl_tp.itemAt(0).layout()
+    check("置顶与呼吸在同一行布局",
+          _row0 is not None
+          and _row0.indexOf(dlg_tp.chk_breath) >= 0
+          and _row0.indexOf(dlg_tp.chk_topmost) >= 0, "", failures)
+    check("settings 收集 topmost 键", "topmost" in dlg_tp.settings(), "", failures)
+    _saved_top = M.topmost_enabled()
+    try:
+        dlg_tp.chk_topmost.setChecked(True)
+        M._apply_appearance_config(dlg_tp.settings())
+        check("外观保存 → 置顶写 window.always_on_top",
+              M.topmost_enabled() is True, "", failures)
+        check("置顶不写进 appearance 块",
+              "topmost" not in M.load_appearance_config(), "", failures)
+        dlg_tp.chk_topmost.setChecked(False)
+        M._apply_appearance_config(dlg_tp.settings())
+        check("取消勾选 → 置顶写回 False", M.topmost_enabled() is False, "", failures)
+    finally:
+        M.set_topmost(_saved_top)
+    dlg_tp.deleteLater()
 
     # ---------- 20 休眠顺色（浅色→黑 / 深色→白） ----------
     print("\n休眠顺色渲染")
