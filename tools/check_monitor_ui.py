@@ -1162,6 +1162,100 @@ def section_p():
        f"refresh_theme 恢复填充（alpha={_alpha(img16b, w16.width() // 2, 12)}）")
     w16.close()
 
+    # ---- F17 每条曲线独占全幅曲线区（V16.6 修复：多行窗格不再分带压缩）----
+    # 失败形态：旧 band_h=spark_h/n 把温度曲线压进下半带，48/60 映射到
+    # 距底 36px（用户实测「40px 还要多」）；双行窗格第二条曲线只占半带。
+    # 手算：区底 74、区高 45、顶 29；48/60 → y=74-0.8×45=38。
+    from PySide6.QtGui import QPainterPath as _QPP17
+    w17, hub17, mgr17 = _make_widget()
+    mgr17.register_widget("cpu.temp", w17, ["cpu.temp"])
+    for v in (40.0, 48.0):
+        hub17.set_metric("cpu.temp", v, mh.STATUS_OK)
+        w17.update_data(hub17.snapshot()["cpu.temp"])
+    pts17 = []
+    in_spark17 = [False]   # 仅曲线绘制期间收点（排除光晕等其他路径）
+    orig_lt17, orig_mt17 = _QPP17.lineTo, _QPP17.moveTo
+    orig_ps17 = mu.MonitorUnitWidget._paint_sparklines
+
+    def _spy_ps17(self, p, body, s):
+        in_spark17[0] = True
+        try:
+            return orig_ps17(self, p, body, s)
+        finally:
+            in_spark17[0] = False
+
+    def _spy_lt17(self, *a):
+        if in_spark17[0]:
+            x, y = (a[0], a[1]) if len(a) == 2 else (a[0].x(), a[0].y())
+            pts17.append((x, y))
+        return orig_lt17(self, *a)
+
+    def _spy_mt17(self, *a):
+        if in_spark17[0]:
+            x, y = (a[0], a[1]) if len(a) == 2 else (a[0].x(), a[0].y())
+            pts17.append((x, y))
+        return orig_mt17(self, *a)
+
+    _QPP17.lineTo = _spy_lt17
+    _QPP17.moveTo = _spy_mt17
+    mu.MonitorUnitWidget._paint_sparklines = _spy_ps17
+    try:
+        w17.show()          # 打桩就位后再首绘，确保捕获真实渲染
+        APP.processEvents()
+        _grab(w17)
+    finally:
+        _QPP17.lineTo = orig_lt17
+        _QPP17.moveTo = orig_mt17
+        mu.MonitorUnitWidget._paint_sparklines = orig_ps17
+    ys17 = sorted({round(y, 2) for _x, y in pts17})
+    ok(any(abs(y - 38.0) <= 0.6 for y in ys17)
+       and any(abs(y - 44.0) <= 0.6 for y in ys17),
+       f"温度 40/48 按 45px 全幅映射 y≈44/38（实得 {ys17}；旧分带口径 50/56 必红）")
+    w17.close()
+    # 双行窗格（cpu.load+cpu.temp）：两条曲线都占满 45px 区（全幅锯齿）
+    w17b, hub17b, mgr17b = _make_widget()
+    mgr17b.register_widget("cpu", w17b, ["cpu.load", "cpu.temp"])
+    for v in (0.0, 100.0, 0.0, 100.0):
+        hub17b.set_metric("cpu.load", v, mh.STATUS_OK)
+        w17b.update_data(hub17b.snapshot()["cpu.load"])
+    for v in (0.0, 110.0, 0.0, 110.0):
+        hub17b.set_metric("cpu.temp", v, mh.STATUS_OK)
+        w17b.update_data(hub17b.snapshot()["cpu.temp"])
+    paths17 = []
+    in_spark17b = [False]
+    from PySide6.QtGui import QPainter as _QP17
+    orig_dp17 = _QP17.drawPath
+    orig_ps17b = mu.MonitorUnitWidget._paint_sparklines
+
+    def _spy_ps17b(self, p, body, s):
+        in_spark17b[0] = True
+        try:
+            return orig_ps17b(self, p, body, s)
+        finally:
+            in_spark17b[0] = False
+
+    def _spy_dp17(self, path):
+        if in_spark17b[0]:
+            paths17.append(path.boundingRect())
+        return orig_dp17(self, path)
+
+    _QP17.drawPath = _spy_dp17
+    mu.MonitorUnitWidget._paint_sparklines = _spy_ps17b
+    try:
+        w17b.show()         # 打桩就位后再首绘
+        APP.processEvents()
+        _grab(w17b)
+    finally:
+        _QP17.drawPath = orig_dp17
+        mu.MonitorUnitWidget._paint_sparklines = orig_ps17b
+    bbs = [bb for bb in paths17 if bb.height() > 1]
+    ok(len(bbs) >= 2, f"双行窗格两条曲线均绘制（{len(bbs)} 条）")
+    ok(all(abs(bb.top() - 29.0) <= 1.5 and abs(bb.bottom() - 74.0) <= 1.5
+           for bb in bbs),
+       f"两条曲线都占满 45px 全幅区（tops={[round(b.top(), 1) for b in bbs]}，"
+       f"旧分带第二条 top≈51.5 必红）")
+    w17b.close()
+
 
 # ---------------------------------------------------------------------------
 # G. 阶段 3：磁吸预览与松手吸附

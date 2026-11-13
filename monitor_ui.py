@@ -944,7 +944,6 @@ class MonitorUnitWidget(QWidget):
         gap = getattr(self, "_col_gap", round(COL_GAP * s))
         x0 = body.left() + pad_x
         full_w = w_label + w_value + w_unit + 2 * gap
-        n = max(1, len(self._rows))
         # 底部锚定：区底 = 本体底边 - 留白；区高 ≤ 45px×缩放（V16.6）
         bottom = body.bottom() - round(SPARK_BOTTOM_GAP_PX * s)
         spark_h = min(round(SPARK_MAX_H_PX * s),
@@ -952,9 +951,12 @@ class MonitorUnitWidget(QWidget):
         y_base = bottom - spark_h
         pen_w = max(1.0, SPARK_LINE_PX * s)
         for i, row in enumerate(self._rows):
-            # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽
-            band_h = spark_h / n
-            top = y_base + i * band_h
+            # V16.6 修复：每条曲线独占全幅曲线区（旧 band_h=spark_h/n 按行
+            # 分带，多行窗格曲线被压进下半带，纵坐标比例失真——用户实测
+            # 温度 48/60 画到距底 40px+）。多行窗格各曲线同区叠加，
+            # 语义色区分；水平铺满内容宽。
+            band_h = spark_h
+            top = y_base
             # 曲线排除清单（V16.3 用户拍板：维护成 SPARK_EXCLUDE_KEYS 列表，
             # 新指标直接加进去）。按键判定不依赖标签文本；数据层 history
             # 照常记录，仅渲染跳过。
