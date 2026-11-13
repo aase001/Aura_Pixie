@@ -1139,6 +1139,29 @@ def section_p():
        f"曲线下方填充向底边渐隐（y58/63/68/73 alpha={a58}/{a63}/{a68}/{a73}）")
     w15.close()
 
+    # ---- F16 底色透明（V16.6）：monitor_fill=False → 不画本体底色与光晕 ----
+    # 失败形态：忽略开关仍画底色时，中心 alpha≈209（82% 底）必红；
+    # 光晕未随填充关闭时外圈 alpha>0 必红。手算：82%×255≈209。
+    th16 = dict(make_injections()["theme"])
+    th16["monitor_color"] = "#181A20"
+    th16["monitor_fill"] = False
+    w16, hub16, mgr16 = _make_widget(theme=th16)
+    mgr16.register_widget("cpu.load", w16, ["cpu.load"])
+    w16.show()
+    APP.processEvents()
+    img16 = _grab(w16)
+    ok(_alpha(img16, w16.width() // 2, 12) == 0,
+       f"透明底：本体中心无底色（alpha={_alpha(img16, w16.width() // 2, 12)}，旧口径≈209 必红）")
+    ok(_alpha(img16, 1, w16.height() // 2) == 0,
+       "透明底：边缘光晕同步不画（填充关闭=整底透明）")
+    # refresh_theme 即时生效：False→True 底色恢复（管理器逐窗刷新）
+    mgr16.refresh_theme(dict(th16, monitor_fill=True))
+    APP.processEvents()
+    img16b = _grab(w16)
+    ok(_alpha(img16b, w16.width() // 2, 12) > 180,
+       f"refresh_theme 恢复填充（alpha={_alpha(img16b, w16.width() // 2, 12)}）")
+    w16.close()
+
 
 # ---------------------------------------------------------------------------
 # G. 阶段 3：磁吸预览与松手吸附

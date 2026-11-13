@@ -67,6 +67,7 @@ ck("旧配置启动不报错且原样载入", bool(data))
 
 ap = M.load_appearance_config()
 ck("旧配置缺 monitor_opacity → 默认 100", ap["monitor_opacity"] == 100, str(ap["monitor_opacity"]))
+ck("旧配置缺 monitor_fill → 默认 True（观感与旧版一致）", ap["monitor_fill"] is True)
 ck("已有 breath=False 不被覆盖", ap["breath"] is False)
 ck("已有三色不被覆盖", ap["color_start"] == "#112233" and ap["color_mid"] == "#445566")
 ck("已有 monitor_color 不被覆盖", ap["monitor_color"] == "#202020")
@@ -107,6 +108,8 @@ ck("换算后不残留 idle_min", "idle_min" not in merged["appearance"])
 ck("默认块含 monitor.topmost", merged["monitor"].get("topmost") is False)
 ck("默认块 appearance 含 monitor_opacity",
    "monitor_opacity" in merged["appearance"], str(sorted(merged["appearance"])))
+ck("默认块 appearance 含 monitor_fill=True（V16.6 底色填充开关）",
+   merged["appearance"].get("monitor_fill") is True)
 
 # ---- 场景3：空 functions 不清已有功能 ----
 m3 = M._merge_config({"functions": [{"name": "keep"}]}, {"functions": []})
@@ -125,6 +128,13 @@ ck("外观保存不动 monitor/window/functions",
    d5["monitor"]["enabled"] is True and d5["window"]["always_on_top"] is True
    and d5["functions"][0]["name"] == "旧功能")
 ck("topmost 不写进 appearance 块", "topmost" not in d5["appearance"])
+# V16.6 底色填充开关：关闭态保存往返不丢、不重置
+ap_off = dict(back)
+ap_off["monitor_fill"] = False
+M.save_appearance_config(ap_off)
+ck("monitor_fill=False 保存往返一致",
+   M.load_appearance_config()["monitor_fill"] is False)
+M.save_appearance_config(back)   # 还原，避免影响后续用例
 
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:

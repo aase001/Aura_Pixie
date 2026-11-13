@@ -802,14 +802,19 @@ class MonitorUnitWidget(QWidget):
             corner = CORNER_PX * s
             # 本体区 = 窗体内缩光晕宽（光晕画在本体外围，退晕虚化）
             body = rect.adjusted(halo, halo, -halo, -halo)
-            if not self._is_snapped:
-                self._paint_halo(p, rect, body, halo, corner, s)
-            # 本体底色（圆角，无深色收边/硬边框/阴影）
-            bc = body_color(self.theme)
-            bc.setAlphaF(BODY_ALPHA)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(bc)
-            p.drawRoundedRect(body, corner, corner)
+            # V16.6 底色填充开关：勾选=填充颜色（默认，观感同旧版）；
+            # 取消=填充透明色——本体底色与边缘光晕（同色虚化）一起不画，
+            # 只留文字/曲线/渐变；字色仍按 monitor_color 亮度判定。
+            fill_on = bool(self.theme.get("monitor_fill", True))
+            if fill_on:
+                if not self._is_snapped:
+                    self._paint_halo(p, rect, body, halo, corner, s)
+                # 本体底色（圆角，无深色收边/硬边框/阴影）
+                bc = body_color(self.theme)
+                bc.setAlphaF(BODY_ALPHA)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(bc)
+                p.drawRoundedRect(body, corner, corner)
             # 曲线先画、文字后画：波动大时曲线可与文字重叠且在文字下层
             # （V16.3 用户拍板）
             self._paint_sparklines(p, body, s)

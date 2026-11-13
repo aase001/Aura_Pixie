@@ -1874,8 +1874,21 @@ def main() -> int:
     _sep_idx = [i for i, w in enumerate(_widget_seq)
                 if isinstance(w, M.QFrame)
                 and w.frameShape() == M.QFrame.Shape.HLine]
-    _mon_idx = [i for i, w in enumerate(_widget_seq)
-                if isinstance(w, M.QLabel) and w.text() == "资源监视窗口色"]
+    # V16.6：标题与填充复选框同行（布局项），两种形态都认
+    _mon_idx = []
+    for i, w in enumerate(_widget_seq):
+        if isinstance(w, M.QLabel) and w.text() == "资源监视窗口色":
+            _mon_idx.append(i)
+    for _i in range(_gl.count()):
+        _it = _gl.itemAt(_i)
+        if _it.layout() is None:
+            continue
+        _lay = _it.layout()
+        for _j in range(_lay.count()):
+            _ww = _lay.itemAt(_j).widget()
+            if isinstance(_ww, M.QLabel) and _ww.text() == "资源监视窗口色":
+                _mon_idx.append(_i)
+                break
     check("休眠倒计时与资源监视窗口色之间有分割线",
           bool(_sep_idx) and bool(_mon_idx) and _sep_idx[0] < _mon_idx[0],
           f"（分割线 {_sep_idx} / 窗口色 {_mon_idx}）", failures)
@@ -1897,6 +1910,31 @@ def main() -> int:
           M.load_appearance_config()["monitor_opacity"] == 40, "", failures)
     dlg_aura2.sld_monitor_op.setValue(10)   # 复位 100%，避免影响后续用例
     M.apply_appearance_to_config(dlg_aura2.settings())
+    # V16.6：资源监视窗口色标题前复选框（勾选=填充颜色，取消=填充透明色）
+    _dlg_fill = M.AppearanceSettingsDialog()
+    check("外观窗含 monitor_fill 复选框且默认勾选（默认填充）",
+          isinstance(getattr(_dlg_fill, "chk_monitor_fill", None), M.QCheckBox)
+          and _dlg_fill.chk_monitor_fill.isChecked(), "", failures)
+    check("填充复选框位于资源监视窗口色标题之前（同一行）",
+          _dlg_fill.chk_monitor_fill.text() == ""
+          and any(isinstance(w, M.QLabel) and w.text() == "资源监视窗口色"
+                  for w in _dlg_fill.findChildren(M.QLabel)), "", failures)
+    _dlg_fill.chk_monitor_fill.setChecked(False)
+    _s_fill = _dlg_fill.settings()
+    check("settings 收集 monitor_fill=False",
+          _s_fill.get("monitor_fill") is False, f"（{_s_fill.get('monitor_fill')}）", failures)
+    M.apply_appearance_to_config(_s_fill)
+    check("CONFIG 应用 monitor_fill=False",
+          M.CONFIG.get("monitor_fill") is False, "", failures)
+    check("_monitor_theme 注入 monitor_fill=False",
+          M._monitor_theme().get("monitor_fill") is False, "", failures)
+    M.save_appearance_config(_s_fill)
+    check("monitor_fill=False 落盘回读一致",
+          M.load_appearance_config().get("monitor_fill") is False, "", failures)
+    _dlg_fill.chk_monitor_fill.setChecked(True)
+    M.apply_appearance_to_config(_dlg_fill.settings())
+    M.save_appearance_config(_dlg_fill.settings())
+    _dlg_fill.deleteLater()
     # 老配置 idle_sec=0 打开窗口 → 落在永不末档（不被吸附成秒数档）
     _cfg_never = M.load_appearance_config()
     _cfg_never["idle_sec"] = 0

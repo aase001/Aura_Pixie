@@ -101,6 +101,7 @@ CONFIG = {
     "color_mid": "#283FFE",     # 呼吸过渡色（可配，原「主题色」）
     "color_end": "#FFFFFF",     # 呼吸末尾色（可配）
     "monitor_color": "#181A20",  # 资源监视窗口色（可配；字色按其亮度自动黑/白）
+    "monitor_fill": True,       # 资源监视底色填充开关（V16.6）：True=填充窗口色，False=填充透明色（默认 True）
     "monitor_opacity": 100,     # 资源监视透明度（%）：监视窗格整体 alpha，范围 10~100（每阶10），默认 100
     # —— V10 呼吸开关与分段渐变时长 ——
     #   breath=False → 颜色+大小全停，恒渲染起始色；
@@ -1088,7 +1089,8 @@ SETTINGS_HEADER = (
     "由设置/外观/监视界面写回）\n"
     "# 分块：functions = 功能扇区列表；appearance = 外观（breath 呼吸开关 + 起始/过渡/末尾三色 + "
     "三段渐变时长 dur_* + 倍率 aura_scale + 球体透明度 opacity + 休眠透明度 sleep_opacity + "
-    "休眠倒计时 idle_sec + 资源监视窗口色 monitor_color + 资源监视透明度 monitor_opacity + "
+    "休眠倒计时 idle_sec + 资源监视窗口色 monitor_color + 底色填充开关 monitor_fill"
+    "（勾选=填充窗口色，取消=填充透明色） + 资源监视透明度 monitor_opacity + "
     "显示缩放 display_scale；旧块名 aura 仍兼容读取）；\n"
     "#       autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
     "#       window = 球体窗口行为（always_on_top = 保持球体置顶、locked = 锁定禁止拖动，"
@@ -1218,6 +1220,7 @@ def default_settings() -> dict:
         "appearance": {"breath": True,
                        "color_start": "#FFFFFF", "color_mid": "#FFFFFF",
                        "color_end": "#FFFFFF", "monitor_color": "#181A20",
+                       "monitor_fill": True,
                        "monitor_opacity": 100,
                        "dur_start_mid": 5, "dur_mid_end": 5, "dur_end_start": 5,
                        "aura_scale": 1.0, "idle_sec": 60,
@@ -2795,6 +2798,8 @@ CODE_HELP_TEXT = (
     "────（以下为资源监视窗格设置，与球体动效无关）────\n\n"
     "■ 资源监视窗口色\n"
     "  · 控制监视窗格的颜色，支持十六进制 + 取色；同时作用于中心填充与边缘虚化。\n"
+    "  · 标题前复选框 = 底色填充开关：勾选填充窗口色（默认）；取消填充透明色，\n"
+    "    底色与边缘光晕都不画，只留文字与曲线；取消时颜色控件置灰。\n"
     "  · 悬停标签可见提示：建议黑灰白三色确保显示效果。\n"
     "  · 窗格名称/单位/硬件名小字按该色亮度自动黑/白字（浅底黑字、深底白字）；\n"
     "    数值与曲线不受此规则影响，仍按阈值范围着色。\n"
@@ -3412,6 +3417,7 @@ def load_appearance_config() -> dict:
         "monitor_color": normalize_hex(
             str(data.get("monitor_color") or CONFIG["monitor_color"]),
             CONFIG["monitor_color"]),
+        "monitor_fill": bool(data.get("monitor_fill", CONFIG["monitor_fill"])),
         "monitor_opacity": _clamp_opacity(
             data.get("monitor_opacity", CONFIG["monitor_opacity"])),
         "dur_start_mid": _clamp_dur(data.get("dur_start_mid", CONFIG["dur_start_mid"])),
@@ -3445,6 +3451,7 @@ def save_appearance_config(cfg: dict) -> None:
         "monitor_color": normalize_hex(
             str(cfg.get("monitor_color", CONFIG["monitor_color"])),
             CONFIG["monitor_color"]),
+        "monitor_fill": bool(cfg.get("monitor_fill", CONFIG["monitor_fill"])),
         "monitor_opacity": _clamp_opacity(
             cfg.get("monitor_opacity", CONFIG["monitor_opacity"])),
         "dur_start_mid": _clamp_dur(cfg.get("dur_start_mid", CONFIG["dur_start_mid"])),
@@ -3475,6 +3482,7 @@ def apply_appearance_to_config(cfg: dict) -> None:
     CONFIG["color_end"] = cfg.get("color_end", CONFIG["color_end"])
     CONFIG["monitor_color"] = normalize_hex(
         str(cfg.get("monitor_color", CONFIG["monitor_color"])), CONFIG["monitor_color"])
+    CONFIG["monitor_fill"] = bool(cfg.get("monitor_fill", CONFIG["monitor_fill"]))
     CONFIG["monitor_opacity"] = _clamp_opacity(
         cfg.get("monitor_opacity", CONFIG["monitor_opacity"]))
     CONFIG["dur_start_mid"] = _clamp_dur(
@@ -3757,9 +3765,21 @@ class AppearanceSettingsDialog(QDialog):
         _sep.setFrameShadow(QFrame.Shadow.Sunken)
         grid.addWidget(_sep)
 
+        # V16.6：标题前复选框——勾选=填充窗口色（默认），取消=填充透明色
+        self.chk_monitor_fill = QCheckBox("", self)
+        self.chk_monitor_fill.setChecked(bool(cur.get("monitor_fill", True)))
+        self.chk_monitor_fill.setToolTip(
+            "勾选=窗格填充资源监视窗口色；取消=填充透明色"
+            "（底色与边缘光晕都不画，只留文字与曲线）")
+        self.chk_monitor_fill.toggled.connect(self._on_monitor_fill_toggled)
         _lbl_monitor = QLabel("资源监视窗口色", self)
         _lbl_monitor.setToolTip("建议黑灰白三色确保显示效果")
-        grid.addWidget(_lbl_monitor)
+        self.lbl_monitor_color_title = _lbl_monitor
+        _monitor_title_row = QHBoxLayout()
+        _monitor_title_row.addWidget(self.chk_monitor_fill)
+        _monitor_title_row.addWidget(_lbl_monitor)
+        _monitor_title_row.addStretch(1)
+        grid.addLayout(_monitor_title_row)
         grid.addLayout(monitor_row)
         _grid_slider_row("资源监视透明度", self.sld_monitor_op, self.lbl_monitor_op)
 
@@ -3806,6 +3826,8 @@ class AppearanceSettingsDialog(QDialog):
         self._on_breath_toggled(self.chk_breath.isChecked())
         # 初始联动：休眠倒计时为「永不」则休眠透明度置灰
         self._on_idle_changed(self.sld_idle.value())
+        # 初始联动：底色填充取消则窗口色控件置灰（V16.6）
+        self._on_monitor_fill_toggled(self.chk_monitor_fill.isChecked())
 
         # ── 尺寸自定（定位前提，勿删）── QDialog 弹出前尺寸是 Qt 默认的 640x480，
         # _place_sub_dialog 靠它选侧/贴边/底部对齐；必须在此按布局实际撑开，
@@ -3835,6 +3857,18 @@ class AppearanceSettingsDialog(QDialog):
         self.edt_monitor.setEnabled(True)
         if _monitor_btn is not None:
             _monitor_btn.setEnabled(True)
+
+    def _on_monitor_fill_toggled(self, on: bool) -> None:
+        """V16.6 底色填充开关联动：取消勾选（填充透明色）→ 窗口色框/取色钮/
+        标题置灰（透明填充下颜色无意义，配置值保留）；勾选立即恢复。
+        与球体呼吸置灰互不干扰（监视色本就恒不受呼吸开关影响）。"""
+        self.edt_monitor.setEnabled(on)
+        btn = getattr(self, "_monitor_pick_btn", None)
+        if btn is not None:
+            btn.setEnabled(on)
+        lbl = getattr(self, "lbl_monitor_color_title", None)
+        if lbl is not None:
+            lbl.setEnabled(on)
 
     def _on_idle_changed(self, tier: int) -> None:
         """休眠倒计时档位变更：更新数值标签 + 永不档时休眠透明度置灰。
@@ -3877,6 +3911,7 @@ class AppearanceSettingsDialog(QDialog):
                                        self._fallback["color_end"]),
             "monitor_color": normalize_hex(self.edt_monitor.text(),
                                            self._fallback["monitor_color"]),
+            "monitor_fill": self.chk_monitor_fill.isChecked(),
             "monitor_opacity": tier_to_value(self.sld_monitor_op.value(),
                                              _OPACITY_SPEC),
             "dur_start_mid": d1,
@@ -5235,6 +5270,7 @@ def _monitor_theme() -> dict:
             "color_mid": CONFIG["color_mid"],
             "color_end": CONFIG["color_end"],
             "monitor_color": CONFIG.get("monitor_color", "#181A20"),
+            "monitor_fill": CONFIG.get("monitor_fill", True),
             "monitor_opacity": CONFIG.get("monitor_opacity", 100),
             "system_dark_mode": system_dark_mode()}
 
