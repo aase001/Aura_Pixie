@@ -206,7 +206,7 @@ def section_a():
        f"MonitorWindowManager 构造签名 {m_params}")
 
     # UnitRow 行模型
-    r = mu.UnitRow(key="cpu.load", label="CPU使用率", value=42.0,
+    r = mu.UnitRow(key="cpu.load", label="CPU利用", value=42.0,
                    unit="%", status=mh.STATUS_OK)
     ok(isinstance(r.history, deque) and r.history.maxlen == 60,
        "history 为 deque 且 maxlen=60")
@@ -219,7 +219,7 @@ def section_a():
     ok(r.available is True, "available：ok+有值")
     r2 = mu.UnitRow("cpu.temp", "CPU温度", None, "℃", mh.STATUS_NEED_ADMIN)
     ok(r2.available is False, "available：need_admin 不可用")
-    r3 = mu.UnitRow("cpu.load", "CPU使用率", None, "%", mh.STATUS_OK)
+    r3 = mu.UnitRow("cpu.load", "CPU利用", None, "%", mh.STATUS_OK)
     ok(r3.available is False, "available：ok 但值 None 不可用")
     ok(mu.UnitRow("a", "x", 1.0, "%", mh.STATUS_OK).history
        is not mu.UnitRow("b", "y", 2.0, "%", mh.STATUS_OK).history,
@@ -472,8 +472,8 @@ def section_e():
        "topmost_getter=True → 置顶（随注入不写死）")
     w2.close()
 
-    # ---- E2 固定基准尺寸（用户拍板 200×40；show 前非假 640x480）----
-    rows = [_row("cpu.load", "CPU使用率", 42.0, "%"),
+    # ---- E2 固定基准尺寸（用户拍板 250×80；show 前非假 640x480）----
+    rows = [_row("cpu.load", "CPU利用", 42.0, "%"),
             _row("cpu.temp", "CPU温度", 63.2, "℃")]
     w.set_rows(rows)
     ok((w.width(), w.height()) != (640, 480),
@@ -482,7 +482,7 @@ def section_e():
        f"基准宽恒 {mu.BASE_W}px（{w.width()}）")
     ok(w.height() == round(mu.BASE_H * 1.0),
        f"基准高恒 {mu.BASE_H}px（{w.height()}）")
-    # 固定 200px 档：三列+间距+边距恰好铺满本体不溢出（白名单最长标签
+    # 固定 250px 档：三列+间距+边距恰好铺满本体不溢出（白名单最长标签
     # 超宽时截断绘制，不撑宽）；列宽按白名单预留、数据跳动不改变尺寸
     fm = QFontMetrics(w._font())
     w_label, w_value, w_unit = w._col_w
@@ -492,7 +492,7 @@ def section_e():
     ok(content_right <= w.width(),
        f"三列+间距+边距不溢出窗格（{content_right} ≤ {w.width()}）")
     ok(w_label > 0 and w_value > 0 and w_unit > 0, "三列宽均非零")
-    # 扩宽档（250px）下白名单最长标签与典型值可完整预留不截断
+    # 扩宽档（350px）下白名单最长标签与典型值可完整预留不截断
     w_exp, _, mgr_exp = _make_widget()
     mgr_exp._width_expanded = True
     w_exp.set_rows([_row("gpu_d.vram_load", "GPU显存利用", 88.8, "%")])
@@ -545,13 +545,13 @@ def section_e():
     w_s1.close()
     w_s2.close()
 
-    # ---- E5 动态行增删 → 高度恒定（固定 40px，一参数一窗格口径）----
+    # ---- E5 动态行增删 → 高度恒定（固定 80px，一参数一窗格口径）----
     w_d, _, _ = _make_widget()
     w_d.set_rows([_row("disk.0.temp", "硬盘温度", 42.0, "℃")])
     h1 = w_d.height()
     ok(h1 == round(mu.BASE_H * 1.0), f"单行高=基准 {mu.BASE_H}px（{h1}）")
     w_d.set_rows([_row("disk.0.temp", "硬盘温度", 42.0, "℃"),
-                  _row("disk.0.usage", "硬盘使用率", 38.6, "%"),
+                  _row("disk.0.usage", "硬盘占用空间", 38.6, "%"),
                   _row("disk.1.temp", "硬盘温度", 40.0, "℃")])
     ok(w_d.height() == h1, "多行高仍=基准（固定窗格不随行增删长高）")
     w_d.set_rows([_row("disk.0.temp", "硬盘温度", 42.0, "℃")])
@@ -563,7 +563,7 @@ def section_e():
     theme_dark = {"color_start": "#FFFFFF", "color_mid": "#283FFE",
                   "color_end": "#FFFFFF", "system_dark_mode": True}
     w_h, _, _ = _make_widget(theme=theme_dark)
-    w_h.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
+    w_h.set_rows([_row("cpu.load", "CPU利用", 42.0, "%")])
     img = _grab(w_h)
     W, H = img.width(), img.height()
     halo = round(mu.HALO_PX * 1.0)
@@ -609,7 +609,7 @@ def section_e():
 
     # ---- E8 数值格式化走 hub.fmt_value（纯数值，单位独立 C 列）----
     w_f, _, _ = _make_widget()
-    r_pct = _row("cpu.load", "CPU使用率", 42.0, "%")
+    r_pct = _row("cpu.load", "CPU利用", 42.0, "%")
     ok(w_f._value_text(r_pct) == "42.0", "百分比纯数值（不带单位）")
     r_na = _row("cpu.temp", "CPU温度", None, "℃", mh.STATUS_NEED_ADMIN)
     ok(w_f._value_text(r_na) == "--", "无读数显示 --（状态文案走小字）")
@@ -631,7 +631,7 @@ def section_e():
 
     # ---- E10 show_at 走管理器摆放（V16.3 无记忆→球左重叠）再 show ----
     w_p, _, mgr_p = _make_widget()
-    w_p.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
+    w_p.set_rows([_row("cpu.load", "CPU利用", 42.0, "%")])
     anchor_p = QRect(900, 500, 60, 60)
     w_p.show_at(anchor_p)
     ok(w_p.frameGeometry().right() <= anchor_p.left(),
@@ -2008,7 +2008,7 @@ def section_k():
     ok(wb.width() == mu.BASE_W_EXPANDED,
        f"B 未超宽也同步扩到 {mu.BASE_W_EXPANDED}px（一改变就全改变）")
     # 扩宽只升不降：短内容回注不缩回
-    wa.set_rows([_row("cpu.load", "CPU使用率", 42.0, "%")])
+    wa.set_rows([_row("cpu.load", "CPU利用", 42.0, "%")])
     ok(wa.width() == mu.BASE_W_EXPANDED and wb.width() == mu.BASE_W_EXPANDED,
        "扩宽后不缩回（会话内统一宽度）")
     # 扩宽后新建窗格也按扩宽档渲染
@@ -2277,7 +2277,7 @@ def section_l():
     wa.close()
     wb.close()
 
-    # ---- L2 仅硬盘使用率不画曲线；CPU/内存使用率与温度画曲线（V16.2 收窄）----
+    # ---- L2 曲线排除清单七项不画曲线；CPU利用/温度/网速等照常画（V16.4）----
     hub2 = FakeHub()
     mgr2 = mu.MonitorWindowManager(hub2, **inj)
     w_inj = {k: v for k, v in inj.items() if k != "config_io"}
@@ -2816,7 +2816,7 @@ def section_n():
     ok(mu.is_usage_ratio_key("gpu_i.shared"), "共享内存用量属比例配色键")
     ok(mu.is_usage_ratio_key("gpu_d.0.vram_used"), "独显显存用量属比例配色键")
     ok(mu.is_usage_ratio_key("gpu_d.2.vram_used"), "多卡显存用量属比例配色键")
-    ok(not mu.is_usage_ratio_key("mem.load"), "内存使用率不走比例（本身百分比）")
+    ok(not mu.is_usage_ratio_key("mem.load"), "内存利用不走比例（本身百分比）")
     ok(not mu.is_usage_ratio_key("cpu.temp"), "温度不走比例")
     ok(mu.usage_ratio(16.0, 64.0) == 25.0, "16/64G → 25%")
     ok(mu.usage_ratio(16.0, None) is None, "总量缺失 → None")
