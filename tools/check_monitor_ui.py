@@ -1664,6 +1664,16 @@ def section_j():
                        for l in dlg._hw_labels.values())
         ok(dlg._param_scroll.minimumWidth() >= dlg._PARAM_COL_W + _longest,
            "窗宽容纳参数名列+最长设备名（长名不被裁）")
+        # 真实生效看守：注入长设备名后窗体实际宽度必须跟着加宽
+        # （曾因误用未导入的 QFontMetrics 抛异常被兜底吞掉，宽度静默不生效）
+        _w_before = dlg.width()
+        dlg.refresh_hardware_names({"cpu.load": "X" * 60})
+        APP.processEvents()
+        ok(dlg.width() > _w_before,
+           f"长设备名到达 → 窗体实际加宽（{_w_before} → {dlg.width()}）")
+        ok("QFontMetricsF" in open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "main.py"), encoding="utf-8").read(),
+           "宽度自适应使用已导入的字体度量类（源码看守）")
         dlg.hide()
         APP.processEvents()
         # J8 设备名重载：注入硬件名 → 刷新为新名（改坏会红）

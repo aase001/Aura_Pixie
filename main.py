@@ -5705,11 +5705,11 @@ class MonitorSettingsDialog(QDialog):
         try:
             if not self._hw_labels:
                 return
-            fm = QFontMetrics(self._hw_font(self.font()))
+            fm = QFontMetricsF(self._hw_font(self.font()))
             longest = max((fm.horizontalAdvance(lab.text())
                            for lab in self._hw_labels.values()), default=0)
             # 参数名列 + 间距 + 最长设备名 + 滚动区边距/竖滚动条 + 窗体边距
-            need = self._PARAM_COL_W + 6 + longest + 40
+            need = int(self._PARAM_COL_W + 6 + longest + 40)
             scroll = getattr(self, "_param_scroll", None)
             if scroll is not None and need > scroll.minimumWidth():
                 scroll.setMinimumWidth(need)
