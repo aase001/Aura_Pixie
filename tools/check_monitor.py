@@ -364,9 +364,40 @@ def section_c():
     ok(len(hub.history("cpu.load")) == 60, "stop 后历史缓冲仍保留")
 
 
+# ---------------------------------------------------------------------------
+# D. start() 幂等（poller 不重复累积；侧车缺失环境零进程依赖）
+# ---------------------------------------------------------------------------
+def section_d():
+    print("[D] start() 幂等（poller 线程不重复累积）")
+    # 假侧车路径：installed 但永不出帧 → runner.start() 直接返回 False，
+    # 不拉真实进程；poller 线程仍会创建，可安全计数。
+    hub = mh.MetricsHub(sidecar_path=__file__)
+    try:
+        hub.start()
+        first = hub._poller
+        ok(first is not None and first.is_alive(), "首次 start 建立 poller")
+        # 回归判据：预览采集 + 建窗同步会连续调 start（坑 86 同款链路），
+        # 重复 start 绝不新建 poller——否则网速差分窗口被缩短、history 倍速积累。
+        hub.start()
+        hub.start()
+        alive = [t for t in __import__("threading").enumerate()
+                 if t.name == "metrics-hub-poller" and t.is_alive()]
+        ok(len(alive) == 1, f"重复 start 不累积 poller（存活 {len(alive)} 个，应为 1）")
+        ok(hub._poller is first, "重复 start 复用同一 poller 线程")
+        # stop 后再 start 须能重建（is_alive 守卫不误伤正常重启）
+        hub.stop()
+        ok(not first.is_alive(), "stop 后 poller 已退出")
+        hub.start()
+        ok(hub._poller is not None and hub._poller.is_alive()
+           and hub._poller is not first, "stop 后 start 重建新 poller")
+    finally:
+        hub.stop()
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
     section_c()
+    section_d()
     print(f"\n== PASS {PASS} / FAIL {FAIL} / SKIP {SKIP} ==")
     sys.exit(1 if FAIL else 0)

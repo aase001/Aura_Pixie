@@ -775,6 +775,12 @@ class MetricsHub:
 
     # ------------------------------------------------------------- 生命周期 --
     def start(self) -> None:
+        # 幂等守卫（照 SidecarRunner.start 先例）：poller 活着直接返回，绝不
+        # 重复建线程——预览采集与建窗同步会连续调 start，重复 spawn 会累积
+        # 多个 poller 并行差分（网速窗口被缩短、history 倍速积累、CPU 空耗），
+        # 且 stop() 只 join 最新一个，其余泄漏。stop 后 is_alive()=False 可重建。
+        if self._poller is not None and self._poller.is_alive():
+            return
         self.runner.start()
         # 立即采一轮基线（cpu_percent / 网速 / 盘忙碌首次调用建锚点）
         self._poll_ps()
