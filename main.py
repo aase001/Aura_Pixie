@@ -631,8 +631,14 @@ def themed_palette() -> QPalette:
     # 置灰控件文字（总开关未勾时参数复选置灰仍可读）
     for role in (C.WindowText, C.Text, C.ButtonText):
         pal.setColor(G.Disabled, role, disabled)
-    pal.setColor(G.Disabled, C.Base, window)
+    # 禁用态完整视觉（V16.3）：Fusion 下滑块轨道/手柄取 Button 色、
+    # 输入框底色取 Base 色——只设文字色时「看着跟没置灰一样」。
+    # 禁用底/框色比窗底略深一档（浅色 #ECECEC / 深色 #262626），
+    # 控件整体可辨识，文字仍可读。
+    disabled_fill = QColor("#262626" if tc["window"] == "#1E1E1E" else "#ECECEC")
+    pal.setColor(G.Disabled, C.Base, disabled_fill)
     pal.setColor(G.Disabled, C.Window, window)
+    pal.setColor(G.Disabled, C.Button, disabled_fill)
     return pal
 
 
@@ -3595,31 +3601,40 @@ class AppearanceSettingsDialog(QDialog):
 
         grid = QVBoxLayout()
         grid.addWidget(self.chk_breath)
-        grid.addWidget(QLabel("起始色", self))
+        # 标题存实例属性：置灰联动要连同设置项名称一起灰（V16.3）
+        self.lbl_color_start = QLabel("起始色", self)
+        grid.addWidget(self.lbl_color_start)
         grid.addLayout(start_row)
-        grid.addWidget(QLabel("过渡色", self))
+        self.lbl_color_mid = QLabel("过渡色", self)
+        grid.addWidget(self.lbl_color_mid)
         grid.addLayout(mid_row)
-        grid.addWidget(QLabel("末尾色", self))
+        self.lbl_color_end = QLabel("末尾色", self)
+        grid.addWidget(self.lbl_color_end)
         grid.addLayout(end_row)
         _lbl_monitor = QLabel("资源监视", self)
         _lbl_monitor.setToolTip("建议黑灰白三色确保显示效果")
         grid.addWidget(_lbl_monitor)
         grid.addLayout(monitor_row)
-        grid.addWidget(QLabel("渐变时长（秒，起→中 / 中→末 / 末→起）", self))
+        self.lbl_dur = QLabel("渐变时长（秒，起→中 / 中→末 / 末→起）", self)
+        grid.addWidget(self.lbl_dur)
         grid.addLayout(dur_row)
 
-        def _grid_slider_row(title: str, sld: QSlider, lbl: QLabel) -> None:
-            """一行「标题 + 滑块 + 当前值」，滑块占满中间弹性空间。"""
+        def _grid_slider_row(title: str, sld: QSlider, lbl: QLabel) -> QLabel:
+            """一行「标题 + 滑块 + 当前值」，滑块占满中间弹性空间。
+            返回标题 QLabel（置灰联动用，V16.3）。"""
             row = QHBoxLayout()
-            row.addWidget(QLabel(title, self))
+            title_lbl = QLabel(title, self)
+            row.addWidget(title_lbl)
             row.addWidget(sld, 1)
             row.addWidget(lbl)
             grid.addLayout(row)
+            return title_lbl
 
         # UI 顺序（用户拍板 V16.1）：倍率 → 总体透明度 → 休眠透明度 → 休眠倒计时
-        _grid_slider_row("呼吸倍率", self.sld_scale, self.lbl_scale)
+        self.lbl_scale_title = _grid_slider_row("呼吸倍率", self.sld_scale, self.lbl_scale)
         _grid_slider_row("总体透明度", self.sld_opacity, self.lbl_opacity)
-        _grid_slider_row("休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
+        self.lbl_sleep_op_title = _grid_slider_row(
+            "休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
         _grid_slider_row("休眠倒计时", self.sld_idle, self.lbl_idle)
 
         # 显示缩放：每单元一行「复选框（=启用）+ 下拉（50%~200%，每阶 25%）」。
@@ -3674,7 +3689,9 @@ class AppearanceSettingsDialog(QDialog):
     def _on_breath_toggled(self, on: bool) -> None:
         """球体呼吸开关联动：取消勾选 → 三色框+取色钮+三时长框+倍率全部置灰
         （渲染全停，这些参数无意义）；休眠/透明度不受影响。
-        资源监视背景色与球体呼吸无关，恒可用（不参与置灰）。"""
+        资源监视背景色与球体呼吸无关，恒可用（不参与置灰）。
+        V16.3：设置项名称与数值标签一并置灰——只灰控件时标题仍正常色，
+        Fusion 下观感「跟没置灰一样」。"""
         for edt in (self.edt_start, self.edt_mid, self.edt_end):
             edt.setEnabled(on)
         # 资源监视取色钮：按控件身份排除（不能按文案，四个取色钮文案相同）
@@ -3685,6 +3702,10 @@ class AppearanceSettingsDialog(QDialog):
         for edt in self.edit_dur:
             edt.setEnabled(on)
         self.sld_scale.setEnabled(on)
+        # 名称/数值标签随控件同步置灰（资源监视标题不参与）
+        for lbl in (self.lbl_color_start, self.lbl_color_mid, self.lbl_color_end,
+                    self.lbl_dur, self.lbl_scale_title, self.lbl_scale):
+            lbl.setEnabled(on)
         self.edt_monitor.setEnabled(True)
         if _monitor_btn is not None:
             _monitor_btn.setEnabled(True)
@@ -3698,6 +3719,9 @@ class AppearanceSettingsDialog(QDialog):
         val = idle_tier_to_value(tier)
         self.lbl_idle.setText(idle_label(val))
         self.sld_sleep_op.setEnabled(val > 0)
+        # V16.3：名称与数值标签一并置灰（只灰控件观感不明显）
+        self.lbl_sleep_op_title.setEnabled(val > 0)
+        self.lbl_sleep_op.setEnabled(val > 0)
 
     def _pick_color(self, edt: QLineEdit, title: str) -> None:
         """通用取色：以该框当前合法色为初值打开系统取色器，选定后回填大写色码。"""

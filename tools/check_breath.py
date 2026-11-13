@@ -1176,6 +1176,26 @@ def main() -> int:
     check("调色板从统一色板派生（颜色一致）",
           M.themed_palette().color(_C.Window).name().upper()
           == M.theme_colors()["window"].upper(), "", failures)
+    # 禁用态完整视觉（V16.3）：文字/输入框底/滑块轨道(Button)都要有禁用色，
+    # 否则 Fusion 下「置灰看不出来」。深浅两模式固定验证（坑 87：不依赖环境）
+    _orig_dark_pal = M.system_dark_mode
+    try:
+        _G = M.QPalette.ColorGroup
+        for _dark in (False, True):
+            M.system_dark_mode = lambda d=_dark: d
+            _pal = M.themed_palette()
+            _tc = M.theme_colors(dark=_dark)
+            _win = M.QColor(_tc["window"])
+            _dis_base = _pal.color(_G.Disabled, _C.Base)
+            _dis_btn = _pal.color(_G.Disabled, _C.Button)
+            _dis_txt = _pal.color(_G.Disabled, _C.Text)
+            check(f"禁用态视觉完整（{'深' if _dark else '浅'}色：文字/底/滑块轨道可辨识）",
+                  _dis_txt.name().upper() == _tc["disabled"].upper()
+                  and _dis_base != _win and _dis_btn != _win
+                  and _dis_base.name().upper() == _dis_btn.name().upper(),
+                  f"（base={_dis_base.name()} btn={_dis_btn.name()}）", failures)
+    finally:
+        M.system_dark_mode = _orig_dark_pal
     # 统一窗口主题机制：新窗口零配置继承（过滤器 + theme_window 在位）
     check("统一窗口主题机制在位（theme_window/install_window_theme）",
           callable(getattr(M, "theme_window", None))
@@ -1614,10 +1634,22 @@ def main() -> int:
           and not dlg_aura2.sld_scale.isEnabled()
           and dlg_aura2.sld_idle.isEnabled()
           and dlg_aura2.sld_opacity.isEnabled(), "", failures)
+    # V16.3：设置项名称与数值标签一并置灰（只灰控件观感「跟没置灰一样」）
+    check("呼吸关闭 → 设置项名称/数值标签一并置灰",
+          not dlg_aura2.lbl_color_start.isEnabled()
+          and not dlg_aura2.lbl_color_mid.isEnabled()
+          and not dlg_aura2.lbl_color_end.isEnabled()
+          and not dlg_aura2.lbl_dur.isEnabled()
+          and not dlg_aura2.lbl_scale_title.isEnabled()
+          and not dlg_aura2.lbl_scale.isEnabled(), "", failures)
     dlg_aura2.chk_breath.setChecked(True)
     check("呼吸恢复 → 控件重新可用",
           dlg_aura2.edt_start.isEnabled() and all(e.isEnabled() for e in dlg_aura2.edit_dur)
           and dlg_aura2.sld_scale.isEnabled(), "", failures)
+    check("呼吸恢复 → 名称/数值标签重新可用",
+          dlg_aura2.lbl_color_start.isEnabled() and dlg_aura2.lbl_dur.isEnabled()
+          and dlg_aura2.lbl_scale_title.isEnabled()
+          and dlg_aura2.lbl_scale.isEnabled(), "", failures)
     # 量程改档位制：范围断言看档数，真实值看 tier_to_value
     check("总体透明度滑块 10 档（10%~100%，每阶 10%）",
           dlg_aura2.sld_opacity.minimum() == 1
@@ -1702,11 +1734,17 @@ def main() -> int:
           f"（{dlg_aura2.lbl_idle.text()} / {dlg_aura2.settings()['idle_sec']}）", failures)
     check("永不档 → 休眠透明度滑块置灰（该参数无意义）",
           not dlg_aura2.sld_sleep_op.isEnabled(), "", failures)
+    check("永不档 → 休眠透明度名称/数值标签一并置灰（V16.3）",
+          not dlg_aura2.lbl_sleep_op_title.isEnabled()
+          and not dlg_aura2.lbl_sleep_op.isEnabled(), "", failures)
     # 调回秒数档 → 立即恢复可用
     dlg_aura2.sld_idle.setValue(4)      # 120 秒
     check("调回秒数档 → 休眠透明度恢复可用且标签带秒",
           dlg_aura2.sld_sleep_op.isEnabled()
           and dlg_aura2.lbl_idle.text() == "120 秒", "", failures)
+    check("调回秒数档 → 休眠透明度名称/数值标签恢复可用",
+          dlg_aura2.lbl_sleep_op_title.isEnabled()
+          and dlg_aura2.lbl_sleep_op.isEnabled(), "", failures)
     # 永不休眠时闲置计时不触发休眠（显式禁用守卫）
     _saved_idle = M.CONFIG.get("idle_sec")
     try:
