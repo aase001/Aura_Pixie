@@ -1617,6 +1617,66 @@ def section_i():
     ok("def _monitor_idle_check" in main_src and "idle_stop_sec" in main_src,
        "闲置停采接线在位")
 
+    # ---- I9 布局持久化与启动恢复（V16.5 修复：退出/关机丢位置组合 + 启动不自动恢复）----
+    # 回归判据1：退出（shutdown_monitor）必须把当前可见窗格的位置+组合立即落盘，
+    #   不依赖「移动停止 10s」定时器——否则移动后 10s 内关机/退出会丢最后布局。
+    # 回归判据2：启动时 monitor.enabled=True 必须自动恢复窗格（main 接线看守）。
+    M._MONITOR_MGR = None
+    M._MONITOR_HUB = None
+    M._MONITOR_SETTINGS_DLG = None
+    mgr9 = M._ensure_monitor_manager()
+    fake9 = FakeHub()
+    real_hub9 = M._MONITOR_HUB
+    M._MONITOR_HUB = fake9
+    mgr9.hub = fake9
+    try:
+        cfg9 = M.load_monitor_config()
+        cfg9["enabled"] = True
+        cfg9["units"]["cpu.load"]["enabled"] = True
+        cfg9["units"]["cpu.temp"]["enabled"] = True
+        cfg9["layout"] = {}   # 清空布局，验证退出时重新落盘
+        M.save_monitor_config(cfg9)
+        M._monitor_sync_windows(cfg9)
+        APP.processEvents()
+        w9a = mgr9._widgets["cpu.load"]
+        w9b = mgr9._widgets["cpu.temp"]
+        # 摆到已知位置并磁吸成组（模拟用户排列后的最后状态）
+        w9a.move(300, 200)
+        w9b.move(300 + w9a.width(), 200)
+        grp9 = mgr9.new_group()
+        grp9.add(w9a)
+        grp9.add(w9b)
+        w9a._is_snapped = w9b._is_snapped = True
+        APP.processEvents()
+        # 关键：不做任何「静止 10s」等待，直接退出 → 布局必须已落盘
+        M.shutdown_monitor()
+        saved9 = M.load_monitor_config().get("layout") or {}
+        ok("cpu.load" in saved9 and "cpu.temp" in saved9,
+           f"退出立即落盘布局（keys={list(saved9)}）")
+        ok(saved9.get("cpu.load", {}).get("x") == 300
+           and saved9.get("cpu.load", {}).get("y") == 200,
+           f"退出落盘位置正确（{saved9.get('cpu.load')}）")
+        ok(saved9.get("cpu.load", {}).get("group_id") is not None
+           and saved9.get("cpu.load", {}).get("group_id")
+           == saved9.get("cpu.temp", {}).get("group_id"),
+           f"退出落盘组合同组（{saved9.get('cpu.load', {}).get('group_id')}）")
+        # 启动恢复接线看守：main 启动后按 enabled 自动同步窗格
+        ok("_monitor_sync_windows" in main_src
+           and "load_monitor_config" in main_src,
+           "启动自动恢复接线在位（main 调 _monitor_sync_windows）")
+        import inspect
+        _main_src = inspect.getsource(M.main)
+        ok("_monitor_sync_windows" in _main_src,
+           "main() 启动段含监视窗格自动恢复")
+    finally:
+        for w in list(mgr9._widgets.values()):
+            w.close()
+        real_hub9.stop()
+        M._MONITOR_MGR = None
+        M._MONITOR_HUB = None
+        M._MONITOR_SETTINGS_DLG = None
+        M.save_monitor_config(M.monitor_ui.default_monitor_config())
+
 
 # ---------------------------------------------------------------------------
 # J. 阶段 A：监视设置窗（总开关 + 参数复选 + 实时渲染 + 保存语义）

@@ -5575,28 +5575,60 @@ def _monitor_idle_check() -> None:
         _log_crash("monitor_idle_check", exc)
 
 
+def _monitor_collect_layout() -> dict:
+    """采集当前可见窗格的布局记忆（位置 + 组合），含多屏合法性自愈。
+
+    退出落盘（_monitor_flush_layout）与定时落盘（_monitor_layout_settle）共用，
+    保证两条路径口径一致。中心不在任何屏可用区 → 先夹回就近合法位再记录。
+    """
+    layout = {}
+    if _MONITOR_MGR is None:
+        return layout
+    for unit_key, w in _MONITOR_MGR._widgets.items():
+        if not w.isVisible():
+            continue
+        pos = w.pos()
+        fixed = monitor_ui.sanitize_layout_pos(
+            pos.x(), pos.y(), w.width(), w.height())
+        if fixed is not None and (fixed[0] != pos.x() or fixed[1] != pos.y()):
+            w.move(*fixed)
+            pos = w.pos()
+        layout[unit_key] = {"x": pos.x(), "y": pos.y(),
+                            "group_id": w._group.group_id if w._group else None}
+    return layout
+
+
+def _monitor_flush_layout() -> None:
+    """立即把当前布局落盘（退出/关机时调用，不依赖「移动停止 10s」定时器）。
+
+    V16.5 修复：旧实现退出只停定时器不写盘，布局仅靠移动后静止 10s 落盘——
+    移动后 10s 内关机/退出会丢最后的位置与组合。退出钩子（aboutToQuit，覆盖
+    正常退出/右键退出/注销关机）调本函数兜底落盘。无可见窗格时不写（保留
+    上次记忆，避免总开关关闭/全隐藏时把布局清成空）。
+    """
+    global _MONITOR_LAYOUT_DIRTY
+    try:
+        layout = _monitor_collect_layout()
+        if layout:
+            save_monitor_layout(layout)
+            _MONITOR_LAYOUT_DIRTY = False
+            _monitor_layout_settle._still = 0
+    except Exception as exc:  # noqa: BLE001
+        _log_crash("monitor_flush_layout", exc)
+
+
 def _monitor_layout_settle() -> None:
-    """布局记忆：移动停止 10s 落盘（照球心位置记忆先例，退出不写）。"""
+    """布局记忆：移动停止后落盘（照球心位置记忆先例；退出由 flush 兜底）。"""
     global _MONITOR_LAYOUT_DIRTY
     try:
         if _MONITOR_MGR is None:
             return
-        layout = {}
+        layout = _monitor_collect_layout()
         moved = False
         for unit_key, w in _MONITOR_MGR._widgets.items():
             if not w.isVisible():
                 continue
             pos = w.pos()
-            # V16.3：落盘前校验——中心不在任何屏可用区 → 先把窗格夹回
-            # 就近合法位再记录（运行时自愈，防记忆写出屏外坐标）
-            fixed = monitor_ui.sanitize_layout_pos(
-                pos.x(), pos.y(), w.width(), w.height())
-            if fixed is not None and (fixed[0] != pos.x()
-                                      or fixed[1] != pos.y()):
-                w.move(*fixed)
-                pos = w.pos()
-            layout[unit_key] = {"x": pos.x(), "y": pos.y(),
-                                "group_id": w._group.group_id if w._group else None}
             last = getattr(w, "_monitor_last_pos", None)
             if last is None or (pos.x() != last.x() or pos.y() != last.y()):
                 moved = True
@@ -5608,7 +5640,9 @@ def _monitor_layout_settle() -> None:
         if not _MONITOR_LAYOUT_DIRTY:
             return
         _monitor_layout_settle._still = getattr(_monitor_layout_settle, "_still", 0) + 1
-        if _monitor_layout_settle._still >= 10:
+        # V16.5：静止 3 拍（约 3s）即落盘（旧 10 拍≈10s 窗口太长，突然关机易丢）；
+        # 退出/关机另有 _monitor_flush_layout 立即兜底，双保险。
+        if _monitor_layout_settle._still >= 3:
             _MONITOR_LAYOUT_DIRTY = False
             _monitor_layout_settle._still = 0
             save_monitor_layout(layout)
@@ -6202,8 +6236,14 @@ class MonitorSettingsDialog(QDialog):
 
 
 def shutdown_monitor() -> None:
-    """主程序退出 → hub.stop() 必达（释放侧车进程）。"""
+    """主程序退出 → 布局立即落盘 + hub.stop() 必达（释放侧车进程）。
+
+    V16.5：退出/关机先把当前窗格位置+组合落盘（_monitor_flush_layout），
+    不再依赖「移动停止 10s」定时器——否则移动后短时间内关机/退出会丢布局。
+    本钩子接 aboutToQuit，覆盖正常退出/右键退出/注销关机。
+    """
     try:
+        _monitor_flush_layout()
         if _MONITOR_IDLE_TIMER is not None:
             _MONITOR_IDLE_TIMER.stop()
         if _MONITOR_LAYOUT_TIMER is not None:
@@ -6415,6 +6455,17 @@ def main(argv: list[str]) -> int:
     global _MONITOR_BALL
     _MONITOR_BALL = ball
     app.aboutToQuit.connect(shutdown_monitor)
+    # V16.5：启动自动恢复监视窗格——总开关启用时按配置同步窗格（含位置/组合
+    # 记忆恢复），不再要求用户手动打开设置窗才出现。延迟到事件循环启动后执行，
+    # 确保球体已就位（_monitor_sync_windows 用球体外框作摆放锚点）。
+    def _restore_monitor_on_startup() -> None:
+        try:
+            cfg = load_monitor_config()
+            if cfg.get("enabled"):
+                _monitor_sync_windows(cfg)
+        except Exception as exc:  # noqa: BLE001 - 恢复失败不阻断启动
+            _log_crash("monitor_startup_restore", exc)
+    QTimer.singleShot(0, _restore_monitor_on_startup)
     # 启动跨进程定位监听：第二实例点「在哪儿？」时经命名管道唤起本球
     try:
         _start_locate_server(ball.locate_here)
