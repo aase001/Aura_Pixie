@@ -985,20 +985,66 @@ def main() -> int:
         check("表格恰为 3 列（激活/功能/指令，无多余空列）",
               dlg.table.columnCount() == 3,
               f"（实得 {dlg.table.columnCount()} 列）", failures)
+        # V16.6：激活列改居中 widget 复选框 + 单元格禁选中。
+        # 旧 QTableWidgetItem 原生指示器受 setTextAlignment 影响不了（Fusion
+        # 左对齐带边距），且单元格带 Enabled 旗标可空选中出焦点框。
+        _holder0 = dlg.table.cellWidget(0, 0)
+        _chk0 = _holder0.findChild(M.QCheckBox) if _holder0 is not None else None
+        check("激活列为居中 QCheckBox 控件（非原生指示器）",
+              isinstance(_chk0, M.QCheckBox),
+              f"（实得 {type(_chk0).__name__ if _chk0 else None}）", failures)
+        if isinstance(_chk0, M.QCheckBox):
+            _lay0 = _holder0.layout()
+            _m0 = _lay0.contentsMargins() if _lay0 is not None else None
+            check("复选框容器四边距 0（36px 列内真居中）",
+                  _m0 is not None and _m0.left() == 0 and _m0.right() == 0
+                  and _m0.top() == 0 and _m0.bottom() == 0,
+                  f"（边距 {_m0}）", failures)
+            _al0 = Qt.AlignmentFlag(0)
+            if _lay0 is not None:
+                for _j in range(_lay0.count()):
+                    if _lay0.itemAt(_j).widget() is _chk0:
+                        _al0 = _lay0.itemAt(_j).alignment()
+                        break
+            check("复选框布局居中对齐",
+                  bool(_al0 & Qt.AlignmentFlag.AlignHCenter)
+                  and bool(_al0 & Qt.AlignmentFlag.AlignVCenter),
+                  f"（alignment={_al0}）", failures)
+            check("复选框初始勾选态与配置一致（甲=True）",
+                  _chk0.isChecked() is True, "", failures)
+        _it0 = dlg.table.item(0, 0)
+        check("激活单元格不可选中/不可编辑（无空选中焦点框）",
+              _it0 is not None
+              and not bool(_it0.flags() & Qt.ItemFlag.ItemIsSelectable)
+              and not bool(_it0.flags() & Qt.ItemFlag.ItemIsEnabled)
+              and not bool(_it0.flags() & Qt.ItemFlag.ItemIsEditable),
+              f"（flags={_it0.flags() if _it0 else None}）", failures)
         dlg.table.item(0, 1).setText("一二三四五六七八")
         check("输入超长名即时截为 6 汉字", dlg.table.item(0, 1).text() == "一二三四五六",
               f"（实得 {dlg.table.item(0, 1).text()!r}）", failures)
         # 第 0 行已被截断改名，后续顺序断言用实际名，不能再写死「甲」
         name_a = dlg.table.item(0, 1).text()
         dlg._insert_row(dlg.table.rowCount(), {"name": "丁", "code": "print(4)", "active": True})
-        dlg.table.item(2, 0).setCheckState(Qt.CheckState.Checked)
-        dlg.table.item(3, 0).setCheckState(Qt.CheckState.Checked)
+        dlg._set_row_active(2, True)
+        dlg._set_row_active(3, True)
         M.move_table_row(dlg.table, 3, 0)
         names = [dlg.table.item(i, 1).text() for i in range(dlg.table.rowCount())]
         check("拖拽搬移 丁→首位", names == ["丁", name_a, "乙", "丙"], f"（实得 {names}）", failures)
+        # 甲/乙初始勾选，丙/丁上面刚勾上 → 四行全勾；搬行只换位置不改勾选态
+        check("搬行后激活态随行走（四行勾选态不变）",
+              [dlg._row_active(i) for i in range(4)] == [True, True, True, True],
+              f"（实得 {[dlg._row_active(i) for i in range(4)]}）", failures)
         M.move_table_row(dlg.table, 0, 2)
         names = [dlg.table.item(i, 1).text() for i in range(dlg.table.rowCount())]
         check("拖拽搬移 首→第 3 位", names == [name_a, "乙", "丁", "丙"], f"（实得 {names}）", failures)
+        # 未勾选行搬移：勾选态跟行不跟位（丙=False 随行走，其余保持 True）
+        dlg._set_row_active(3, False)
+        M.move_table_row(dlg.table, 3, 0)
+        check("未勾选行搬移后仍随该行（False 跟行不跟位）",
+              [dlg._row_active(i) for i in range(4)] == [False, True, True, True],
+              f"（实得 {[dlg._row_active(i) for i in range(4)]}）", failures)
+        M.move_table_row(dlg.table, 0, 3)   # 还原顺序，避免影响后续保存断言
+        dlg._set_row_active(3, True)
 
         dlg._on_save()
         app.processEvents()

@@ -2275,12 +2275,21 @@ def move_table_row(table: QTableWidget, src: int, dst: int) -> None:
     if src < 0 or src >= table.rowCount() or dst < 0 or src == dst:
         return
     items = [table.takeItem(src, c) for c in range(table.columnCount())]
+    # V16.6：激活列是 widget 复选框——cellWidget 不随 takeItem/removeRow
+    # 迁移（会销毁），必须先摘走、搬行后回填，否则勾选态留在原行号。
+    widgets = {c: table.cellWidget(src, c) for c in range(table.columnCount())}
+    for c, w in widgets.items():
+        if w is not None:
+            table.removeCellWidget(src, c)
     table.removeRow(src)
     dst = min(dst, table.rowCount())
     table.insertRow(dst)
     for c, it in enumerate(items):
         if it is not None:
             table.setItem(dst, c, it)
+    for c, w in widgets.items():
+        if w is not None:
+            table.setCellWidget(dst, c, w)
     table.setCurrentCell(dst, 0)   # QTableWidget 没有 setCurrentRow，那是 QTreeView 的
 
 
@@ -3030,15 +3039,44 @@ class SettingsDialog(QDialog):
     def _insert_row(self, at: int, row: dict) -> None:
         self.table.blockSignals(True)   # 程序化填充不触发 itemChanged 刷新
         self.table.insertRow(at)
-        chk = QTableWidgetItem()
-        chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-        chk.setCheckState(Qt.CheckState.Checked if row["active"] else Qt.CheckState.Unchecked)
-        chk.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setItem(at, 0, chk)
+        # V16.6：激活列改「居中 widget 复选框」。旧 QTableWidgetItem 原生
+        # 指示器不受 setTextAlignment 控制（Fusion 左对齐带边距，用户报
+        # 「未居中」），且单元格带 Enabled 旗标可空选中出焦点框（用户报
+        # 「空选中」）。widget 方案真居中；占位 item 清空全部旗标 → 不可
+        # 选中/不可编辑。勾选态读写统一走 _row_active/_set_row_active。
+        holder = QWidget(self.table)
+        lay = QHBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 0, 0)
+        chk = QCheckBox(holder)
+        chk.setChecked(bool(row["active"]))
+        chk.setToolTip("勾选=激活该扇区")
+        chk.toggled.connect(self._update_hint)
+        lay.addWidget(chk, 0, Qt.AlignmentFlag.AlignCenter)
+        self.table.setCellWidget(at, 0, holder)
+        placeholder = QTableWidgetItem()
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.table.setItem(at, 0, placeholder)
         self.table.setItem(at, 1, QTableWidgetItem(row["name"]))
         self.table.setItem(at, 2, QTableWidgetItem(row["code"]))
         self.table.blockSignals(False)
         self._update_hint()
+
+    def _row_active(self, i: int) -> bool:
+        """第 i 行激活态（V16.6 起真源=激活列 widget 复选框）。"""
+        holder = self.table.cellWidget(i, 0)
+        if holder is None:
+            return False
+        chk = holder.findChild(QCheckBox)
+        return chk is not None and chk.isChecked()
+
+    def _set_row_active(self, i: int, active: bool) -> None:
+        """程序化设置第 i 行激活态（自检/搬移行同步用）。"""
+        holder = self.table.cellWidget(i, 0)
+        if holder is None:
+            return
+        chk = holder.findChild(QCheckBox)
+        if chk is not None:
+            chk.setChecked(bool(active))
 
     def _delete_current(self) -> None:
         r = self.table.currentRow()
@@ -3047,9 +3085,7 @@ class SettingsDialog(QDialog):
             self._update_hint()
 
     def _update_hint(self) -> None:
-        n = sum(1 for i in range(self.table.rowCount())
-                if (it := self.table.item(i, 0)) is not None
-                and it.checkState() == Qt.CheckState.Checked)
+        n = sum(1 for i in range(self.table.rowCount()) if self._row_active(i))
         if n > MAX_SECTORS:
             self.hint.setText(f"已勾选 {n} 项，超过上限：圆环只显示前 {MAX_SECTORS} 项")
         elif n < MIN_SECTORS:
@@ -3073,7 +3109,7 @@ class SettingsDialog(QDialog):
             out.append({
                 "name": name,
                 "code": self.table.item(i, 2).text(),
-                "active": self.table.item(i, 0).checkState() == Qt.CheckState.Checked,
+                "active": self._row_active(i),
             })
         return out
 
