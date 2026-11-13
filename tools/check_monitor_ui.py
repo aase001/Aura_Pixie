@@ -2627,6 +2627,26 @@ def section_o():
     # 重叠是有意设计（用户手动排列）
     ok(all(mgr._rects_overlap(ws[0].frameGeometry(), w.frameGeometry())
            for w in ws[1:]), "无记忆窗格重叠显示（用户手动排列）")
+    # V16.3 回归：全选后 first_open 走 restore_groups，其恢复后重叠校验
+    # 不得把初始摆放窗格外排（此前全选被逐个推成散乱列的根因）
+    _pos_before = {w.unit_key: w.pos() for w in ws}
+    mgr.restore_groups({})
+    APP.processEvents()
+    ok(all(w.pos() == _pos_before[w.unit_key] for w in ws),
+       "restore_groups 不外排初始摆放窗格（全选保持球左重叠）")
+    ok(all(mgr._rects_overlap(ws[0].frameGeometry(), w.frameGeometry())
+           for w in ws[1:]), "恢复组后仍球左重叠")
+    # 用户拖动成立 → 标记清除 → 落位重叠外排恢复生效
+    _mover = ws[1]
+    _start = _mover.frameGeometry().topLeft() + QPoint(5, 5)
+    _send(_mover, QEvent.Type.MouseButtonPress, _start)
+    _send(_mover, QEvent.Type.MouseMove, _start + QPoint(30, 0))
+    ok(not _mover._initial_placement, "用户拖动 → 初始摆放标记清除")
+    # 摆到与首窗重叠 → 落位检测应外排（标记已清除，恢复 V16.2 语义）
+    _fr0 = ws[0].frameGeometry()
+    _mover.move(_fr0.left() + 5, _fr0.top() + 5)
+    mgr.check_overlap_after_drop(_mover)
+    ok(not mgr._overlaps_others(_mover), "拖动后落位重叠 → 外排恢复生效")
     # 球贴左缘 → 夹进屏幕不越界
     w_edge = mu.MonitorUnitWidget("net.tx", hub, manager=mgr, **w_inj)
     mgr.register_widget("net.tx", w_edge, ["net.tx"])
@@ -2636,7 +2656,9 @@ def section_o():
     w_edge.close()
 
     # ---- O2 松手重叠 → 自动归位到首位窗格右边 ----
+    ws[0].move(900, 500)   # 首窗摆回固定位（O1 拖动测试曾移动它）
     mover = ws[2]
+    mover._initial_placement = False  # 模拟用户已拖动（初始摆放结束）
     first_r = ws[0].frameGeometry()
     # 直接摆到首位窗格身上（完全重叠），模拟松手落位
     mover.move(first_r.left() + 5, first_r.top() + 5)

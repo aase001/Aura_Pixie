@@ -493,6 +493,9 @@ class MonitorUnitWidget(QWidget):
         self._suppress_context_menu = False  # 右键拖动解绑后抑制菜单（仅轻点弹）
         self._group_screen_edge = None  # 组级屏幕贴边记录（整组贴边，缩放重贴用）
         self._settings_callback: Optional[Callable] = None  # 打开设置（注入）
+        # V16.3：初始摆放（球左重叠）标记——重叠有意设计，自动外排跳过；
+        # 记忆位恢复/用户拖动时清除（见 place_for_show/mouseMoveEvent）
+        self._initial_placement = False
         # 布局几何缓存（update_layout 重算，paintEvent 消费；缩放每次现查）
         self._col_w = (0, 0, 0)       # A 名称 / B 数值 / C 单位 列宽
         self._row_h = 0               # 单行文本高
@@ -1073,6 +1076,8 @@ class MonitorUnitWidget(QWidget):
                 if (gp - self._press_global).manhattanLength() < DRAG_THRESHOLD_PX:
                     return
                 self._drag_started = True
+                # V16.3：用户手动拖动 → 初始摆放结束，落位重叠外排恢复生效
+                self._initial_placement = False
             # 直接 move 跟手（无弹簧）；组内同步偏移
             new_top = gp - self._grab_offset
             delta = new_top - self.frameGeometry().topLeft()
@@ -1759,6 +1764,7 @@ class MonitorWindowManager:
                                               widget.height())
                     if pos is not None:
                         widget.move(*pos)
+                        widget._initial_placement = False  # 记忆位→冲突外排生效
                         if self._overlaps_others(widget):
                             self._relocate_right_of_first(widget)
                         return
@@ -1767,6 +1773,7 @@ class MonitorWindowManager:
             elif widget.pos() != QPoint(0, 0):
                 # 调用方已按布局记忆 move 过（_monitor_restore_layout 先例）：
                 # 尊重现位，仅冲突时归位，不覆盖记忆坐标
+                widget._initial_placement = False
                 if self._overlaps_others(widget):
                     self._relocate_right_of_first(widget)
                 return
@@ -1792,6 +1799,9 @@ class MonitorWindowManager:
             x = min(max(x, avail.left()), avail.right() - wr.width() + 1)
             y = min(max(y, avail.top()), avail.bottom() - wr.height() + 1)
         widget.move(x, y)
+        # V16.3：初始摆放标记——重叠是有意设计，restore_groups/落位的
+        # 自动外排须跳过（否则全选后被逐个外排成散乱列）；用户拖动后清除。
+        widget._initial_placement = True
 
     def _overlaps_others(self, widget) -> bool:
         """widget 是否与其他可见窗格重叠（自身组成员除外——整组刚性移动）。"""
@@ -1850,9 +1860,15 @@ class MonitorWindowManager:
             self.log_fn("monitor_ui._relocate_right_of_first", e)
 
     def check_overlap_after_drop(self, widget) -> None:
-        """松手落位后检测：与他窗重叠 → 自动磁吸到首位窗格右边（V16.2）。"""
+        """松手落位后检测：与他窗重叠 → 自动磁吸到首位窗格右边（V16.2）。
+
+        V16.3：初始摆放（球左重叠）窗格跳过——重叠是有意设计；
+        用户拖动成立时标记已清除，本检测恢复生效。
+        """
         try:
             if widget._snap_animating or not widget.isVisible():
+                return
+            if getattr(widget, "_initial_placement", False):
                 return
             if self._overlaps_others(widget):
                 self._relocate_right_of_first(widget)
@@ -1904,9 +1920,12 @@ class MonitorWindowManager:
                             a._snap_constraints.append((b, edge))
                             a._contact_edges = [edge]
                             b._contact_edges = [self._opposite_edge(edge)]
-            # 恢复后重叠校验：冲突窗格归位到首位窗格右边
+            # 恢复后重叠校验：冲突窗格归位到首位窗格右边。
+            # V16.3：初始摆放（球左重叠）窗格跳过——重叠是有意设计，
+            # 外排会把全选窗格逐个推成散乱列；记忆位冲突仍外排。
             for w in list(self._widget_order):
-                if w.isVisible() and self._overlaps_others(w):
+                if (w.isVisible() and not getattr(w, "_initial_placement", False)
+                        and self._overlaps_others(w)):
                     self._relocate_right_of_first(w)
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.restore_groups", e)
@@ -1936,6 +1955,7 @@ class MonitorWindowManager:
             for w in self._widgets.values():
                 w._group = None
                 w._is_snapped = False
+                w._initial_placement = False
                 w._snap_constraints = []
                 w._contact_edges = []
                 w._screen_edge = None
