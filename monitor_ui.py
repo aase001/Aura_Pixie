@@ -9,7 +9,7 @@ topmost_getter / log_fn / config_io（manager 另持 config_io）。
 阶段进度：
   - 阶段 0：UnitRow 行模型、空壳契约、monitor 配置块默认结构
   - 阶段 1：MonitorUnitWidget 三列内容驱动渲染 + 边缘虚化光晕 + 动态行高
-  - 阶段 2：五态驱动视觉 + 语义色阈值插值 + 高负载呼吸 + sparkline + 拉取节奏
+  - 阶段 2：五态驱动视觉 + 语义色固定段色 + 高负载呼吸 + sparkline + 拉取节奏
   - 阶段 3：SnapGroup + 拖动跟手 + 幽灵轮廓预览 + 松手 280ms 缓入缓出吸附
   - 阶段 4：右键拖拽解绑 + 组解散复位 + 最小菜单 + 四层残留清扫 + 可见性联动
   - 阶段 5：集成接线（已实现，归 main.py 驱动；本模块无遗留空壳方法）
@@ -71,10 +71,11 @@ HALO_ALPHA = 0.15     # 光晕主题色透明度 15%
 BODY_ALPHA = 0.82     # 本体底色透明度（保证文字可读，无深色收边）
 # sparkline 底部锚定（V16.3）：废弃固定 SPARK_H=18 预留——曲线曾悬在
 # 文本行底与窗底之间的半腰。现曲线区贴窗底渲染；V16.6 用户拍板：高度
-# 上限改固定 45px×缩放（替代窗高×2/3）。波动大时允许与文字重叠
+# 上限改固定像素×缩放（替代窗高×2/3；V16.6 二次拍板 45→30px）。波动大时允许与文字重叠
 # （曲线先画、文字后画，曲线在文字下层）。
 SPARK_BOTTOM_GAP_PX = 2   # 曲线区底边距窗底留白（避圆角裁剪，×缩放）
-SPARK_MAX_H_PX = 45       # 曲线区高度上限（V16.6，×缩放；旧 SPARK_H_RATIO=2/3 已废）
+SPARK_MAX_H_PX = 30       # 曲线区高度上限（V16.6 二次拍板 45→30：80px 窗曲线区
+                          # 44~74px；旧 SPARK_H_RATIO=2/3 与 45px 口径均已废）
 FONT_FAMILY = "Microsoft YaHei"
 
 # ---------------------------------------------------------------------------
@@ -276,7 +277,7 @@ def default_thresholds(key: str, unit: str) -> list:
     """按指标类别给默认阈值段（禁止全局写死 90%）。
 
     百分比类 0~60 绿 / 60~85 黄 / 85~100 红；温度/转速/网速/频率/功耗/用量
-    各自默认段。段格式 {min, max, color}，段间线性插值（get_color_for_value）。
+    各自默认段。段格式 {min, max, color}，固定段色不插值（get_color_for_value）。
     """
     if unit == "%":
         return [{"min": 0, "max": 60, "color": SEM_GREEN},
@@ -311,10 +312,10 @@ def default_thresholds(key: str, unit: str) -> list:
 
 
 def get_color_for_value(value: Optional[float], thresholds: list) -> QColor:
-    """按阈值段取语义色，段间线性插值。
+    """按阈值段取语义色——V16.6 用户拍板：固定段色，绿就是绿/黄就是黄/红就是红。
 
-    值落在某段内 → 在该段 [min,max] 上从段色向下一段色插值；
-    最后一段（最高段）恒段色。低于首段 min → 首段色；高于末段 max → 末段色。
+    值落在某段内 → 恒该段色（旧段间线性插值已废：渐变过渡色引起档位误会）。
+    低于首段 min → 首段色；高于末段 max → 末段色。
     value=None → 中性灰（调用方按五态另行灰显）。
     """
     if not thresholds:
@@ -326,19 +327,7 @@ def get_color_for_value(value: Optional[float], thresholds: list) -> QColor:
     for i, seg in enumerate(thresholds):
         if value >= seg["min"]:
             idx = i
-    seg = thresholds[idx]
-    c0 = QColor(seg["color"])
-    if idx + 1 < len(thresholds):
-        nxt = thresholds[idx + 1]
-        span = seg["max"] - seg["min"]
-        t = 0.0 if span <= 0 else (value - seg["min"]) / span
-        t = max(0.0, min(1.0, t))
-        c1 = QColor(nxt["color"])
-        return QColor(
-            round(c0.red() + (c1.red() - c0.red()) * t),
-            round(c0.green() + (c1.green() - c0.green()) * t),
-            round(c0.blue() + (c1.blue() - c0.blue()) * t))
-    return c0
+    return QColor(thresholds[idx]["color"])
 
 
 def in_top_segment(value: Optional[float], thresholds: list) -> bool:
@@ -935,7 +924,7 @@ class MonitorUnitWidget(QWidget):
         窗口小，全量 update 即可。
 
         V16.3：曲线区贴窗底（留 2px 避圆角），不再从文本行底起算固定
-        18px（旧口径曲线悬在半腰）。V16.6：高度上限改固定 45px×缩放。
+        18px（旧口径曲线悬在半腰）。V16.6：高度上限固定 30px×缩放（44~74px）。
         波动大时允许与文字重叠——本方法先于 _paint_rows 调用，曲线在
         文字下层。
         """
@@ -944,14 +933,14 @@ class MonitorUnitWidget(QWidget):
         gap = getattr(self, "_col_gap", round(COL_GAP * s))
         x0 = body.left() + pad_x
         full_w = w_label + w_value + w_unit + 2 * gap
-        # 底部锚定：区底 = 本体底边 - 留白；区高 ≤ 45px×缩放（V16.6）
+        # 底部锚定：区底 = 本体底边 - 留白；区高 ≤ 30px×缩放（V16.6）
         bottom = body.bottom() - round(SPARK_BOTTOM_GAP_PX * s)
         spark_h = min(round(SPARK_MAX_H_PX * s),
                       max(1, round(bottom - body.top())))
         y_base = bottom - spark_h
         pen_w = max(1.0, SPARK_LINE_PX * s)
         for i, row in enumerate(self._rows):
-            # V16.6 修复：每条曲线独占全幅曲线区（旧 band_h=spark_h/n 按行
+            # V16.6 修复：每条曲线独占全幅曲线区（30px×缩放；旧 band_h=spark_h/n 按行
             # 分带，多行窗格曲线被压进下半带，纵坐标比例失真——用户实测
             # 温度 48/60 画到距底 40px+）。多行窗格各曲线同区叠加，
             # 语义色区分；水平铺满内容宽。
