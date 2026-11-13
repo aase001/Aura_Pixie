@@ -209,10 +209,16 @@ def _apply_titlebar_theme(widget: QWidget) -> None:
         if not hwnd:
             return
         dark = ctypes.c_int(1 if system_dark_mode() else 0)
+        # 显式声明签名（坑 42 同类）：HWND 是 64 位指针，默认 c_int 传参会截断；
+        # 返回 HRESULT 用 c_long。正常 HWND 值小不触发，但声明后杜绝高位句柄隐患。
+        _dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        _dwm.restype = ctypes.c_long
+        _dwm.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                         ctypes.c_void_p, ctypes.c_uint32]
         # 属性 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（19 为 1809~1903 旧编号，兜底）
         for attr in (20, 19):
-            hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, attr, ctypes.byref(dark), ctypes.sizeof(dark))
+            hr = _dwm(ctypes.c_void_p(hwnd), attr,
+                      ctypes.byref(dark), ctypes.sizeof(dark))
             if hr == 0:
                 break
     except Exception:   # noqa: BLE001 - 标题栏着色失败不影响主流程

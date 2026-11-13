@@ -978,11 +978,14 @@ class MetricsHub:
             out[f"disk.{i}.usage"] = mk(f"disk.{i}.usage", usage, src, st)
 
         # ---- 风扇（多风扇按槽位顺序罗列）----
+        # 断流口径与 GPU/硬盘一致：侧车 stale 时旧帧风扇值也标 stale，
+        # 不因「值还在」就标 ok（旧实现恒 ok，断流时误导用户以为读数新鲜）。
         fans = self.list_fans()
         for f in fans:
             key = f"fan.{f.slot}.{f.index}"
+            st_fan = st_sidecar if not sidecar_ok else STATUS_OK
             out[key] = mk(key, f.value, "sidecar",
-                          STATUS_OK if f.value is not None else STATUS_STALE)
+                          st_fan if f.value is not None else STATUS_STALE)
         if not fans:
             if not sidecar_ok:
                 reason = st_sidecar

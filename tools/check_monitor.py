@@ -201,6 +201,8 @@ def section_a():
     ok(snap_m["disk.0.temp"].status == mh.STATUS_STALE, "断流时硬盘温度标 stale")
     ok(snap_m["disk.0.usage"].status == mh.STATUS_STALE, "断流时硬盘使用率标 stale")
     ok(snap_m["gpu_d.0.temp"].status == mh.STATUS_STALE, "断流时 GPU 温度标 stale（口径一致）")
+    # 风扇同口径：侧车断流时旧帧风扇值也标 stale（旧实现恒 ok，与 GPU/硬盘不一致）
+    ok(snap_m["fan.cpu.0"].status == mh.STATUS_STALE, "断流时风扇标 stale（口径一致）")
 
     # 启动宽限期：尚未出帧但进程活着 ≠ 断流（首帧前枚举可能超过 stale_sec，
     # 旧口径会把正常启动误判成断流，重启预算耗尽后首帧永远等不到）
