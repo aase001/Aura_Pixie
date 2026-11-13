@@ -228,7 +228,6 @@ def section_a():
     # 配置块默认结构
     cfg = mu.default_monitor_config()
     ok(cfg["refresh_ms"] == 1000, "默认 refresh_ms=1000")
-    ok(cfg["sparkline_points"] == 60, "默认 sparkline_points=60")
     ok(cfg["idle_stop_sec"] == 300, "默认 idle_stop_sec=300（0=永不停采）")
     ok(cfg["layout"] == {}, "默认 layout 空")
     ok(cfg["enabled"] is False, "监视总开关默认不勾选")

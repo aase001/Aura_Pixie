@@ -1088,7 +1088,7 @@ SETTINGS_HEADER = (
     "两开关都在「外观」窗；pos_x/pos_y = 球心记忆位置）；\n"
     "#       monitor = 资源监视（enabled 总开关 + topmost 窗口置顶【与球体置顶独立】 + "
     "locked 锁定禁止窗格移动与拆分/合并组 + "
-    "refresh_ms 拉取周期 + sparkline_points 历史点数 + idle_stop_sec 闲置停采 + "
+    "refresh_ms 拉取周期 + idle_stop_sec 闲置停采 + "
     "units 各参数开关/阈值 + layout 窗格位置与吸附组记忆）。\n"
     "# display_scale = 每单元 {enabled: 勾选启用, percent: 50~200 且为 25 的整数倍}，"
     "未勾选的单元恒按 100% 生效；当前单元："
@@ -1276,8 +1276,7 @@ def _merge_monitor_block(base_blk, src_blk: dict) -> dict:
     merged = monitor_ui.default_monitor_config()
     if isinstance(base_blk, dict):
         merged.update({k: v for k, v in base_blk.items() if k in merged})
-    for k in ("enabled", "topmost", "locked", "refresh_ms", "sparkline_points",
-              "idle_stop_sec"):
+    for k in ("enabled", "topmost", "locked", "refresh_ms", "idle_stop_sec"):
         if k in src_blk:
             merged[k] = (bool(src_blk[k]) if k in ("enabled", "topmost", "locked")
                          else src_blk[k])

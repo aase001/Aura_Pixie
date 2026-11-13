@@ -49,7 +49,7 @@ OLD = {
                    "display_scale": {"ball": {"enabled": True, "percent": 150}}},
     "autostart": {"enabled": True},
     "window": {"always_on_top": True, "pos_x": 100, "pos_y": 200},
-    "monitor": {"enabled": True, "refresh_ms": 1500, "sparkline_points": 60,
+    "monitor": {"enabled": True, "refresh_ms": 1500,
                 "idle_stop_sec": 120,
                 "units": {"cpu.load": {"enabled": True, "threshold": []},
                           "gpu_d.0.load": {"enabled": True, "threshold": []}},

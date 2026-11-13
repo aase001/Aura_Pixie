@@ -468,10 +468,9 @@ def default_monitor_config() -> dict:
 
     enabled         监视总开关（默认 False；勾选并保存才拉起采集模块）
     refresh_ms      拉取周期（匹配侧车 ~1.1s/帧）
-    sparkline_points 历史点数（60 ≈ 1 分钟）
     idle_stop_sec   连续无监视窗多少秒后停采（0=永不停采）
     units           {参数key: {enabled, threshold:[{min,max,color}...]}}
-                    固定 10 项 + 独显卡0 四参 + 风扇三槽位 + 硬盘0 兜底项；
+                    固定 10 项 + 独显卡0 五参 + 风扇三槽位 + 硬盘0 兜底项；
                     默认全不勾选。动态键（gpu_d.1+ / disk.1+）运行时按实例展开，
                     勾选状态落盘保留。
     layout          {参数key: {x, y, group_id}}（位置与吸附组记忆）
@@ -488,7 +487,6 @@ def default_monitor_config() -> dict:
         "topmost": False,   # 窗口置顶（V16.4 与球体置顶解耦，默认关）
         "locked": False,    # 锁定（V16.4）：禁止窗格移动与拆分/合并组，默认关
         "refresh_ms": 1000,
-        "sparkline_points": SPARKLINE_POINTS,
         "idle_stop_sec": 300,
         "units": units,
         "layout": {},
