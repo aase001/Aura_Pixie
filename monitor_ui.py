@@ -27,8 +27,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from PySide6.QtCore import (QElapsedTimer, QEvent, QPoint, QPointF, QRect, QRectF,
-                            Qt, QTimer)
+from PySide6.QtCore import (QCoreApplication, QElapsedTimer, QEvent, QPoint,
+                            QPointF, QRect, QRectF, Qt, QTimer)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QPainter,
                            QPainterPath, QPen)
 from PySide6.QtWidgets import QMenu, QWidget
@@ -1825,6 +1825,51 @@ class MonitorWindowManager:
                     self._relocate_right_of_first(w)
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.restore_groups", e)
+
+    def reset_layout(self) -> None:
+        """重置布局记忆（V16.3 监视设置窗「重置」按钮）：
+
+        隐藏全部窗格、解散所有磁吸组、逐窗清吸附状态并把位置归零。
+        位置 (0,0) 是「未摆放」哨兵——重勾参数时 place_for_show 走
+        「首位窗格球旁定位 + 向右依次排开」的初始渲染链路，而不是
+        「尊重现位」分支（否则重置后重勾会回到旧位置）。
+        实例与历史缓冲保留（重勾秒回曲线）；扩宽档 _width_expanded
+        不重置（内容驱动、只升不降的既定口径）。
+        """
+        try:
+            self._ghost.hide()
+            for grp in list(self._groups):
+                for w in list(grp.members):
+                    grp.remove(w)
+            self._groups.clear()
+            for w in self._widgets.values():
+                w.hide()
+            # 先让 hide 落地再写几何：Qt 对「hide 事件尚未处理」的窗格
+            # 会把 move/setGeometry 延迟到 show 时应用（V16.3 实测根因：
+            # 重置后重勾又弹回旧位）。processEvents 强制隐藏生效。
+            QCoreApplication.processEvents()
+            for w in self._widgets.values():
+                w._group = None
+                w._is_snapped = False
+                w._snap_constraints = []
+                w._contact_edges = []
+                w._screen_edge = None
+                w._group_screen_edge = None
+                w._preview_target = None
+                w._preview_edge = None
+                w._preview_rect = None
+                w._snap_pending = None
+                w._snap_screen_edge_pending = None
+                w._snap_anim_timer.stop()
+                w._snap_animating = False
+                # 归零用 setGeometry 直接写几何：hide() 是异步的（事件循环
+                # 才生效），隐藏窗格的 move() 会被 Qt 延迟到 show 时应用，
+                # 导致重置后重勾又弹回旧位。setGeometry 不依赖可见性。
+                w.setGeometry(0, 0, w.width(), w.height())
+                # 清位置记忆基准：防重置后落盘定时器把旧位当「已移动」写回
+                w._monitor_last_pos = None
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.reset_layout", e)
 
     # ---- 阶段 3：磁吸 ----
     def new_group(self) -> SnapGroup:

@@ -1672,6 +1672,45 @@ def section_j():
         dlg.hide()
         APP.processEvents()
         ok(not dlg._hw_refresh_timer.isActive(), "设置窗隐藏 → 补刷新定时器停止")
+        # J18 重置按钮（V16.3）：全不选 + 清位置记忆 + 重勾从初始位置渲染
+        from PySide6.QtCore import QPoint
+        ok(dlg.btn_reset.text() == "重置", "重置按钮文案")
+        dlg.chk_enable.setChecked(True)
+        dlg.chk_select_all.setChecked(True)   # 全选 → 建窗
+        APP.processEvents()
+        # 人为记忆位（模拟拖动后落盘）+ 组记忆
+        for i, (k, w) in enumerate(mgr._widgets.items()):
+            w.move(400 + i * 10, 300)
+        cfg_mem = M.load_monitor_config()
+        cfg_mem["layout"] = {k: {"x": 400, "y": 300, "group_id": "g9"}
+                             for k in list(mgr._widgets)[:2]}
+        M.save_monitor_config(cfg_mem)
+        dlg._on_reset()
+        APP.processEvents()
+        ok(all(not c.isChecked() for c in dlg._param_checks.values()),
+           "重置 → 全部参数取消勾选")
+        cfg_r = M.load_monitor_config()
+        ok(all(not (cfg_r["units"].get(k) or {}).get("enabled")
+               for k in dlg._param_checks), "重置 → 配置全部停用")
+        ok(cfg_r.get("layout") == {}, "重置 → 位置记忆清空落盘")
+        ok(not any(w.isVisible() for w in mgr._widgets.values()),
+           "重置 → 全部窗格隐藏")
+        ok(all(w._group is None for w in mgr._widgets.values()),
+           "重置 → 磁吸组解散")
+        ok(all(w.pos() == QPoint(0, 0) for w in mgr._widgets.values()),
+           "重置 → 窗格位置归零（未摆放哨兵）")
+        ok(dlg.chk_enable.isChecked(), "重置不动总开关（保持勾选）")
+        ok(cfg_r.get("enabled") is True, "重置后总开关配置保持启用")
+        ok(not dlg.chk_select_all.isChecked(), "重置后全选态落下")
+        # 重勾参数 → 初始摆放（不再回到旧记忆位 400,300）
+        dlg._param_checks["cpu.load"].setChecked(True)
+        APP.processEvents()
+        w_cpu = mgr._widgets["cpu.load"]
+        ok(w_cpu.isVisible(), "重置后重勾 → 窗格重新渲染")
+        ok(w_cpu.pos() != QPoint(400, 300),
+           f"重勾走初始摆放而非旧记忆位（{w_cpu.pos()}）")
+        dlg._param_checks["cpu.load"].setChecked(False)
+        APP.processEvents()
         dlg.close()
     finally:
         for w in list(mgr._widgets.values()):

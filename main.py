@@ -5454,12 +5454,19 @@ class MonitorSettingsDialog(QDialog):
         root.addWidget(scroll)
 
         btn_row = QHBoxLayout()
+        # V16.3：重置 = 全不选 + 清窗口位置记忆（总开关保持原状）
+        self.btn_reset = QPushButton("重置", self)
+        self.btn_reset.setToolTip(
+            "取消勾选全部参数并清除窗口位置记忆；"
+            "再次勾选参数时窗格从初始位置重新排开（总开关不受影响）")
+        self.btn_reset.clicked.connect(self._on_reset)
         self.btn_save = QPushButton("保存", self)
         self.btn_save.setDefault(True)
         btn_cancel = QPushButton("取消", self)
         self.btn_save.clicked.connect(self._on_save)
         btn_cancel.clicked.connect(self.reject)
         btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_reset)
         btn_row.addWidget(self.btn_save)
         btn_row.addWidget(btn_cancel)
         root.addLayout(btn_row)
@@ -5624,6 +5631,40 @@ class MonitorSettingsDialog(QDialog):
                 save_monitor_config(self._cfg)
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_select_all", exc)
+
+    def _on_reset(self) -> None:
+        """重置（V16.3）：全不选 + 清窗口位置记忆，总开关保持原状。
+
+        ① 批量取消全部参数复选框（守卫抑制逐项同步，末尾统一保存一次）；
+        ② layout 清空落盘 + 管理器复位（隐藏窗格/解散组/位置归零），
+           重勾参数时 place_for_show 走初始摆放链路；
+        ③ 清落盘定时器脏标记——防重置后旧位置又被写回配置。
+        """
+        global _MONITOR_LAYOUT_DIRTY
+        try:
+            self._bulk_updating = True
+            try:
+                for chk in self._param_checks.values():
+                    chk.setChecked(False)
+            finally:
+                self._bulk_updating = False
+            units = self._cfg.setdefault("units", {})
+            for key in self._param_checks:
+                u = units.setdefault(key, {"enabled": False, "threshold": []})
+                u["enabled"] = False
+            self._cfg["layout"] = {}
+            save_monitor_config(self._cfg)
+            mgr = _MONITOR_MGR
+            if mgr is not None:
+                mgr.reset_layout()
+                # 复位后窗格全部隐藏，停拉取（重勾时 start_polling 恢复）
+                mgr.stop_polling()
+            _MONITOR_LAYOUT_DIRTY = False
+            if _MONITOR_LAYOUT_TIMER is not None:
+                _MONITOR_LAYOUT_TIMER.stop()
+            self._sync_select_all_state()
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_reset", exc)
 
     def refresh_disk_params(self) -> None:
         """采集中发现新盘 → 把新盘参数补进复选框清单（保留已有勾选）。"""
