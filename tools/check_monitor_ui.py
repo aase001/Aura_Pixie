@@ -154,7 +154,7 @@ class FakeHub:
         out = []
         i = 0
         while any(f"gpu_d.{i}.{s}" in snap
-                  for s in ("load", "temp", "vram_load", "vram_used")):
+                  for s in ("load", "temp", "power", "vram_load", "vram_used")):
             out.append({"index": i, "name": f"FakeGPU{i}"})
             i += 1
         return out
@@ -1431,8 +1431,25 @@ def section_i():
     th = M._monitor_theme()
     ok(th["color_mid"] == M.CONFIG["color_mid"]
        and "system_dark_mode" in th, "theme 包呼吸三色+深浅色")
-    ok(M._monitor_topmost_getter() == M.topmost_enabled(),
-       "topmost_getter 包 window.always_on_top")
+    # V16.4 解耦：监视置顶读 monitor.topmost，与球体置顶（window.always_on_top）
+    # 互不影响。旧断言 getter==topmost_enabled() 靠默认都 False 恒绿、口径错误，
+    # 改为真正验证「球体关、监视开」时 getter 仍 True（读 monitor 块）。
+    _top_saved = M.topmost_enabled()
+    _mon_saved = M.load_monitor_config()
+    try:
+        M.set_topmost(False)
+        _cfg_top = M.load_monitor_config()
+        _cfg_top["topmost"] = True
+        M.save_monitor_config(_cfg_top)
+        ok(M._monitor_topmost_getter() is True and M.topmost_enabled() is False,
+           "监视置顶读 monitor.topmost，与球体置顶解耦（球体关/监视开）")
+        _cfg_top["topmost"] = False
+        M.save_monitor_config(_cfg_top)
+        ok(M._monitor_topmost_getter() is False,
+           "监视置顶取消 → getter False（不随球体置顶）")
+    finally:
+        M.set_topmost(_top_saved)
+        M.save_monitor_config(_mon_saved)
     ok(callable(M._monitor_place_fn) and callable(M._monitor_log_fn),
        "place_fn/log_fn 可调用")
     # ---- I4b 锁定取值走缓存：拖动每事件都查 is_locked，绝不每次读盘解析 yaml ----
