@@ -1080,6 +1080,65 @@ def section_p():
     w14.close()
     w14n.close()
 
+    # ---- F15 曲线下方渐变填充（V16.6）：当前色→透明，填充到曲线区底边 ----
+    # 失败形态：无填充时画刷捕获为空必红；纯色/反向渐变时 stops 或像素
+    # alpha 断言必红。几何期望为手算：窗高80、halo4、gap2 → 区底74、区高45、顶29。
+    from PySide6.QtGui import QPainter as _QP15, QBrush as _QB15, QLinearGradient as _QLG15
+    w15, hub15, mgr15 = _make_widget()
+    mgr15.register_widget("cpu.load", w15, ["cpu.load"])
+    for v in (20.0, 40.0, 30.0, 50.0, 25.0, 45.0):
+        hub15.set_metric("cpu.load", v, mh.STATUS_OK)
+        w15.update_data(hub15.snapshot()["cpu.load"])
+    w15.show()
+    APP.processEvents()
+    grads = []
+    orig_sb = _QP15.setBrush
+    orig_dp = _QP15.drawPath
+
+    def _spy_sb(self, brush):
+        if isinstance(brush, _QB15) and brush.style() == Qt.BrushStyle.LinearGradientPattern:
+            g = brush.gradient()
+            grads.append(((g.start().x(), g.start().y()),
+                          (g.finalStop().x(), g.finalStop().y()),
+                          list(g.stops())))
+        return orig_sb(self, brush)
+
+    def _spy_dp(self, path):
+        return orig_dp(self, path)
+
+    _QP15.setBrush = _spy_sb
+    _QP15.drawPath = _spy_dp
+    try:
+        img15 = _grab(w15)
+    finally:
+        _QP15.setBrush = orig_sb
+        _QP15.drawPath = orig_dp
+    ok(len(grads) >= 1, f"曲线渐变填充存在（捕获 {len(grads)} 个线性渐变画刷）")
+    if grads:
+        (sx, sy), (fx, fy), stops = grads[0]
+        ok(abs(sy - 29.0) <= 1.5 and abs(fy - 74.0) <= 1.5 and abs(sx - fx) < 1e-6,
+           f"渐变方向=曲线区顶→底（起 {sy:.1f} 止 {fy:.1f}，期望 29→74）")
+        ok(len(stops) >= 2 and abs(stops[0][0]) < 1e-6 and abs(stops[-1][0] - 1.0) < 1e-6,
+           "渐变停靠点覆盖 0→1 全程")
+        if len(stops) >= 2:
+            a0 = stops[0][1].alphaF()
+            a1 = stops[-1][1].alphaF()
+            ok(a0 > 0.05 and a1 < 0.01,
+               f"顶部曲线色不透明、底边全透明（顶 {a0:.2f} 底 {a1:.2f}）")
+            ok(stops[0][1].red() == stops[-1][1].red()
+               and stops[0][1].green() == stops[-1][1].green()
+               and stops[0][1].blue() == stops[-1][1].blue(),
+               "渐变两端同色（曲线当前色），仅 alpha 变化")
+    # 像素验证：x=125 处曲线 y≈57.1，其下合成 alpha 向底边递减
+    # （底边像素仍含窗格自身 82% 底色，全透明断言只针对渐变画刷本身）
+    a58 = _alpha(img15, 125, 58)
+    a63 = _alpha(img15, 125, 63)
+    a68 = _alpha(img15, 125, 68)
+    a73 = _alpha(img15, 125, 73)
+    ok(a58 > a63 > a68 > a73,
+       f"曲线下方填充向底边渐隐（y58/63/68/73 alpha={a58}/{a63}/{a68}/{a73}）")
+    w15.close()
+
 
 # ---------------------------------------------------------------------------
 # G. 阶段 3：磁吸预览与松手吸附

@@ -30,8 +30,8 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import (QCoreApplication, QElapsedTimer, QEvent, QPoint,
                             QPointF, QRect, QRectF, Qt, QTimer)
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QPainter,
-                           QPainterPath, QPen)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QGuiApplication,
+                           QLinearGradient, QPainter, QPainterPath, QPen)
 from PySide6.QtWidgets import QMenu, QWidget
 
 import monitor_hub as mh
@@ -926,7 +926,8 @@ class MonitorUnitWidget(QWidget):
 
     def _paint_sparklines(self, p: QPainter, body: QRectF, s: float) -> None:
         """窗格底部锚定画 QPainterPath 折线：线宽 1px×缩放、当前语义色、
-        不填充不画轴、None 点断开。窗口小，全量 update 即可。
+        不画轴、None 点断开；V16.6 曲线下方到区底用当前色→透明渐变填充。
+        窗口小，全量 update 即可。
 
         V16.3：曲线区贴窗底（留 2px 避圆角），不再从文本行底起算固定
         18px（旧口径曲线悬在半腰）。V16.6：高度上限改固定 45px×缩放。
@@ -964,8 +965,6 @@ class MonitorUnitWidget(QWidget):
                 color = QColor(text_color(self.theme))
                 color.setAlphaF(0.35)
             pen = QPen(color, pen_w)
-            p.setPen(pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
             # 归一化（V16.6 分档读取）：网络保留动态 min/max；其余按当前档
             # 区间 [lo,hi] 映射（绿[0,g]/黄[g,y]/红[g,t]），越界钳曲线区边缘。
             vals = [v for v in hist if v is not None]
@@ -981,18 +980,48 @@ class MonitorUnitWidget(QWidget):
                 span = (hi - lo) or 1.0
                 norm = lambda v: min(max((v - lo) / span, 0.0), 1.0)  # noqa: E731
             path = QPainterPath()
+            fill_path = QPainterPath()
             started = False
+            seg_start_x = None
+            last_x = None
             for j, v in enumerate(hist):
                 x = x0 + full_w * (j / (len(hist) - 1))
                 if v is None:
+                    if started:
+                        # None 断线前把已画段闭合到区底（V16.6 渐变填充）
+                        fill_path.lineTo(last_x, bottom)
+                        fill_path.lineTo(seg_start_x, bottom)
+                        fill_path.closeSubpath()
                     started = False   # None 点断开
                     continue
                 yy = top + band_h * (1.0 - norm(v))
                 if not started:
                     path.moveTo(x, yy)
+                    fill_path.moveTo(x, yy)
+                    seg_start_x = x
                     started = True
                 else:
                     path.lineTo(x, yy)
+                    fill_path.lineTo(x, yy)
+                last_x = x
+            if started:
+                fill_path.lineTo(last_x, bottom)
+                fill_path.lineTo(seg_start_x, bottom)
+                fill_path.closeSubpath()
+            # V16.6：曲线下方到区底边缘，用曲线当前色向透明渐变填充；
+            # 先填充后描边，折线压在填充上层；不画轴、文字仍在最上层。
+            if not fill_path.isEmpty():
+                grad = QLinearGradient(x0, top, x0, bottom)
+                c_top = QColor(color)
+                c_bot = QColor(color)
+                c_bot.setAlphaF(0.0)
+                grad.setColorAt(0.0, c_top)
+                grad.setColorAt(1.0, c_bot)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(grad))
+                p.drawPath(fill_path)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(path)
 
     # ---- 阶段 2：数据可视化 ----
