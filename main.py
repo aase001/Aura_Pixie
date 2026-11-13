@@ -1895,7 +1895,10 @@ def ball_locked(path: str = SETTINGS_PATH) -> bool:
 
 
 def set_ball_locked(locked: bool, path: str = SETTINGS_PATH) -> None:
-    """写入 setting.yaml 的 window.locked；不影响其他配置块。"""
+    """写入 setting.yaml 的 window.locked；不影响其他配置块。
+
+    落盘同时刷新存活球体的锁定缓存（写盘即时生效，拖动热路径无需读盘）。
+    """
     data = read_setting(path)
     w = data.get("window")
     if not isinstance(w, dict):
@@ -1906,6 +1909,8 @@ def set_ball_locked(locked: bool, path: str = SETTINGS_PATH) -> None:
         write_setting(data, path)
     except OSError as exc:
         _log_crash("ball_locked_setting_save", exc)
+    if _MONITOR_BALL is not None:
+        _MONITOR_BALL._ball_locked = bool(locked)
 
 
 # ---------------------------------------------------------------- 球心位置记忆
@@ -3510,15 +3515,28 @@ def _monitor_rescale_if_changed() -> None:
 
 # ---------------------------------------------------------------- 监视配置（阶段 5）
 def load_monitor_config() -> dict:
-    """读取监视配置块；缺键回退默认（照 appearance 先例，解析失败不打断启动）。"""
+    """读取监视配置块；缺键回退默认（照 appearance 先例，解析失败不打断启动）。
+
+    顺带刷新锁定缓存：本函数是监视配置读取的唯一漏斗，拖动热路径的
+    _monitor_locked_getter 改查缓存后，由这里保证缓存与磁盘一致。
+    """
+    global _MONITOR_LOCKED_CACHE
     data = read_setting().get("monitor")
-    return _merge_monitor_block(None, data if isinstance(data, dict) else {})
+    merged = _merge_monitor_block(None, data if isinstance(data, dict) else {})
+    _MONITOR_LOCKED_CACHE = bool(merged.get("locked", False))
+    return merged
 
 
 def save_monitor_config(cfg: dict) -> None:
-    """写回监视配置块（不动其他块）；units/layout 整块归一后落盘。"""
+    """写回监视配置块（不动其他块）；units/layout 整块归一后落盘。
+
+    落盘同时刷新锁定缓存（写盘即时生效，getter 无需再读盘）。
+    """
+    global _MONITOR_LOCKED_CACHE
     data = read_setting()
-    data["monitor"] = _merge_monitor_block(None, cfg if isinstance(cfg, dict) else {})
+    merged = _merge_monitor_block(None, cfg if isinstance(cfg, dict) else {})
+    data["monitor"] = merged
+    _MONITOR_LOCKED_CACHE = bool(merged.get("locked", False))
     try:
         write_setting(data)
     except OSError as exc:
@@ -3919,6 +3937,10 @@ class AuraBall(QWidget):
         # 置顶层是窗体级属性，运行时切换需重设 window flags，会伴随一次短暂隐藏/重显。
         self._topmost = topmost_enabled()
         self._apply_topmost()
+        # 锁定缓存（V16.4 性能修复）：拖动热路径 _update_drag_target 被 8ms
+        # 心跳高频调用，旧实现每次 ball_locked() 读盘解析 yaml 会卡顿。构造时
+        # 读一次缓存，写盘（set_ball_locked）/重载（reload_config）即时刷新。
+        self._ball_locked = ball_locked()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setFixedSize(IDLE_SIZE, IDLE_SIZE)
@@ -4145,8 +4167,9 @@ class AuraBall(QWidget):
         if self._press is None:
             return False
         # V16.4 锁定：不进入拖动（返回 False → 照常走高亮/单击评估，
-        # 单击/双击/悬停/右键菜单均不受影响，只是球体不能被拖走）
-        if ball_locked():
+        # 单击/双击/悬停/右键菜单均不受影响，只是球体不能被拖走）。
+        # 查构造/写盘时刷新的缓存，不在 8ms 热路径里读盘解析 yaml。
+        if self._ball_locked:
             return False
         if not self._dragging:
             # 次级展开的收起飞行中若开始拖动球体 → 取消次级展开（先保证拖动手感）；
@@ -5063,6 +5086,8 @@ class AuraBall(QWidget):
         # 手改 yaml / 导入配置后置顶要重启才生效。现在重载即按磁盘值对齐置顶
         # （apply_topmost_setting 内部已一致则跳过，不产生多余副作用）。
         self.apply_topmost_setting(topmost_enabled())
+        # 锁定缓存对齐磁盘（手改 yaml / 导入配置路径，照置顶对表先例）
+        self._ball_locked = ball_locked()
         # 外观同步套用（导入配置/手改 yaml 路径）：缩放因子变化时监视窗
         # 自动重排磁吸关系（_monitor_rescale_if_changed 内部判因子未变即跳过）
         apply_appearance_to_config(load_appearance_config())
@@ -5148,6 +5173,10 @@ _MONITOR_LAST_VISIBLE = 0.0  # 上次有监视窗可见的时刻
 _MONITOR_LAYOUT_TIMER = None  # 布局记忆落盘定时器（移动停止 10s）
 _MONITOR_LAYOUT_DIRTY = False
 _MONITOR_SCALE_APPLIED = None  # 上次已生效的监视缩放因子（变化才触发磁吸重排）
+# 监视锁定缓存（V16.4 性能修复）：拖动每事件都查 is_locked，若每次读盘解析
+# yaml 会卡顿。改由 load/save_monitor_config 漏斗刷新本缓存，getter 只查内存。
+# None=尚未初始化（getter 兜底读盘一次）；写盘后即时刷新，勾选即时生效语义不丢。
+_MONITOR_LOCKED_CACHE: bool | None = None
 
 # 监视单元分组（unit_key → 行键集）：按指标白名单分组，每组一个迷你窗
 # 参数级窗格清单（一参数一窗格；用户拍板：废弃 sys.uptime，无值参数也罗列）。
@@ -5208,9 +5237,16 @@ def _monitor_locked_getter() -> bool:
 
     锁定 = 禁止窗格移动与拆分/合并组（右键菜单、勾选、采集照常）；
     与球体锁定（window.locked）互相独立。
+
+    性能修复：拖动每事件都经 is_locked() 调本函数，旧实现每次读盘解析
+    yaml 会卡顿。改查 _MONITOR_LOCKED_CACHE（由 load/save_monitor_config
+    漏斗刷新）；仅缓存未初始化时兜底读盘一次。写盘即时刷新，勾选即时生效。
     """
+    global _MONITOR_LOCKED_CACHE
     try:
-        return bool(load_monitor_config().get("locked", False))
+        if _MONITOR_LOCKED_CACHE is None:
+            _MONITOR_LOCKED_CACHE = bool(load_monitor_config().get("locked", False))
+        return bool(_MONITOR_LOCKED_CACHE)
     except Exception:  # noqa: BLE001
         return False
 

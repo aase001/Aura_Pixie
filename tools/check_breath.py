@@ -601,6 +601,48 @@ def main() -> int:
           "_set_move_cursor()" in _src_udt, "", failures)
     check("防回归：松手两分支都恢复光标（≥2 处 clear）",
           _src_rel.count("_clear_move_cursor()") >= 2, "", failures)
+    # —— V16.4 性能修复：锁定取值走缓存，拖动热路径绝不每次读盘解析 yaml ——
+    # 回归判据：_update_drag_target 被 8ms 心跳高频调用，连续 N 次判定期间
+    # ball_locked 读盘次数必须为 0（构造时已读一次缓存）；写盘后即时刷新。
+    _blc = fresh_ball()
+    _blc._press = {"grab": QPointF(100.0, 100.0), "offset": QPointF(0.0, 0.0),
+                   "t0": 0.0}
+    _reads_lock = {"n": 0}
+    _real_ball_locked = M.ball_locked
+
+    def _counting_ball_locked(*a, **k):
+        _reads_lock["n"] += 1
+        return _real_ball_locked(*a, **k)
+
+    M.ball_locked = _counting_ball_locked
+    try:
+        for _ in range(30):
+            _blc._update_drag_target(QPointF(100.0 + _, 100.0))  # noqa: SLF001
+        check("锁定拖动热路径零读盘（30 次判定读盘 %d 次，应为 0）" % _reads_lock["n"],
+              _reads_lock["n"] == 0, "", failures)
+    finally:
+        M.ball_locked = _real_ball_locked
+    # 写盘刷新缓存：set_ball_locked 后存活球体立即反映新值（无需重启）。
+    # 生产语义：运行期仅一个球体即 _MONITOR_BALL，写盘刷新作用于它；
+    # 测试球体须注册为存活球体才能验证该链路（finally 还原）。
+    _saved_lk = _real_ball_locked()
+    _saved_ball = M._MONITOR_BALL
+    M._MONITOR_BALL = _blc
+    try:
+        M.set_ball_locked(True)
+        check("set_ball_locked(True) → 存活球体缓存即时刷新",
+              _blc._ball_locked is True, "", failures)  # noqa: SLF001
+        _blc._press = {"grab": QPointF(100.0, 100.0), "offset": QPointF(0.0, 0.0),
+                       "t0": 0.0}
+        check("缓存锁定 → 拖动判定被拦",
+              _blc._update_drag_target(QPointF(300.0, 300.0)) is False, "", failures)  # noqa: SLF001
+        M.set_ball_locked(False)
+        check("set_ball_locked(False) → 缓存即时解锁",
+              _blc._ball_locked is False, "", failures)  # noqa: SLF001
+    finally:
+        M.set_ball_locked(_saved_lk)
+        M._MONITOR_BALL = _saved_ball
+    _blc.deleteLater()
     b9.deleteLater()
     b10.deleteLater()
     b11.deleteLater()

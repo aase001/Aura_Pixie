@@ -1435,6 +1435,34 @@ def section_i():
        "topmost_getter 包 window.always_on_top")
     ok(callable(M._monitor_place_fn) and callable(M._monitor_log_fn),
        "place_fn/log_fn 可调用")
+    # ---- I4b 锁定取值走缓存：拖动每事件都查 is_locked，绝不每次读盘解析 yaml ----
+    # 回归判据：把 _monitor_locked_getter 挂到窗格后连续取值 N 次，配置读盘
+    # 次数必须为 0（缓存命中）；写盘后缓存即时刷新（勾选即时生效语义不丢）。
+    _lock_saved = M.load_monitor_config().get("locked", False)
+    _cfg_lock = M.load_monitor_config()
+    _cfg_lock["locked"] = True
+    M.save_monitor_config(_cfg_lock)
+    _reads = {"n": 0}
+    _real_load = M.load_monitor_config
+
+    def _counting_load(*a, **k):
+        _reads["n"] += 1
+        return _real_load(*a, **k)
+
+    M.load_monitor_config = _counting_load
+    try:
+        for _ in range(20):
+            ok(M._monitor_locked_getter() is True, "锁定取值读缓存（值正确）")
+        ok(_reads["n"] == 0,
+           f"锁定 getter 连续 20 次零读盘（实际读盘 {_reads['n']} 次，应为 0）")
+        # 写盘刷新缓存：取消锁定后 getter 立即反映新值（无需再读盘）
+        _cfg_lock["locked"] = False
+        M.save_monitor_config(_cfg_lock)
+        ok(M._monitor_locked_getter() is False, "写盘后缓存即时刷新（解锁生效）")
+    finally:
+        M.load_monitor_config = _real_load
+        _cfg_lock["locked"] = _lock_saved
+        M.save_monitor_config(_cfg_lock)
     # monitor_ui 仍禁 import main（循环依赖看守）
     mu_src = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "monitor_ui.py"), encoding="utf-8").read()
