@@ -1989,6 +1989,11 @@ def section_k():
     ok("def rescale" in src and "_snap_constraints" in src,
        "缩放重排与贴合约束在位")
     ok("_text_outgrows_cols" not in src, "旧「变宽即撑宽」逻辑已移除")
+    # V16.3 用户拍板：废除合并窗格融合虚线（只画最后合并窗格、观感不一致）；
+    # 磁吸预览幽灵虚线保留（GhostOverlay 仍用 DashLine）
+    ok("_paint_fuse" not in src, "合并融合虚线绘制已废除")
+    ok("class GhostOverlay" in src and "DashLine" in src,
+       "磁吸预览幽灵虚线保留")
     main_src = open(os.path.join(root, "main.py"), encoding="utf-8").read()
     ok("_monitor_rescale_if_changed" in main_src,
        "main 缩放变化触发重排接线在位")

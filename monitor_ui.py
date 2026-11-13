@@ -103,7 +103,7 @@ DRAG_THRESHOLD_PX = 4     # 拖动判定阈值
 SNAP_PREVIEW_PX = 20      # 移动中预览阈值（<20px 出幽灵轮廓）
 SNAP_STRONG_PX = 10       # 强预览档（<10px 视觉更强）
 SNAP_ANIM_MS = 280        # 松手吸附缓入缓出时长
-FUSE_DASH_PX = 1          # 融合虚线线宽（乘缩放）
+FUSE_DASH_PX = 1          # 幽灵预览虚线线宽（乘缩放；合并融合虚线已废除 V16.3）
 
 # ---------------------------------------------------------------------------
 # 固定窗格尺寸（用户拍板 V16.1：初始 250×80px；宽度不够时整体扩到 350px，不逐数据撑宽）
@@ -118,7 +118,7 @@ _SAMPLE_VALUES = ("--", "100.0", "9999.9", "12345", "123456")
 
 
 def fuse_color(theme: dict) -> QColor:
-    """融合虚线/幽灵轮廓颜色随系统深浅色（浅色系统用深色 20%）。"""
+    """幽灵预览轮廓颜色随系统深浅色（浅色系统用深色 20%；合并融合虚线已废除）。"""
     if theme.get("system_dark_mode"):
         return QColor(235, 238, 245, int(255 * 0.5))
     return QColor(30, 32, 40, int(255 * 0.2))
@@ -466,13 +466,13 @@ class MonitorUnitWidget(QWidget):
         self.manager = manager
         # 状态机（阶段 3 磁吸 / 阶段 4 解绑消费）
         self._group = None            # 所属 SnapGroup；None=独立
-        self._is_snapped = False      # 吸附态（关光晕、画融合虚线）
+        self._is_snapped = False      # 吸附态（关光晕；融合虚线已废除 V16.3）
         self._preview_target = None   # 移动中预览目标（widget 或 "screen"）
         self._preview_edge = None     # 预览贴合边（left/right/top/bottom）
         self._preview_rect = None     # 预览贴合位（QRect，幽灵轮廓画此处）
         self._preview_strong = False  # <10px 强预览档
         self._screen_edge = None      # 屏幕边吸附记录（不入窗间组）
-        self._contact_edges: list = []  # 吸附接触边（画融合虚线）
+        self._contact_edges: list = []  # 吸附接触边（元数据保留；融合虚线已废除）
         self._rows: list[UnitRow] = []
         # 拖动状态（阶段 3）
         self._dragging = False
@@ -745,8 +745,8 @@ class MonitorUnitWidget(QWidget):
             # （V16.3 用户拍板）
             self._paint_sparklines(p, body, s)
             self._paint_rows(p, body, s)
-            if self._is_snapped:
-                self._paint_fuse(p, s)
+            # V16.3 用户拍板：废除合并窗格融合虚线（只画最后合并窗格、
+            # 其他窗格没有，观感不一致），不再需要分割线。
             p.end()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.paintEvent", e)
@@ -1444,31 +1444,6 @@ class MonitorUnitWidget(QWidget):
     def _opposite_edge(edge: Optional[str]) -> Optional[str]:
         return {"left": "right", "right": "left",
                 "top": "bottom", "bottom": "top"}.get(edge)
-
-    def _paint_fuse(self, p: QPainter, s: float) -> None:
-        """吸附态接触边画融合虚线（DashLine 1px×缩放，颜色随主题）。"""
-        if not self._contact_edges:
-            return
-        c = fuse_color(self.theme)
-        pen = QPen(c, max(1.0, FUSE_DASH_PX * s))
-        pen.setStyle(Qt.PenStyle.DashLine)
-        p.setPen(pen)
-        r = QRectF(self.rect())
-        halo = round(HALO_PX * s)
-        body = r.adjusted(halo, halo, -halo, -halo)
-        for edge in self._contact_edges:
-            if edge == "left":
-                p.drawLine(QPointF(body.left(), body.top()),
-                           QPointF(body.left(), body.bottom()))
-            elif edge == "right":
-                p.drawLine(QPointF(body.right(), body.top()),
-                           QPointF(body.right(), body.bottom()))
-            elif edge == "top":
-                p.drawLine(QPointF(body.left(), body.top()),
-                           QPointF(body.right(), body.top()))
-            elif edge == "bottom":
-                p.drawLine(QPointF(body.left(), body.bottom()),
-                           QPointF(body.right(), body.bottom()))
 
     # ---- 阶段 4：解绑与状态机收口 ----
     def set_settings_callback(self, cb: Optional[Callable]) -> None:
