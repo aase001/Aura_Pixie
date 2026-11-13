@@ -9,7 +9,7 @@
      禁 get(key) 拉取、禁 exec() 嵌套（改坏会红）
   D. 环境看守——offscreen 平台、QApplication 先于字体加载
   E. 阶段 1 渲染与布局——窗口标志、三列内容驱动、缩放、光晕像素、动态行高
-  F. 阶段 2 数据可视化——五态、阈值插值、呼吸相位、history、一帧一映射
+  F. 阶段 2 数据可视化——五态、阈值固定段色、呼吸相位、history、一帧一映射
   G. 阶段 3 磁吸——拖动→预览→松手落位→入组、移动中不吸附、幽灵穿透、屏幕边
   H. 阶段 4 解绑收口——解绑复位、右键轻点不拆组、四层清扫、全隐停、测试钩子
   I. 阶段 5 接线——配置四函数、注入契约、生命周期、布局记忆（隔离 LOCALAPPDATA）
@@ -702,22 +702,23 @@ def section_f():
     print("[F] 阶段 2 数据可视化层")
     from PySide6.QtGui import QColor
 
-    # ---- F1 阈值插值边界 ----
+    # ---- F1 阈值段色边界（V16.6 改固定段色：绿就是绿/黄就是黄/红就是红）----
     th = mu.default_thresholds("cpu.load", "%")
     ok(th[0]["max"] == 60 and th[1]["max"] == 85 and th[2]["max"] == 100,
        "百分比默认段 0~60/60~85/85~100（非全局 90%）")
     c0 = mu.get_color_for_value(0.0, th)
     ok(c0.name().upper() == mu.SEM_GREEN.upper(), "0 → 绿")
     c100 = mu.get_color_for_value(100.0, th)
-    ok(c100.name().upper() == mu.SEM_RED.upper(), "100 → 红（最高段恒段色）")
+    ok(c100.name().upper() == mu.SEM_RED.upper(), "100 → 红")
     c60 = mu.get_color_for_value(60.0, th)
     ok(c60.name().upper() == mu.SEM_YELLOW.upper(), "60 → 黄（段界）")
-    # 段间线性插值：72.5 在 60~85 中点 → 黄红各半
-    cmid = mu.get_color_for_value(72.5, th)
-    y = QColor(mu.SEM_YELLOW)
-    r = QColor(mu.SEM_RED)
-    exp_r = round((y.red() + r.red()) / 2)
-    ok(abs(cmid.red() - exp_r) <= 1, f"段间线性插值（72.5 红通道 {cmid.red()}≈{exp_r}）")
+    # V16.6 固定段色：段内任意值恒段色，不再向下一段色插值（渐变引起误会）
+    ok(mu.get_color_for_value(72.5, th).name().upper() == mu.SEM_YELLOW.upper(),
+       "72.5（黄段中点）→ 纯黄（旧插值口径黄红各半必红）")
+    ok(mu.get_color_for_value(30.0, th).name().upper() == mu.SEM_GREEN.upper(),
+       "30（绿段中点）→ 纯绿（旧插值口径偏黄必红）")
+    ok(mu.get_color_for_value(92.0, th).name().upper() == mu.SEM_RED.upper(),
+       "92（红段内）→ 纯红")
     ok(mu.get_color_for_value(None, th).red() == 150, "None → 中性灰")
     # 温度/转速/网速各自默认段（不与百分比同）
     ok(mu.default_thresholds("cpu.temp", "℃")[1]["max"] == 80,
@@ -883,7 +884,7 @@ def section_f():
     ok("QElapsedTimer" in src and "breath_alpha" in src,
        "呼吸相位取 QElapsedTimer 真实时间")
     ok("get_color_for_value" in src and "in_top_segment" in src,
-       "语义色阈值插值与最高段判定在位")
+       "语义色固定段色与最高段判定在位")
 
     # ---- F10 sparkline 真实渲染像素（有历史 vs 空历史）----
     w7, hub7, mgr7 = _make_widget()
@@ -904,7 +905,7 @@ def section_f():
     ok(diff > 20, f"sparkline 真实渲染产生像素差异（{diff} 像素）")
     w7.close()
 
-    # ---- F11 曲线底部锚定（V16.3 贴窗底不再悬半腰；V16.6 高度上限 45px）----
+    # ---- F11 曲线底部锚定（V16.3 贴窗底不再悬半腰；V16.6 高度上限 30px）----
     w8, hub8, mgr8 = _make_widget()
     mgr8.register_widget("cpu.load", w8, ["cpu.load"])
     w8.show()
@@ -936,16 +937,16 @@ def section_f():
         ok(bb.bottom() >= H - 10,
            f"曲线贴窗底渲染（底 {bb.bottom():.1f} vs 窗高 {H}，旧口径悬半腰必红）")
         ok(bb.top() >= band_top - 2,
-           f"曲线区顶不超 45px 上限（顶 {bb.top():.1f} ≥ {band_top - 2}）")
+           f"曲线区顶不超 30px 上限（顶 {bb.top():.1f} ≥ {band_top - 2}）")
         ok(bb.height() <= round(mu.SPARK_MAX_H_PX * 1.0) + 2,
-           f"曲线区高不超 45px（{bb.height():.1f}px）")
+           f"曲线区高不超 30px（{bb.height():.1f}px）")
     # 源码看守：绘制顺序=曲线先、文字后（重叠时曲线在文字下层）
     src_f11 = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
     ok(src_f11.index("self._paint_sparklines(p, body, s)")
        < src_f11.index("self._paint_rows(p, body, s)"),
        "曲线先画文字后画（重叠时曲线在文字下层）")
     ok("SPARK_MAX_H_PX" in src_f11 and "SPARK_BOTTOM_GAP_PX" in src_f11,
-       "底部锚定常量在位（V16.6 固定 45px 上限，旧 SPARK_H_RATIO 已废）")
+       "底部锚定常量在位（V16.6 固定 30px 上限，旧 SPARK_H_RATIO 已废）")
     w8.close()
 
     # ---- F12 纵坐标分档读取（V16.6 替代 V16.3 升降+回落），网络保留动态 ----
@@ -982,14 +983,14 @@ def section_f():
 
 
 def section_p():
-    """P. 曲线迭代（V16.6）：高度上限 45px（F13）。"""
+    """P. 曲线迭代（V16.6）：高度上限 30px / 分档读取 / 渐变填充 / 固定段色。"""
     print("[P] 曲线迭代：高度上限/分档读取/渐变填充")
 
-    # ---- F13 曲线高度上限 45px×缩放（V16.6 用户拍板，替代窗高×2/3）----
-    # 失败形态：上限仍按窗高比例算（80px 窗≈53px）时，全幅锯齿曲线
-    # 包围盒高度必超 45；缩放 2.0 时超 90。期望值为手算字面量。
+    # ---- F13 曲线高度上限 30px×缩放（V16.6 二次拍板 45→30，替代窗高×2/3）----
+    # 失败形态：上限仍按窗高比例算（80px 窗≈53px）或旧 45px 时，全幅锯齿
+    # 曲线包围盒高度必超 30；缩放 2.0 时超 60。期望值为手算字面量。
     from PySide6.QtGui import QPainter
-    for s, cap in ((1.0, 45.0), (2.0, 90.0)):
+    for s, cap in ((1.0, 30.0), (2.0, 60.0)):
         w13, hub13, mgr13 = _make_widget(scale=s)
         mgr13.register_widget("cpu.load", w13, ["cpu.load"])
         w13.show()
@@ -1041,7 +1042,7 @@ def section_p():
     w14.update_data(hub14.snapshot()["cpu.load"])
     ok(w14._spark_y_range(r14) == (0.0, 60.0), "低值即时回绿档（分档读取，无 5s 延迟）")
     # 渲染映射：历史 [30,70,90]，当前 90 → 红档 [60,100]，
-    # norm=(v-60)/40 → [0,0.25,0.75]，曲线区 45px、顶=29、底=74（手算）
+    # norm=(v-60)/40 → [0,0.25,0.75]，曲线区 30px、顶=44、底=74（手算）
     for v in (30.0, 70.0, 90.0):
         hub14.set_metric("cpu.load", v, mh.STATUS_OK)
         w14.update_data(hub14.snapshot()["cpu.load"])
@@ -1071,8 +1072,8 @@ def section_p():
         _QPP14.moveTo = orig_mt
     uniq = sorted({round(y, 2) for _x, y in pts})
     ok(len(pts) >= 3, f"曲线点真实绘制（{len(pts)} 点）")
-    ok(len(uniq) == 3 and all(abs(a - b) <= 0.6 for a, b in zip(uniq, (40.25, 62.75, 74.0))),
-       f"红档 [60,100] 映射正确（y={uniq}，期望 40.25/62.75/74；旧 lo=0 口径必红）")
+    ok(len(uniq) == 3 and all(abs(a - b) <= 0.6 for a, b in zip(uniq, (51.5, 66.5, 74.0))),
+       f"红档 [60,100] 映射正确（y={uniq}，期望 51.5/66.5/74；旧 lo=0 口径必红）")
     # 网络行保留动态 min/max：_spark_y_range 返回 None
     w14n, hub14n, mgr14n = _make_widget()
     mgr14n.register_widget("net.tx", w14n, ["net.tx"])
@@ -1082,7 +1083,7 @@ def section_p():
 
     # ---- F15 曲线下方渐变填充（V16.6）：当前色→透明，填充到曲线区底边 ----
     # 失败形态：无填充时画刷捕获为空必红；纯色/反向渐变时 stops 或像素
-    # alpha 断言必红。几何期望为手算：窗高80、halo4、gap2 → 区底74、区高45、顶29。
+    # alpha 断言必红。几何期望为手算：窗高80、halo4、gap2 → 区底74、区高30、顶44。
     from PySide6.QtGui import QPainter as _QP15, QBrush as _QB15, QLinearGradient as _QLG15
     w15, hub15, mgr15 = _make_widget()
     mgr15.register_widget("cpu.load", w15, ["cpu.load"])
@@ -1116,8 +1117,8 @@ def section_p():
     ok(len(grads) >= 1, f"曲线渐变填充存在（捕获 {len(grads)} 个线性渐变画刷）")
     if grads:
         (sx, sy), (fx, fy), stops = grads[0]
-        ok(abs(sy - 29.0) <= 1.5 and abs(fy - 74.0) <= 1.5 and abs(sx - fx) < 1e-6,
-           f"渐变方向=曲线区顶→底（起 {sy:.1f} 止 {fy:.1f}，期望 29→74）")
+        ok(abs(sy - 44.0) <= 1.5 and abs(fy - 74.0) <= 1.5 and abs(sx - fx) < 1e-6,
+           f"渐变方向=曲线区顶→底（起 {sy:.1f} 止 {fy:.1f}，期望 44→74）")
         ok(len(stops) >= 2 and abs(stops[0][0]) < 1e-6 and abs(stops[-1][0] - 1.0) < 1e-6,
            "渐变停靠点覆盖 0→1 全程")
         if len(stops) >= 2:
@@ -1163,9 +1164,9 @@ def section_p():
     w16.close()
 
     # ---- F17 每条曲线独占全幅曲线区（V16.6 修复：多行窗格不再分带压缩）----
-    # 失败形态：旧 band_h=spark_h/n 把温度曲线压进下半带，48/60 映射到
-    # 距底 36px（用户实测「40px 还要多」）；双行窗格第二条曲线只占半带。
-    # 手算：区底 74、区高 45、顶 29；48/60 → y=74-0.8×45=38。
+    # 失败形态：旧 band_h=spark_h/n 把温度曲线压进下半带；双行窗格第二条
+    # 曲线只占半带。手算：区底 74、区高 30、顶 44；
+    # 40/60 → y=74-20=54；48/60 → y=74-24=50。
     from PySide6.QtGui import QPainterPath as _QPP17
     w17, hub17, mgr17 = _make_widget()
     mgr17.register_widget("cpu.temp", w17, ["cpu.temp"])
@@ -1208,11 +1209,11 @@ def section_p():
         _QPP17.moveTo = orig_mt17
         mu.MonitorUnitWidget._paint_sparklines = orig_ps17
     ys17 = sorted({round(y, 2) for _x, y in pts17})
-    ok(any(abs(y - 38.0) <= 0.6 for y in ys17)
-       and any(abs(y - 44.0) <= 0.6 for y in ys17),
-       f"温度 40/48 按 45px 全幅映射 y≈44/38（实得 {ys17}；旧分带口径 50/56 必红）")
+    ok(any(abs(y - 50.0) <= 0.6 for y in ys17)
+       and any(abs(y - 54.0) <= 0.6 for y in ys17),
+       f"温度 40/48 按 30px 全幅映射 y≈54/50（实得 {ys17}；旧分带口径必红）")
     w17.close()
-    # 双行窗格（cpu.load+cpu.temp）：两条曲线都占满 45px 区（全幅锯齿）
+    # 双行窗格（cpu.load+cpu.temp）：两条曲线都占满 30px 区（全幅锯齿）
     w17b, hub17b, mgr17b = _make_widget()
     mgr17b.register_widget("cpu", w17b, ["cpu.load", "cpu.temp"])
     for v in (0.0, 100.0, 0.0, 100.0):
@@ -1250,11 +1251,55 @@ def section_p():
         mu.MonitorUnitWidget._paint_sparklines = orig_ps17b
     bbs = [bb for bb in paths17 if bb.height() > 1]
     ok(len(bbs) >= 2, f"双行窗格两条曲线均绘制（{len(bbs)} 条）")
-    ok(all(abs(bb.top() - 29.0) <= 1.5 and abs(bb.bottom() - 74.0) <= 1.5
+    ok(all(abs(bb.top() - 44.0) <= 1.5 and abs(bb.bottom() - 74.0) <= 1.5
            for bb in bbs),
-       f"两条曲线都占满 45px 全幅区（tops={[round(b.top(), 1) for b in bbs]}，"
-       f"旧分带第二条 top≈51.5 必红）")
+       f"两条曲线都占满 30px 全幅区（tops={[round(b.top(), 1) for b in bbs]}，"
+       f"旧分带第二条 top≈59 必红）")
     w17b.close()
+
+    # ---- F18 曲线区 44~74px（V16.6 用户拍板：高 30px，底边不变）----
+    # 失败形态：仍 45px 高时顶=29 必红；缩放 2.0 期望顶=88/底=148（手算：
+    # 窗高160、halo8、gap4 → 底148；高60 → 顶88）。
+    from PySide6.QtGui import QPainter as _QP18
+    for s, exp_top, exp_bottom in ((1.0, 44.0, 74.0), (2.0, 88.0, 148.0)):
+        w18, hub18, mgr18 = _make_widget(scale=s)
+        mgr18.register_widget("cpu.load", w18, ["cpu.load"])
+        for v in (0.0, 100.0, 0.0, 100.0):
+            hub18.set_metric("cpu.load", v, mh.STATUS_OK)
+            w18.update_data(hub18.snapshot()["cpu.load"])
+        paths18 = []
+        in18 = [False]
+        orig_dp18 = _QP18.drawPath
+        orig_ps18 = mu.MonitorUnitWidget._paint_sparklines
+
+        def _spy_ps18(self, p, body, sc):
+            in18[0] = True
+            try:
+                return orig_ps18(self, p, body, sc)
+            finally:
+                in18[0] = False
+
+        def _spy_dp18(self, path):
+            if in18[0]:
+                paths18.append(path.boundingRect())
+            return orig_dp18(self, path)
+
+        _QP18.drawPath = _spy_dp18
+        mu.MonitorUnitWidget._paint_sparklines = _spy_ps18
+        try:
+            w18.show()
+            APP.processEvents()
+            _grab(w18)
+        finally:
+            _QP18.drawPath = orig_dp18
+            mu.MonitorUnitWidget._paint_sparklines = orig_ps18
+        bbs18 = [bb for bb in paths18 if bb.height() > 1]
+        ok(bool(bbs18), f"缩放{s}：曲线真实绘制")
+        ok(all(abs(bb.top() - exp_top) <= 1.5 and abs(bb.bottom() - exp_bottom) <= 1.5
+               for bb in bbs18),
+           f"缩放{s}：曲线区 {exp_top:.0f}~{exp_bottom:.0f}px（高30×缩放；"
+           f"tops={[round(b.top(), 1) for b in bbs18]}，旧45px口径必红）")
+        w18.close()
 
 
 # ---------------------------------------------------------------------------
@@ -3103,10 +3148,10 @@ def section_n():
     hub.set_metric("net.rx", 0.5, mh.STATUS_OK)
     w.update_data(hub.snapshot()["net.rx"])
     ok(row.history[-1] == 0.5, "history 记 canonical MB/s（0.5 非 512）")
-    # 阈值色按 canonical MB/s（0.5）插值，而非 KB 显示值（512 会落红段）
+    # 阈值色按 canonical MB/s（0.5）取段色，而非 KB 显示值（512 会落红段）
     exp_color = mu.get_color_for_value(0.5, mu.default_thresholds("net.rx", "MB/s"))
     ok(w._semantic_color(row).name().upper() == exp_color.name().upper(),
-       "网速阈值色按 MB/s 插值（非 KB 显示值）")
+       "网速阈值色按 MB/s 取段色（非 KB 显示值）")
     ok(w._semantic_color(row).name().upper() != mu.SEM_RED.upper(),
        "0.5MB/s 不误落红段（证明未用 KB 值算色）")
     w.close()
