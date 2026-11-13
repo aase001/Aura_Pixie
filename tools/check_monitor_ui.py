@@ -1654,6 +1654,16 @@ def section_j():
         ok(_lab0.mapTo(dlg, _lab0.rect().topLeft()).x()
            > _chk0.mapTo(dlg, _chk0.rect().topLeft()).x(),
            "设备名在参数名右侧")
+        # 右移后整行变宽：禁横向滚动条 + 窗宽按最长设备名自适应（不裁字）
+        ok(dlg._param_scroll.horizontalScrollBarPolicy()
+           == Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+           "设备名右移后禁横向滚动条")
+        from PySide6.QtGui import QFontMetrics as _QFM
+        _fm_hw = _QFM(dlg._hw_font(dlg.font()))
+        _longest = max(_fm_hw.horizontalAdvance(l.text())
+                       for l in dlg._hw_labels.values())
+        ok(dlg._param_scroll.minimumWidth() >= dlg._PARAM_COL_W + _longest,
+           "窗宽容纳参数名列+最长设备名（长名不被裁）")
         dlg.hide()
         APP.processEvents()
         # J8 设备名重载：注入硬件名 → 刷新为新名（改坏会红）

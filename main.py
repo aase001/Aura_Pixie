@@ -5533,8 +5533,12 @@ class MonitorSettingsDialog(QDialog):
                 self._add_param_row(key, inner)
         self._param_layout.addStretch(1)
         scroll.setWidget(inner)
+        # V16.3：设备名移到右侧后整行变宽——禁横向滚动条，改按最长设备名
+        # 动态加宽窗体（_fit_width_to_hw_names），避免长设备名被横向滚动藏起来
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setMinimumWidth(280)
         scroll.setMinimumHeight(320)
+        self._param_scroll = scroll
         root.addWidget(scroll)
 
         btn_row = QHBoxLayout()
@@ -5688,8 +5692,33 @@ class MonitorSettingsDialog(QDialog):
                         names = {}
             for key, lab in self._hw_labels.items():
                 lab.setText(names.get(key) or "—")
+            self._fit_width_to_hw_names()
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_refresh_hw_names", exc)
+
+    def _fit_width_to_hw_names(self) -> None:
+        """按最长设备名加宽窗体（V16.3）：设备名右移后整行变宽，
+        横向滚动条已禁用，故窗宽须容纳「参数名列 + 最长设备名」，
+        否则长设备名（如 NVIDIA GeForce RTX 3060 Laptop GPU）被裁掉。
+        只增不减，避免设备名刷新时窗体来回抖动。
+        """
+        try:
+            if not self._hw_labels:
+                return
+            fm = QFontMetrics(self._hw_font(self.font()))
+            longest = max((fm.horizontalAdvance(lab.text())
+                           for lab in self._hw_labels.values()), default=0)
+            # 参数名列 + 间距 + 最长设备名 + 滚动区边距/竖滚动条 + 窗体边距
+            need = self._PARAM_COL_W + 6 + longest + 40
+            scroll = getattr(self, "_param_scroll", None)
+            if scroll is not None and need > scroll.minimumWidth():
+                scroll.setMinimumWidth(need)
+            if need + 24 > self.minimumWidth():
+                self.setMinimumWidth(need + 24)
+            if self.width() < need + 24:
+                self.resize(need + 24, self.height())
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_fit_width", exc)
 
     # ---- 载入/置灰 ----
     def _load_to_ui(self) -> None:
