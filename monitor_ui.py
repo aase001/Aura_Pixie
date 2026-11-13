@@ -68,7 +68,11 @@ CORNER_PX = 8         # 圆角
 HALO_PX = 4           # 光晕退晕宽（规格 3~5px）
 HALO_ALPHA = 0.15     # 光晕主题色透明度 15%
 BODY_ALPHA = 0.82     # 本体底色透明度（保证文字可读，无深色收边）
-SPARK_H = 18          # sparkline 行下方预留高（阶段 2 画折线）
+# sparkline 底部锚定（V16.3）：废弃固定 SPARK_H=18 预留——曲线曾悬在
+# 文本行底与窗底之间的半腰。现曲线区贴窗底渲染，高度上限 = 窗高×2/3；
+# 波动大时允许与文字重叠（曲线先画、文字后画，曲线在文字下层）。
+SPARK_BOTTOM_GAP_PX = 2   # 曲线区底边距窗底留白（避圆角裁剪，×缩放）
+SPARK_H_RATIO = 2 / 3     # 曲线区高度上限占窗高比例（80px 窗 ≈ 53px）
 FONT_FAMILY = "Microsoft YaHei"
 
 # ---------------------------------------------------------------------------
@@ -673,6 +677,9 @@ class MonitorUnitWidget(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bc)
             p.drawRoundedRect(body, corner, corner)
+            # 曲线先画、文字后画：波动大时曲线可与文字重叠且在文字下层
+            # （V16.3 用户拍板）
+            self._paint_sparklines(p, body, s)
             self._paint_rows(p, body, s)
             if self._is_snapped:
                 self._paint_fuse(p, s)
@@ -779,24 +786,26 @@ class MonitorUnitWidget(QWidget):
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                            row.hardware)
             y += self._row_h + row_gap
-        # sparkline 区域：文本行下方，每行一条折线
-        self._paint_sparklines(p, body, s)
 
     def _paint_sparklines(self, p: QPainter, body: QRectF, s: float) -> None:
-        """文本行下方画 QPainterPath 折线：线宽 1px×缩放、当前语义色、
-        不填充不画轴、None 点断开。窗口小，全量 update 即可。"""
+        """窗格底部锚定画 QPainterPath 折线：线宽 1px×缩放、当前语义色、
+        不填充不画轴、None 点断开。窗口小，全量 update 即可。
+
+        V16.3：曲线区贴窗底（留 2px 避圆角），高度上限 = 窗高×2/3；
+        不再从文本行底起算固定 18px（旧口径曲线悬在半腰）。波动大时
+        允许与文字重叠——本方法先于 _paint_rows 调用，曲线在文字下层。
+        """
         pad_x = round(PAD_X * s)
-        pad_y = round(PAD_Y * s)
-        row_gap = round(ROW_GAP * s)
-        spark_h = round(SPARK_H * s)
         w_label, w_value, w_unit = self._col_w
         gap = getattr(self, "_col_gap", round(COL_GAP * s))
         x0 = body.left() + pad_x
         full_w = w_label + w_value + w_unit + 2 * gap
-        # sparkline 区起点 = 所有文本行之后（状态小字叠加绘制，不占行高）
         n = max(1, len(self._rows))
-        y_base = (body.top() + pad_y
-                  + n * self._row_h + (n - 1) * row_gap)
+        # 底部锚定：区底 = 本体底边 - 留白；区高 ≤ 窗高×2/3（80px 窗 ≈ 53px）
+        bottom = body.bottom() - round(SPARK_BOTTOM_GAP_PX * s)
+        spark_h = min(round(BASE_H * s * SPARK_H_RATIO),
+                      max(1, round(bottom - body.top())))
+        y_base = bottom - spark_h
         pen_w = max(1.0, SPARK_LINE_PX * s)
         for i, row in enumerate(self._rows):
             # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽

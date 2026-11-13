@@ -868,6 +868,50 @@ def section_f():
     ok(diff > 20, f"sparkline 真实渲染产生像素差异（{diff} 像素）")
     w7.close()
 
+    # ---- F11 曲线底部锚定（V16.3：贴窗底、高度≤窗高2/3、不再悬半腰）----
+    w8, hub8, mgr8 = _make_widget()
+    mgr8.register_widget("cpu.load", w8, ["cpu.load"])
+    w8.show()
+    APP.processEvents()
+    # 锯齿历史：min/max 归一化后折线必触及曲线区顶/底（非平线）
+    for v in (0.0, 100.0, 0.0, 100.0, 0.0, 100.0, 0.0, 100.0):
+        hub8.set_metric("cpu.load", v, mh.STATUS_OK)
+        w8.update_data(hub8.snapshot()["cpu.load"])
+    # 捕获 drawPath 的 QPainterPath 包围盒（曲线几何真源，不受抗锯齿干扰）
+    from PySide6.QtGui import QPainter
+    paths = []
+    orig_dp = QPainter.drawPath
+
+    def _spy_path(self, path):
+        paths.append(path.boundingRect())
+        return orig_dp(self, path)
+
+    QPainter.drawPath = _spy_path
+    try:
+        _grab(w8)
+    finally:
+        QPainter.drawPath = orig_dp
+    ok(len(paths) >= 1, f"曲线真实绘制（drawPath {len(paths)} 次）")
+    if paths:
+        bb = paths[0]
+        H = w8.height()
+        band_top = H - round(mu.HALO_PX * 1.0) - round(mu.SPARK_BOTTOM_GAP_PX * 1.0) \
+            - round(mu.BASE_H * 1.0 * mu.SPARK_H_RATIO)
+        ok(bb.bottom() >= H - 10,
+           f"曲线贴窗底渲染（底 {bb.bottom():.1f} vs 窗高 {H}，旧口径悬半腰必红）")
+        ok(bb.top() >= band_top - 2,
+           f"曲线区顶不超窗高2/3上限（顶 {bb.top():.1f} ≥ {band_top - 2}）")
+        ok(bb.height() <= round(mu.BASE_H * 1.0 * mu.SPARK_H_RATIO) + 2,
+           f"曲线区高不超窗高2/3（{bb.height():.1f}px）")
+    # 源码看守：绘制顺序=曲线先、文字后（重叠时曲线在文字下层）
+    src_f11 = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
+    ok(src_f11.index("self._paint_sparklines(p, body, s)")
+       < src_f11.index("self._paint_rows(p, body, s)"),
+       "曲线先画文字后画（重叠时曲线在文字下层）")
+    ok("SPARK_H_RATIO" in src_f11 and "SPARK_BOTTOM_GAP_PX" in src_f11,
+       "底部锚定常量在位（固定 SPARK_H 预留已废弃）")
+    w8.close()
+
     w.close()
     w2.close()
 
