@@ -977,6 +977,14 @@ def main() -> int:
               and hh.font().bold() and not hh.sectionsClickable(),
               f"（align={hh.defaultAlignment()}, bold={hh.font().bold()}, "
               f"clickable={hh.sectionsClickable()}）", failures)
+        # V16.5：激活列宽须贴合复选框（≤40px），不留大片空白被误认成「空列」。
+        # 旧 52px 宽 + 复选框左对齐 → 右侧约 30px 空白可选中无内容（用户报空列）。
+        check("激活列宽贴合复选框（≤40px，无空列）",
+              dlg.table.columnWidth(0) <= 40,
+              f"（实得 {dlg.table.columnWidth(0)}px）", failures)
+        check("表格恰为 3 列（激活/功能/指令，无多余空列）",
+              dlg.table.columnCount() == 3,
+              f"（实得 {dlg.table.columnCount()} 列）", failures)
         dlg.table.item(0, 1).setText("一二三四五六七八")
         check("输入超长名即时截为 6 汉字", dlg.table.item(0, 1).text() == "一二三四五六",
               f"（实得 {dlg.table.item(0, 1).text()!r}）", failures)

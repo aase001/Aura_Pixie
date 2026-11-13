@@ -2894,7 +2894,9 @@ class SettingsDialog(QDialog):
         font_h = hh.font()
         font_h.setBold(True)
         hh.setFont(font_h)
-        self.table.setColumnWidth(0, 52)
+        # 激活列宽贴合复选框（V16.5：旧 52px 右侧留约 30px 空白，被用户误认成
+        # 「可选中但无内容的空列」；缩到 36px 仅容复选框+边距，配合居中无空白）。
+        self.table.setColumnWidth(0, 36)
         self.table.setColumnWidth(1, 170)
         self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._on_item_changed)
