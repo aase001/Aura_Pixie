@@ -2301,6 +2301,54 @@ def main() -> int:
           f"（left={bloc._locate_left_ms}, warn={bloc._warn_on}, w={bloc.width()}）", failures)
     bloc.deleteLater()
 
+    # ---------- 20c 单实例残留锁：首实例必须真正持锁（第二实例可被拦） ----------
+    # 回归判据：create 报 AlreadyExists 且 attach 失败（残留锁，无活着进程）时，
+    # 旧实现直接 return True 但本实例未持锁 → 第三实例也能启动。修复须重试
+    # create 真正持锁。用假 QSharedMemory 精确模拟残留分支（不依赖真实竞态）。
+    print("\n单实例残留锁持锁")
+
+    class _FakeShared:
+        """模拟残留锁：首次 create 报 AlreadyExists、attach 失败；重试 create 成功。"""
+        AlreadyExists = M.QSharedMemory.SharedMemoryError.AlreadyExists
+
+        def __init__(self):
+            self._held = False
+            self._create_calls = 0
+            self._err = None
+
+        def attach(self):
+            return False   # 无活着实例（残留锁）
+
+        def detach(self):
+            pass
+
+        def create(self, _n):
+            self._create_calls += 1
+            if self._create_calls == 1:
+                self._err = self.AlreadyExists   # 残留：首次 create 失败
+                return False
+            self._held = True                    # 重试成功 → 真正持锁
+            self._err = None
+            return True
+
+        def error(self):
+            return self._err
+
+        def isAttached(self):
+            return self._held
+
+    _fs = _FakeShared()
+    _got_first = M.acquire_single_instance(_fs)
+    check("残留锁首实例返回独占成功", _got_first is True, "", failures)
+    check("残留锁首实例真正持锁（重试 create 成功）",
+          _fs.isAttached() and _fs._create_calls >= 2,
+          f"（held={_fs.isAttached()}, create_calls={_fs._create_calls}）", failures)
+    # 持锁后第二实例 attach 成功 → 必须被拦（返回 False）
+    _fs2 = _FakeShared()
+    _fs2._held = True
+    _fs2.attach = lambda: True   # 已有实例持锁 → attach 成功
+    check("已持锁时第二实例被拦", M.acquire_single_instance(_fs2) is False, "", failures)
+
     # ---------- 21 指令列多行编辑 ----------
     print("\n指令列多行编辑")
     dlg_ml = M.SettingsDialog([{"name": "a", "code": "print(1)", "active": False}])

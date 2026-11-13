@@ -6312,7 +6312,12 @@ def acquire_single_instance(shared: QSharedMemory) -> bool:
             if shared.attach():
                 shared.detach()
                 return False
-            print("[单实例] 检测到残留锁，继续启动", file=sys.stderr)
+            # 残留锁（无活着实例）：重试 create 真正持锁——旧实现直接返回
+            # True 但本实例未持锁，第三实例也能启动。重试成功才独占；仍失败
+            # （极端竞态）则放行本次启动，不阻断用户。
+            print("[单实例] 检测到残留锁，重试持锁", file=sys.stderr)
+            if shared.create(1):
+                return True
     return True
 
 
