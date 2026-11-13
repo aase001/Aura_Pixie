@@ -2147,6 +2147,38 @@ def main() -> int:
           and _row0.indexOf(dlg_tp.chk_breath) >= 0
           and _row0.indexOf(dlg_tp.chk_topmost) >= 0, "", failures)
     check("settings 收集 topmost 键", "topmost" in dlg_tp.settings(), "", failures)
+    # V16.4：球体锁定复选框（默认不勾、与置顶同行）+ 落 window.locked + 真实拦拖动
+    check("外观窗含「锁定」复选框且与置顶同行",
+          dlg_tp.chk_ball_locked.text() == "锁定"
+          and _row0.indexOf(dlg_tp.chk_ball_locked) >= 0, "", failures)
+    check("球体锁定默认不勾选", dlg_tp.chk_ball_locked.isChecked() is False
+          or M.ball_locked() is True, "", failures)
+    check("settings 收集 ball_locked 键", "ball_locked" in dlg_tp.settings(), "", failures)
+    _saved_lock = M.ball_locked()
+    try:
+        dlg_tp.chk_ball_locked.setChecked(True)
+        M._apply_appearance_config(dlg_tp.settings())
+        check("外观保存 → 锁定写 window.locked", M.ball_locked() is True, "", failures)
+        check("锁定不写进 appearance 块",
+              "ball_locked" not in M.load_appearance_config(), "", failures)
+        _bl = fresh_ball()
+        _bl._press = {"grab": QPointF(100.0, 100.0), "offset": QPointF(0.0, 0.0),
+                      "t0": 0.0}
+        _got = _bl._update_drag_target(QPointF(300.0, 300.0))
+        check("锁定 → 拖动判定被拦（不进入拖动）",
+              _got is False and _bl._dragging is False, "", failures)
+        dlg_tp.chk_ball_locked.setChecked(False)
+        M._apply_appearance_config(dlg_tp.settings())
+        check("取消锁定 → 写回 False", M.ball_locked() is False, "", failures)
+        _bl2 = fresh_ball()
+        _bl2._press = {"grab": QPointF(100.0, 100.0), "offset": QPointF(0.0, 0.0),
+                       "t0": 0.0}
+        _bl2._update_drag_target(QPointF(300.0, 300.0))
+        check("解锁 → 拖动恢复生效", _bl2._dragging is True, "", failures)
+        _bl.deleteLater()
+        _bl2.deleteLater()
+    finally:
+        M.set_ball_locked(_saved_lock)
     _saved_top = M.topmost_enabled()
     try:
         dlg_tp.chk_topmost.setChecked(True)

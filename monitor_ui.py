@@ -485,7 +485,8 @@ def default_monitor_config() -> dict:
         units[key] = {"enabled": False, "threshold": []}
     return {
         "enabled": False,
-        "topmost": False,   # 保持资源监视置顶（V16.4 与球体置顶解耦，默认关）
+        "topmost": False,   # 窗口置顶（V16.4 与球体置顶解耦，默认关）
+        "locked": False,    # 锁定（V16.4）：禁止窗格移动与拆分/合并组，默认关
         "refresh_ms": 1000,
         "sparkline_points": SPARKLINE_POINTS,
         "idle_stop_sec": 300,
@@ -610,6 +611,21 @@ class MonitorUnitWidget(QWidget):
             self.setWindowFlags(flags)
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.apply_topmost", e)
+
+    def is_locked(self) -> bool:
+        """窗格是否锁定（V16.4）：锁定禁止移动与拆分/合并组。
+
+        取值走管理器注入的 locked_getter()（main 读 monitor.locked），
+        不得写死；未注入时按未锁定处理（自检/旧调用兼容）。
+        构造签名不变——注入件挂管理器，避免破坏既有契约断言。
+        """
+        getter = getattr(self.manager, "locked_getter", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:  # noqa: BLE001
+                return False
+        return False
 
     def show_at(self, anchor_rect) -> None:
         """首次显示：管理器防重叠摆放（V16.2）再 show。
@@ -1156,6 +1172,10 @@ class MonitorUnitWidget(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         try:
             if event.button() == Qt.MouseButton.LeftButton:
+                # V16.4 锁定：禁止拖动（含整组移动）；右键菜单仍可用
+                if self.is_locked():
+                    event.accept()
+                    return
                 # 动画期间禁止再次拖动打断产生残留；新按下清齐四层
                 if self._snap_animating:
                     return
@@ -1172,6 +1192,7 @@ class MonitorUnitWidget(QWidget):
                 event.accept()
             elif event.button() == Qt.MouseButton.RightButton:
                 # 右键按下：记录起点，位移>4px 解绑、≤4px 抬起弹菜单
+                # （锁定时在 mouseMoveEvent 里跳过解绑，菜单照常）
                 self._right_press_global = event.globalPosition().toPoint()
                 self._right_dragging = True
                 self._right_drag_started = False
@@ -1187,6 +1208,10 @@ class MonitorUnitWidget(QWidget):
             gp = event.globalPosition().toPoint()
             # 右键拖动：组内窗位移>4px → 解绑自身，此后按独立窗处理
             if self._right_dragging:
+                # V16.4 锁定：忽略右键拖动（不解绑、不移动）；轻点抬起仍弹菜单
+                if self.is_locked():
+                    event.accept()
+                    return
                 if not self._right_drag_started:
                     if (gp - self._right_press_global).manhattanLength() < DRAG_THRESHOLD_PX:
                         return
@@ -1448,6 +1473,9 @@ class MonitorUnitWidget(QWidget):
         约束记在该窗对上（而非笼统记 self/target，多对多才不会错）。
         """
         mgr = self.manager
+        # V16.4 锁定兜底：任一方锁定 → 不合并（正常路径已在按下处拦住）
+        if self.is_locked() or target.is_locked():
+            return
         target_grp = target._group
         # keep_grp：目标组优先；目标独立 → 新建组并先纳入目标
         if target_grp is None:
@@ -1524,6 +1552,9 @@ class MonitorUnitWidget(QWidget):
         自身清 _group/_is_snapped、立即 update 恢复光晕；此后按独立窗处理。
         """
         try:
+            # V16.4 锁定兜底：锁定窗格不可拆组（正常路径已在移动处拦住）
+            if self.is_locked():
+                return
             grp = self._group
             if grp is None:
                 # 独立窗也可能有屏幕边吸附态，解绑即恢复独立
@@ -1709,6 +1740,9 @@ class MonitorWindowManager:
         # V16.2：硬件名变化回调（设置窗设备名小字每次运行重载，不落盘）
         self.on_hardware_names: Optional[Callable] = None
         self._last_hw_names: dict = {}
+        # V16.4：锁定取值注入件（main 读 monitor.locked）；None=未锁定。
+        # 挂管理器而非窗格构造参数，保持窗格签名契约不变。
+        self.locked_getter: Optional[Callable] = None
         # 全局扩宽档（用户拍板：任一窗格内容超基准宽 → 所有窗格统一扩宽，
         # 避免大小不一；只升不降，会话内保持统一宽度）
         self._width_expanded = False

@@ -1085,9 +1085,10 @@ SETTINGS_HEADER = (
     "休眠倒计时 idle_sec + 资源监视窗口色 monitor_color + 资源监视透明度 monitor_opacity + "
     "显示缩放 display_scale；旧块名 aura 仍兼容读取）；\n"
     "#       autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
-    "#       window = 球体窗口行为（always_on_top = 保持球体置顶，开关在「外观」窗；"
-    "pos_x/pos_y = 球心记忆位置）；\n"
-    "#       monitor = 资源监视（enabled 总开关 + topmost 保持资源监视置顶【与球体置顶独立】 + "
+    "#       window = 球体窗口行为（always_on_top = 保持球体置顶、locked = 锁定禁止拖动，"
+    "两开关都在「外观」窗；pos_x/pos_y = 球心记忆位置）；\n"
+    "#       monitor = 资源监视（enabled 总开关 + topmost 窗口置顶【与球体置顶独立】 + "
+    "locked 锁定禁止窗格移动与拆分/合并组 + "
     "refresh_ms 拉取周期 + sparkline_points 历史点数 + idle_stop_sec 闲置停采 + "
     "units 各参数开关/阈值 + layout 窗格位置与吸附组记忆）。\n"
     "# display_scale = 每单元 {enabled: 勾选启用, percent: 50~200 且为 25 的整数倍}，"
@@ -1218,7 +1219,8 @@ def default_settings() -> dict:
                        # 按注册表生成，保证与 SCALE_UNITS 单一来源、不会漏项
                        "display_scale": normalize_scale_block(None)},
         "autostart": {"enabled": False},
-        "window": {"always_on_top": False, "pos_x": None, "pos_y": None},
+        "window": {"always_on_top": False, "locked": False,
+                   "pos_x": None, "pos_y": None},
         # 资源监视块（阶段 5）：拉取/历史/闲置停采 + 单元开关阈值 + 布局记忆
         "monitor": monitor_ui.default_monitor_config(),
     }
@@ -1275,9 +1277,11 @@ def _merge_monitor_block(base_blk, src_blk: dict) -> dict:
     merged = monitor_ui.default_monitor_config()
     if isinstance(base_blk, dict):
         merged.update({k: v for k, v in base_blk.items() if k in merged})
-    for k in ("enabled", "topmost", "refresh_ms", "sparkline_points", "idle_stop_sec"):
+    for k in ("enabled", "topmost", "locked", "refresh_ms", "sparkline_points",
+              "idle_stop_sec"):
         if k in src_blk:
-            merged[k] = bool(src_blk[k]) if k in ("enabled", "topmost") else src_blk[k]
+            merged[k] = (bool(src_blk[k]) if k in ("enabled", "topmost", "locked")
+                         else src_blk[k])
     if isinstance(src_blk.get("units"), dict):
         units = merged.get("units") or {}
         for key, val in src_blk["units"].items():
@@ -1874,6 +1878,34 @@ def set_topmost(enabled: bool, path: str = SETTINGS_PATH) -> None:
         write_setting(data, path)
     except OSError as exc:
         _log_crash("topmost_setting_save", exc)
+
+
+# ---------------------------------------------------------------- 球体锁定
+def ball_locked(path: str = SETTINGS_PATH) -> bool:
+    """球体是否锁定（window.locked，默认 false）。
+
+    锁定 = 禁止拖动球体（扇形悬停/单击/双击/右键菜单照常）；
+    与资源监视窗格锁定（monitor.locked）互相独立。
+    """
+    data = read_setting(path)
+    w = data.get("window")
+    if isinstance(w, dict):
+        return bool(w.get("locked", False))
+    return False
+
+
+def set_ball_locked(locked: bool, path: str = SETTINGS_PATH) -> None:
+    """写入 setting.yaml 的 window.locked；不影响其他配置块。"""
+    data = read_setting(path)
+    w = data.get("window")
+    if not isinstance(w, dict):
+        w = {}
+    w["locked"] = bool(locked)
+    data["window"] = w
+    try:
+        write_setting(data, path)
+    except OSError as exc:
+        _log_crash("ball_locked_setting_save", exc)
 
 
 # ---------------------------------------------------------------- 球心位置记忆
@@ -2727,11 +2759,13 @@ CODE_HELP_TEXT = (
     "────────────────────────────\n"
     "【外观设置说明】\n\n"
     "外观窗调节球体光效与显示缩放，点「保存」即时生效并写盘。\n\n"
-    "■ 球体呼吸 / 保持球体置顶（同一行）\n"
+    "■ 球体呼吸 / 保持球体置顶 / 锁定（同一行）\n"
     "  · 球体呼吸：勾选 = 按三色渐变呼吸；取消 = 颜色与大小完全静止，恒渲染起始色。\n"
     "  · 关闭呼吸时，三色/渐变时长/倍率控件自动置灰（这些参数无意义）。\n"
     "  · 保持球体置顶（默认不勾，原在「设置」窗）：勾选后球体恒在所有窗口最上方；\n"
-    "    与「保持资源监视置顶」相互独立，保存后即时生效。\n\n"
+    "    与监视窗的「窗口置顶」相互独立，保存后即时生效。\n"
+    "  · 锁定（默认不勾）：勾选后球体位置固定、无法拖动；悬停展开扇区、扇区点击、\n"
+    "    右键菜单照常可用。与监视窗的「锁定」相互独立，保存后即时生效。\n\n"
     "■ 三色（起始色 / 过渡色 / 末尾色）\n"
     "  · 每色一行「十六进制框 + 取色按钮」：填 #RRGGBB 色码，或点取色从系统取色器选。\n"
     "  · 起始色 = 末尾色 → 两色循环（起→中→起）；起始色 ≠ 末尾色 → 三色循环\n"
@@ -2771,8 +2805,11 @@ CODE_HELP_TEXT = (
     "  · 默认不勾选。勾选 + 保存才拉起窗格采集；取消 + 保存则关闭所有窗格并停采。\n"
     "  · 打开设置窗即轻量预览采集以显示设备名小字（不建窗格），关闭即释放。\n"
     "  · 总开关未勾选时，下方参数复选框置灰。\n"
-    "  · 保持资源监视置顶（默认不勾，与总开关同行）：勾选后监视窗格恒在最上方；\n"
-    "    与「保持球体置顶」相互独立，勾选即时生效。\n\n"
+    "  · 窗口置顶（默认不勾，与总开关同行）：勾选后监视窗格恒在最上方；\n"
+    "    与「保持球体置顶」相互独立，勾选即时生效。\n"
+    "  · 锁定（默认不勾，与置顶同行）：勾选后窗格位置固定——左键拖不动、右键拖不解绑、\n"
+    "    不再磁吸合并成组；右键菜单与参数勾选照常可用。与外观窗的「锁定」相互独立，\n"
+    "    勾选即时生效。\n\n"
     "■ 参数复选框（按 CPU/内存/GPU核显/GPU独显/硬盘/风扇/网络 分组）\n"
     "  · 勾选即实时弹出对应窗格，取消即实时关闭（以界面总开关状态为准）。\n"
     "  · 每个参数一个独立窗格；无值参数也罗列（换台式机可用），默认全不勾选。\n"
@@ -3548,6 +3585,12 @@ class AppearanceSettingsDialog(QDialog):
                                     "（资源监视窗格置顶在「监视」设置内单独控制）")
         self.chk_topmost.setChecked(topmost_enabled())
 
+        # 锁定（V16.4，默认不勾）：禁止拖动球体；悬停/单击/双击/右键菜单照常
+        self.chk_ball_locked = QCheckBox("锁定", self)
+        self.chk_ball_locked.setToolTip(
+            "勾选后禁止拖动球体（位置固定）；悬停展开、扇区点击与右键菜单照常可用")
+        self.chk_ball_locked.setChecked(ball_locked())
+
         def _color_row(key: str, title: str, tip: str) -> QHBoxLayout:
             """一行「十六进制框 + 取色按钮」的颜色编辑控件。"""
             row = QHBoxLayout()
@@ -3648,6 +3691,7 @@ class AppearanceSettingsDialog(QDialog):
         _breath_row.addWidget(self.chk_breath)
         _breath_row.addStretch(1)
         _breath_row.addWidget(self.chk_topmost)   # V16.4：置顶与呼吸同行
+        _breath_row.addWidget(self.chk_ball_locked)   # V16.4：锁定紧随置顶
         grid.addLayout(_breath_row)
         # 标题存实例属性：置灰联动要连同设置项名称一起灰（V16.3）
         self.lbl_color_start = QLabel("起始色", self)
@@ -3827,6 +3871,7 @@ class AppearanceSettingsDialog(QDialog):
             },
             # V16.4：球体置顶（迁自「设置」窗）；落 window 块，不进 appearance
             "topmost": self.chk_topmost.isChecked(),
+            "ball_locked": self.chk_ball_locked.isChecked(),
         }
 
     @staticmethod
@@ -3857,6 +3902,11 @@ def _apply_appearance_config(cfg: dict) -> None:
                 _MONITOR_BALL.apply_topmost_setting(topmost_enabled())
             except Exception as exc:  # noqa: BLE001
                 _log_crash("topmost_apply", exc)
+    if "ball_locked" in cfg:
+        try:
+            set_ball_locked(bool(cfg["ball_locked"]))
+        except OSError as exc:  # noqa: BLE001
+            _log_crash("ball_locked", exc)
 
 
 # ---------------------------------------------------------------- 主窗口
@@ -4093,6 +4143,10 @@ class AuraBall(QWidget):
         扇形收起；宽限期结束后球体才从当前静止位置朝鼠标当前位置「飞」过去。
         """
         if self._press is None:
+            return False
+        # V16.4 锁定：不进入拖动（返回 False → 照常走高亮/单击评估，
+        # 单击/双击/悬停/右键菜单均不受影响，只是球体不能被拖走）
+        if ball_locked():
             return False
         if not self._dragging:
             # 次级展开的收起飞行中若开始拖动球体 → 取消次级展开（先保证拖动手感）；
@@ -5149,6 +5203,18 @@ def _monitor_theme() -> dict:
             "system_dark_mode": system_dark_mode()}
 
 
+def _monitor_locked_getter() -> bool:
+    """监视窗格是否锁定（V16.4）：读 monitor.locked，默认 False。
+
+    锁定 = 禁止窗格移动与拆分/合并组（右键菜单、勾选、采集照常）；
+    与球体锁定（window.locked）互相独立。
+    """
+    try:
+        return bool(load_monitor_config().get("locked", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _monitor_apply_topmost() -> None:
     """把 monitor.topmost 应用到全部已开窗格（V16.4 解耦后即时生效）。
 
@@ -5216,6 +5282,7 @@ def _ensure_monitor_manager():
     _MONITOR_MGR.on_new_disk_keys = _monitor_on_new_disk_keys
     _MONITOR_MGR.on_new_gpu_d_keys = _monitor_on_new_gpu_d_keys
     _MONITOR_MGR.on_hardware_names = _monitor_on_hardware_names
+    _MONITOR_MGR.locked_getter = _monitor_locked_getter   # V16.4 锁定
     # 闲置停采定时器：每秒检查是否连续 idle_stop_sec 无监视窗
     _MONITOR_IDLE_TIMER = QTimer()
     _MONITOR_IDLE_TIMER.setInterval(1000)
@@ -5595,13 +5662,21 @@ class MonitorSettingsDialog(QDialog):
         self.chk_enable.toggled.connect(self._on_enable_toggled)
         enable_row.addWidget(self.chk_enable)
         enable_row.addStretch(1)
-        # V16.4：保持资源监视置顶（与球体置顶解耦，默认不勾选，同行）
-        self.chk_monitor_topmost = QCheckBox("保持资源监视置顶", self)
+        # V16.4：窗口置顶（原「保持资源监视置顶」，与球体置顶解耦，默认不勾）
+        self.chk_monitor_topmost = QCheckBox("窗口置顶", self)
         self.chk_monitor_topmost.setToolTip(
             "勾选后监视窗格始终显示在所有窗口最上方；与「保持球体置顶」互不影响")
         self.chk_monitor_topmost.setChecked(bool(self._cfg.get("topmost", False)))
         self.chk_monitor_topmost.toggled.connect(self._on_monitor_topmost_toggled)
         enable_row.addWidget(self.chk_monitor_topmost)
+        # V16.4：锁定（默认不勾）——禁止窗格移动与拆分/合并组
+        self.chk_monitor_locked = QCheckBox("锁定", self)
+        self.chk_monitor_locked.setToolTip(
+            "勾选后禁止拖动监视窗格、禁止右键解绑与磁吸合并组；"
+            "右键菜单与参数勾选照常可用")
+        self.chk_monitor_locked.setChecked(bool(self._cfg.get("locked", False)))
+        self.chk_monitor_locked.toggled.connect(self._on_monitor_locked_toggled)
+        enable_row.addWidget(self.chk_monitor_locked)
         # V16.2：全选/全不选（默认不勾；勾选→下方所有硬件参数全勾上）
         self.chk_select_all = QCheckBox("全选/全不选", self)
         self.chk_select_all.setToolTip(
@@ -5831,6 +5906,7 @@ class MonitorSettingsDialog(QDialog):
         try:
             self.chk_enable.setChecked(bool(self._cfg.get("enabled")))
             self.chk_monitor_topmost.setChecked(bool(self._cfg.get("topmost", False)))
+            self.chk_monitor_locked.setChecked(bool(self._cfg.get("locked", False)))
             units = self._cfg.get("units") or {}
             for key, chk in self._param_checks.items():
                 chk.setChecked(bool((units.get(key) or {}).get("enabled")))
@@ -6012,7 +6088,7 @@ class MonitorSettingsDialog(QDialog):
 
     # ---- 保存 ----
     def _on_monitor_topmost_toggled(self, on: bool) -> None:
-        """保持资源监视置顶（V16.4）：勾选即落盘 + 已开窗格即时生效。
+        """窗口置顶（V16.4，原「保持资源监视置顶」）：勾选即落盘 + 已开窗格即时生效。
 
         与球体置顶完全独立（读 monitor.topmost，不碰 window.always_on_top）；
         载入期间由 _bulk_updating 抑制，避免打开设置窗就写盘。
@@ -6026,11 +6102,26 @@ class MonitorSettingsDialog(QDialog):
         except Exception as exc:  # noqa: BLE001
             _log_crash("monitor_topmost_toggled", exc)
 
+    def _on_monitor_locked_toggled(self, on: bool) -> None:
+        """锁定（V16.4）：勾选即落盘，窗格立即禁止移动/拆分/合并。
+
+        取值由 _monitor_locked_getter 现查配置，故无需逐窗刷新；
+        载入期间由 _bulk_updating 抑制，避免打开设置窗就写盘。
+        """
+        if self._bulk_updating:
+            return
+        try:
+            self._cfg["locked"] = bool(on)
+            save_monitor_config(self._cfg)
+        except Exception as exc:  # noqa: BLE001
+            _log_crash("monitor_locked_toggled", exc)
+
     def _on_save(self) -> None:
         """保存：总开关勾选 → 拉起采集 + 同步窗格；取消 → 关窗停采。"""
         try:
             self._cfg["enabled"] = bool(self.chk_enable.isChecked())
             self._cfg["topmost"] = bool(self.chk_monitor_topmost.isChecked())
+            self._cfg["locked"] = bool(self.chk_monitor_locked.isChecked())
             units = self._cfg.setdefault("units", {})
             for key, chk in self._param_checks.items():
                 u = units.setdefault(key, {"enabled": False, "threshold": []})

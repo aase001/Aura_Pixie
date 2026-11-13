@@ -1568,8 +1568,13 @@ def section_j():
         ok(dlg.chk_enable.text() == "启用资源监视", "总开关文案")
         ok(not dlg.chk_enable.isChecked(), "总开关默认不勾选")
         # J1b 保持资源监视置顶（V16.4 与球体置顶解耦，默认不勾、与总开关同行）
-        ok(dlg.chk_monitor_topmost.text() == "保持资源监视置顶", "监视置顶开关文案")
+        ok(dlg.chk_monitor_topmost.text() == "窗口置顶", "监视置顶开关文案（V16.4 改名）")
         ok(not dlg.chk_monitor_topmost.isChecked(), "监视置顶默认不勾选")
+        # J1c 锁定开关（V16.4）：默认不勾、与置顶同行、落 monitor.locked
+        ok(dlg.chk_monitor_locked.text() == "锁定", "监视锁定开关文案")
+        ok(not dlg.chk_monitor_locked.isChecked(), "监视锁定默认不勾选")
+        ok(mu.default_monitor_config().get("locked") is False,
+           "monitor.locked 默认 False")
         _er = dlg.layout().itemAt(0).layout()
         ok(_er.indexOf(dlg.chk_enable) >= 0
            and _er.indexOf(dlg.chk_monitor_topmost) >= 0,
@@ -1595,6 +1600,94 @@ def section_j():
             ok(M._monitor_topmost_getter() is False, "取消后监视置顶取值为 False")
         finally:
             M.set_topmost(_ball_top_before)
+        # J1d 锁定行为（V16.4）：落盘 + 真实拦截拖动/解绑/合并，右键菜单仍可用
+        _lock_before = M.load_monitor_config().get("locked", False)
+        _enable_before = dlg.chk_enable.isChecked()
+        _sc0, _pc0 = fake.start_calls, fake.stop_calls
+        _vis0 = any(w.isVisible() for w in mgr._widgets.values())
+        from PySide6.QtCore import QEvent, QPoint
+        try:
+            dlg.chk_enable.setChecked(True)      # 总开关开，参数复选才可用
+            for _k in ("cpu.load", "mem.load"):
+                if not dlg._param_checks[_k].isChecked():
+                    dlg._param_checks[_k].setChecked(True)
+            APP.processEvents()
+            dlg.chk_monitor_locked.setChecked(True)
+            APP.processEvents()
+            ok(M.load_monitor_config().get("locked") is True,
+               "勾选锁定 → 落盘 monitor.locked")
+            ok(M._monitor_locked_getter() is True, "锁定取值读 monitor 块")
+            ok(M.ball_locked() is False, "监视锁定不影响球体锁定（解耦）")
+            # 真实窗格：锁定后左键拖动不成立、右键拖动不解绑、合并被拦
+            _wl = mgr._widgets["cpu.load"]
+            _wl.show()
+            APP.processEvents()
+            ok(_wl.is_locked() is True, "窗格 is_locked 走管理器注入取值")
+            _p0 = _wl.pos()
+            _st = _wl.frameGeometry().topLeft() + QPoint(5, 5)
+            _send(_wl, QEvent.Type.MouseButtonPress, _st)
+            _send(_wl, QEvent.Type.MouseMove, _st + QPoint(60, 40))
+            ok(_wl.pos() == _p0 and not _wl._drag_started,
+               f"锁定 → 左键拖动被拦（位置不变 {_wl.pos()}）")
+            _send(_wl, QEvent.Type.MouseButtonRelease, _st + QPoint(60, 40))
+            APP.processEvents()
+            # 组内窗格右键拖动 → 不解绑
+            _wg = mgr._widgets["mem.load"]
+            _wg.show()
+            APP.processEvents()
+            _grp = mgr.new_group()
+            _grp.add(_wl)
+            _grp.add(_wg)
+            _wl._is_snapped = _wg._is_snapped = True
+            _rs = _wg.frameGeometry().topLeft() + QPoint(5, 5)
+            _send(_wg, QEvent.Type.MouseButtonPress, _rs)
+            _send(_wg, QEvent.Type.MouseMove, _rs + QPoint(50, 0))
+            ok(_wg._group is _grp, "锁定 → 右键拖动不解绑（组保持）")
+            _send(_wg, QEvent.Type.MouseButtonRelease, _rs + QPoint(50, 0))
+            APP.processEvents()
+            _wg.detach_from_group()
+            ok(_wg._group is _grp, "锁定 → detach_from_group 兜底拦住")
+            _other = mgr._widgets.get("cpu.temp")
+            if _other is None:
+                dlg._param_checks["cpu.temp"].setChecked(True)
+                APP.processEvents()
+                _other = mgr._widgets["cpu.temp"]
+            _grp_before = _other._group
+            _wl._merge_into_target(_other, "right", [_wl])
+            ok(_other._group is _grp_before, "锁定 → 合并组被拦")
+            # 取消锁定 → 恢复可拖动
+            dlg.chk_monitor_locked.setChecked(False)
+            APP.processEvents()
+            ok(M.load_monitor_config().get("locked") is False,
+               "取消锁定 → 落盘 False")
+            ok(_wl.is_locked() is False, "取消后窗格解锁")
+            _p1 = _wl.pos()
+            _st2 = _wl.frameGeometry().topLeft() + QPoint(5, 5)
+            _send(_wl, QEvent.Type.MouseButtonPress, _st2)
+            _send(_wl, QEvent.Type.MouseMove, _st2 + QPoint(60, 40))
+            ok(_wl._drag_started and _wl.pos() != _p1, "解锁 → 拖动恢复生效")
+            _send(_wl, QEvent.Type.MouseButtonRelease, _st2 + QPoint(60, 40))
+            APP.processEvents()
+        finally:
+            _c = M.load_monitor_config()
+            _c["locked"] = bool(_lock_before)
+            M.save_monitor_config(_c)
+            # 复原：先解锁再解组（锁定态 detach 会被兜底拦住）
+            dlg.chk_monitor_locked.setChecked(False)
+            APP.processEvents()
+            for _w in list(mgr._widgets.values()):
+                if _w._group is not None:
+                    _w.detach_from_group()
+            # 参数全不勾 + 总开关回原态（后续 J 段断言依赖出厂态）
+            for _k, _ck in dlg._param_checks.items():
+                if _ck.isChecked():
+                    _ck.setChecked(False)
+            dlg.chk_enable.setChecked(_enable_before)
+            APP.processEvents()
+            # 采集态还原：本段曾首开建窗（hub.start），后续 J3 仍断言“首开才拉采集”
+            if not _vis0:
+                fake.stop()
+            fake.start_calls, fake.stop_calls = _sc0, _pc0
         _expect = {k for k, *_ in mh.METRIC_DEFS} | {
             "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
             "gpu_d.0.vram_load", "gpu_d.0.vram_used",
@@ -1603,7 +1696,8 @@ def section_j():
            f"参数复选框齐全（{len(dlg._param_checks)} 项）")
         ok("sys.uptime" not in dlg._param_checks, "运行时间已废弃不罗列")
         ok(all(not c.isChecked() for c in dlg._param_checks.values()),
-           "参数默认全不勾选")
+           "参数默认全不勾选（实际勾选：%s）" % [
+               k for k, c in dlg._param_checks.items() if c.isChecked()])
         ok(all(not c.isEnabled() for c in dlg._param_checks.values()),
            "总开关未勾选 → 参数复选置灰")
         # 无值参数也罗列（风扇/硬盘）
