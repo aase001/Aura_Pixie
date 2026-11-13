@@ -1352,6 +1352,31 @@ def main() -> int:
     check("松开后可再次正常展开", bh.state in ("expanding", "open"),
           f"（state={bh.state}）", failures)
 
+    # ---------- V16.3 右键菜单期间抑制扇形（防置顶扇形挡菜单）----------
+    bm = fresh_ball()
+    _w_m = bm.width()
+    center_m = QPointF(_w_m / 2.0, _w_m / 2.0)
+    bm._menu_active = True  # noqa: SLF001
+    for _ in range(20):   # 400ms > 300ms 悬停阈值
+        bm._evaluate(20.0, center_m)  # noqa: SLF001
+    check("右键菜单期间悬停不展开扇形", bm._state == "hidden",
+          f"（state={bm._state}）", failures)
+    bm._enter_expanding()  # noqa: SLF001
+    bm._enter_collapsing()  # noqa: SLF001
+    bm._progress = 0.6  # noqa: SLF001 - 非零进度，单次 evaluate 不收完
+    bm._evaluate(20.0, center_m)  # noqa: SLF001 - 光标在球内
+    check("右键菜单期间收起不重开", bm._state == "collapsing",
+          f"（state={bm._state}）", failures)
+    for _ in range(40):
+        bm._evaluate(20.0, center_m)  # noqa: SLF001
+    check("右键菜单期间收起动画仍推进到 hidden", bm._state == "hidden",
+          f"（state={bm._state}）", failures)
+    bm._menu_active = False  # noqa: SLF001
+    _src_ctx = inspect.getsource(M.AuraBall.contextMenuEvent)
+    check("球体右键先收扇形再弹菜单（源码看守）",
+          "_enter_collapsing" in _src_ctx and "_menu_active = True" in _src_ctx,
+          "", failures)
+
     # ---------- 17 呼吸冻结：展开期间相位锁定，回收后继续 ----------
     print("\n呼吸冻结（扇形展开 / 回收）")
     bf = fresh_ball()
