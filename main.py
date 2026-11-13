@@ -5266,13 +5266,18 @@ def _monitor_backfill_history() -> None:
 
 
 def _monitor_restore_layout(w, layout: dict) -> None:
-    """按布局记忆摆放单元窗（有记录用记录，无记录走 place_fn）。"""
+    """按布局记忆摆放单元窗（有记录用记录，无记录走 place_fn）。
+
+    V16.3：记录坐标先过多屏合法性校验（中心在任一屏可用区才合法），
+    非法就近夹回——与 place_for_show/落盘侧共用同一判据。
+    """
     rec = layout.get(w.unit_key)
     if isinstance(rec, dict):
         try:
             x, y = float(rec.get("x")), float(rec.get("y"))
-            if math.isfinite(x) and math.isfinite(y):
-                w.move(round(x), round(y))
+            pos = monitor_ui.sanitize_layout_pos(x, y, w.width(), w.height())
+            if pos is not None:
+                w.move(*pos)
                 return
         except (TypeError, ValueError):
             pass
@@ -5318,6 +5323,14 @@ def _monitor_layout_settle() -> None:
             if not w.isVisible():
                 continue
             pos = w.pos()
+            # V16.3：落盘前校验——中心不在任何屏可用区 → 先把窗格夹回
+            # 就近合法位再记录（运行时自愈，防记忆写出屏外坐标）
+            fixed = monitor_ui.sanitize_layout_pos(
+                pos.x(), pos.y(), w.width(), w.height())
+            if fixed is not None and (fixed[0] != pos.x()
+                                      or fixed[1] != pos.y()):
+                w.move(*fixed)
+                pos = w.pos()
             layout[unit_key] = {"x": pos.x(), "y": pos.y(),
                                 "group_id": w._group.group_id if w._group else None}
             last = getattr(w, "_monitor_last_pos", None)

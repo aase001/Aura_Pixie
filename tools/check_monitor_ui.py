@@ -2718,6 +2718,71 @@ def section_o():
        "组恢复与落位重叠检测在位")
     main_src = open(os.path.join(root, "main.py"), encoding="utf-8").read()
     ok("mgr.restore_groups(layout)" in main_src, "main 首开接线组恢复")
+
+    # ---- O7 位置记忆合法性（V16.3：中心在屏判据 + 就近夹回，多屏安全）----
+    from PySide6.QtCore import QRect as _QRect
+    from PySide6.QtGui import QGuiApplication
+
+    class _FakeScreen:
+        def __init__(self, rect):
+            self._r = rect
+
+        def availableGeometry(self):
+            return self._r
+
+    _real_screens = QGuiApplication.screens
+    _scr = [_FakeScreen(_QRect(0, 0, 1920, 1080))]
+    QGuiApplication.screens = staticmethod(lambda: _scr)
+    try:
+        ok(mu.sanitize_layout_pos(100, 100, 250, 80) == (100, 100),
+           "中心在屏 → 原样保留")
+        ok(mu.sanitize_layout_pos(-200, 100, 250, 80) == (0, 100),
+           "左越界 → 夹回屏内左缘")
+        ok(mu.sanitize_layout_pos(1800, 1050, 250, 80) == (1670, 1000),
+           "右下角越界 → 夹回屏内")
+        ok(mu.sanitize_layout_pos(5000, 5000, 250, 80) == (1670, 1000),
+           "远离所有屏 → 就近夹回最近屏")
+        ok(mu.sanitize_layout_pos(float("nan"), 100, 250, 80) is None,
+           "NaN → None（走初始摆放）")
+        ok(mu.sanitize_layout_pos(float("inf"), 100, 250, 80) is None,
+           "inf → None（走初始摆放）")
+        # 多屏扩展：副屏上的合法记忆保留（旧实现只认主屏会误夹回）
+        _scr.append(_FakeScreen(_QRect(1920, 0, 1920, 1080)))
+        ok(mu.sanitize_layout_pos(2500, 300, 250, 80) == (2500, 300),
+           "多屏：副屏中心在屏 → 原样保留")
+        ok(mu.sanitize_layout_pos(4000, 300, 250, 80) == (3590, 300),
+           "多屏：副屏右越界 → 夹回副屏而非主屏")
+        # 屏缝：中心不在任何屏 → 夹回面积重叠最大的一侧
+        # 窗格(2000,300,250,80)：与副屏重叠 120px > 主屏 45px → 副屏
+        _scr2 = [_FakeScreen(_QRect(0, 0, 1920, 1080)),
+                 _FakeScreen(_QRect(2200, 0, 1920, 1080))]
+        QGuiApplication.screens = staticmethod(lambda: _scr2)
+        got = mu.sanitize_layout_pos(2000, 300, 250, 80)
+        ok(got == (2200, 300),
+           f"屏缝中心 → 夹回重叠最大侧副屏（{got}）")
+        # 零重叠屏缝：两屏都不沾 → 比中心距离（中心2100距副屏100px更近）
+        got2 = mu.sanitize_layout_pos(2050, 300, 100, 80)
+        ok(got2 == (2200, 300),
+           f"零重叠屏缝 → 夹回更近的副屏（{got2}）")
+        # place_for_show 记忆分支：非法记忆 → 夹回屏内而非飞出屏幕
+        hub7 = FakeHub()
+        mgr7 = mu.MonitorWindowManager(hub7, **inj)
+        w7 = mu.MonitorUnitWidget("cpu.load", hub7, manager=mgr7, **w_inj)
+        mgr7.register_widget("cpu.load", w7, ["cpu.load"])
+        mgr7.config_io = {"read": lambda: {
+            "cpu.load": {"x": 5000, "y": 5000, "group_id": None}}}
+        w7.show_at(QRect(900, 500, 60, 60))
+        APP.processEvents()
+        ok(w7.pos().x() <= 1671 and w7.pos().y() <= 1001,
+           f"非法记忆位 → 摆放夹回屏内（{w7.pos()}）")
+        w7.close()
+    finally:
+        QGuiApplication.screens = _real_screens
+    # 写入侧/恢复侧接线看守（改坏会红）
+    ok("sanitize_layout_pos" in main_src, "main 落盘/恢复接入位置校验")
+    ok("def sanitize_layout_pos" in src, "位置校验函数在位")
+    ok("cy + h > avail.top() + avail.height()" in src,
+       "空位顺延含屏幕底部边界")
     for w in ws + [wa, wb, wc, wx, wy]:
         w.close()
 

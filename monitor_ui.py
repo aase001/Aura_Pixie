@@ -192,6 +192,48 @@ class GhostOverlay(QWidget):
         p.end()
 
 
+def sanitize_layout_pos(x: float, y: float, w: int, h: int):
+    """窗格位置记忆合法性校验（V16.3，多屏扩展安全）。
+
+    判据（用户拍板）：窗格中心落在任一屏幕可用区内 = 合法——跨双屏
+    且中心在屏上的正常保留；中心在屏缝/屏外 = 非法。
+    非法 → 就近合法：取中心距最近的屏幕，把矩形夹进该屏可用区。
+    返回 (x, y) 整数元组；坐标非有限值或无屏幕返回 None（调用方走
+    初始摆放）。写入侧与恢复侧共用同一判据，防「超出屏幕/躲起来」。
+    """
+    try:
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        cx, cy = x + w / 2.0, y + h / 2.0
+        screens = QGuiApplication.screens()
+        if not screens:
+            return None
+        rect = QRect(round(x), round(y), w, h)
+        best = None
+        best_key = None
+        for scr in screens:
+            av = scr.availableGeometry()
+            if av.left() <= cx <= av.right() and av.top() <= cy <= av.bottom():
+                return (round(x), round(y))   # 中心在屏 → 合法原样保留
+            # 就近判据：先比「窗格与该屏的面积重叠」（屏缝场景夹回占屏
+            # 最多的一侧，符合直觉），重叠相同再比中心到屏的距离。
+            inter = rect.intersected(av)
+            area = inter.width() * inter.height()
+            dx = max(av.left() - cx, 0.0, cx - av.right())
+            dy = max(av.top() - cy, 0.0, cy - av.bottom())
+            key = (-area, dx * dx + dy * dy)
+            if best_key is None or key < best_key:
+                best_key, best = key, av
+        if best is None:
+            return None
+        # QRect.right()/bottom() 含端点：夹回后整窗落在可用区内
+        nx = min(max(round(x), best.left()), best.right() - w + 1)
+        ny = min(max(round(y), best.top()), best.bottom() - h + 1)
+        return (int(nx), int(ny))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def default_thresholds(key: str, unit: str) -> list:
     """按指标类别给默认阈值段（禁止全局写死 90%）。
 
@@ -1683,8 +1725,12 @@ class MonitorWindowManager:
             if isinstance(rec, dict):
                 try:
                     x, y = float(rec.get("x")), float(rec.get("y"))
-                    if math.isfinite(x) and math.isfinite(y):
-                        widget.move(round(x), round(y))
+                    # V16.3：多屏合法性校验——中心不在任何屏 → 就近夹回；
+                    # 无屏幕/非有限值 → 落初始摆放（防窗格飞出屏幕躲起来）
+                    pos = sanitize_layout_pos(x, y, widget.width(),
+                                              widget.height())
+                    if pos is not None:
+                        widget.move(*pos)
                         if self._overlaps_others(widget):
                             self._relocate_right_of_first(widget)
                         return
@@ -1740,6 +1786,9 @@ class MonitorWindowManager:
             if avail is not None and cx + w > avail.left() + avail.width():
                 cx = start_x if start_x >= avail.left() else avail.left()
                 cy += h
+                # V16.3：换行不越屏幕可用区底（防一路顺延排到屏外）
+                if cy + h > avail.top() + avail.height():
+                    break
         return (x, y)
 
     def _relocate_right_of_first(self, widget) -> None:
