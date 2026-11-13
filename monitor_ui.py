@@ -93,6 +93,9 @@ SPARK_EXCLUDE_KEYS: tuple[str, ...] = (
     "disk.{i}.temp",      # 硬盘温度（V16.3 新增）
     "gpu_i.shared",       # 共享内存用量（V16.3 新增）
     "gpu_d.{i}.vram_used",  # GPU显存用量（V16.3 新增）
+    "mem.load",           # 内存利用（V16.4 新增）
+    "mem.used",           # 内存用量（V16.4 新增）
+    "gpu_d.{i}.vram_load",  # GPU显存利用（V16.4 新增）
 )
 
 
@@ -482,6 +485,7 @@ def default_monitor_config() -> dict:
         units[key] = {"enabled": False, "threshold": []}
     return {
         "enabled": False,
+        "topmost": False,   # 保持资源监视置顶（V16.4 与球体置顶解耦，默认关）
         "refresh_ms": 1000,
         "sparkline_points": SPARKLINE_POINTS,
         "idle_stop_sec": 300,

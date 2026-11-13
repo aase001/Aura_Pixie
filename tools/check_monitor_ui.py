@@ -1567,6 +1567,34 @@ def section_j():
         # J1 结构：总开关 + 参数复选框齐全，默认全不勾选
         ok(dlg.chk_enable.text() == "启用资源监视", "总开关文案")
         ok(not dlg.chk_enable.isChecked(), "总开关默认不勾选")
+        # J1b 保持资源监视置顶（V16.4 与球体置顶解耦，默认不勾、与总开关同行）
+        ok(dlg.chk_monitor_topmost.text() == "保持资源监视置顶", "监视置顶开关文案")
+        ok(not dlg.chk_monitor_topmost.isChecked(), "监视置顶默认不勾选")
+        _er = dlg.layout().itemAt(0).layout()
+        ok(_er.indexOf(dlg.chk_enable) >= 0
+           and _er.indexOf(dlg.chk_monitor_topmost) >= 0,
+           "监视置顶与启用资源监视同行")
+        ok(mu.default_monitor_config().get("topmost") is False,
+           "monitor.topmost 默认 False")
+        _ball_top_before = M.topmost_enabled()
+        try:
+            M.set_topmost(True)          # 球体置顶开
+            dlg.chk_monitor_topmost.setChecked(True)
+            APP.processEvents()
+            ok(M.load_monitor_config().get("topmost") is True,
+               "勾选监视置顶 → 落盘 monitor.topmost")
+            ok(M._monitor_topmost_getter() is True, "监视置顶取值读 monitor 块")
+            ok(M.topmost_enabled() is True, "监视置顶不改球体置顶（解耦）")
+            M.set_topmost(False)         # 球体置顶关，监视仍开
+            ok(M._monitor_topmost_getter() is True and M.topmost_enabled() is False,
+               "球体置顶关 → 监视置顶不受影响（解耦）")
+            dlg.chk_monitor_topmost.setChecked(False)
+            APP.processEvents()
+            ok(M.load_monitor_config().get("topmost") is False,
+               "取消监视置顶 → 落盘 False")
+            ok(M._monitor_topmost_getter() is False, "取消后监视置顶取值为 False")
+        finally:
+            M.set_topmost(_ball_top_before)
         _expect = {k for k, *_ in mh.METRIC_DEFS} | {
             "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
             "gpu_d.0.vram_load", "gpu_d.0.vram_used",
@@ -2157,21 +2185,24 @@ def section_l():
     d_cpu = _spark_draw_calls("cpu.load", _vals)
     ok(d_cpu >= 1, f"CPU利用画曲线（drawPath {d_cpu} 次）")
     d_mem = _spark_draw_calls("mem.load", _vals)
-    ok(d_mem >= 1, f"内存利用画曲线（drawPath {d_mem} 次）")
+    ok(d_mem == 0, f"内存利用不画曲线（V16.4 排除，drawPath {d_mem} 次）")
     d_temp = _spark_draw_calls("cpu.temp", (50.0, 60.0, 70.0, 65.0, 80.0, 55.0))
     ok(d_temp >= 1, f"温度画曲线（drawPath {d_temp} 次）")
-    # V16.3 新增排除项：硬盘温度 / 共享内存用量 / GPU显存用量
-    for _k in ("disk.0.temp", "disk.1.temp", "gpu_i.shared", "gpu_d.0.vram_used"):
+    # 排除清单：硬盘占用空间/硬盘温度/共享内存用量/显存用量（V16.3）
+    #           + 内存利用/内存用量/显存利用（V16.4）
+    for _k in ("disk.0.temp", "disk.1.temp", "gpu_i.shared", "gpu_d.0.vram_used",
+               "mem.load", "mem.used", "gpu_d.0.vram_load", "gpu_d.1.vram_load"):
         _d = _spark_draw_calls(_k, _vals)
         ok(_d == 0, f"{_k} 不画曲线（排除清单，drawPath {_d} 次）")
     # 排除清单可维护性：完整键 + 模板键 {i} 匹配任意实例序号
     ok(mu.is_spark_excluded("disk.7.usage") and mu.is_spark_excluded("disk.12.temp"),
        "模板键 {i} 匹配任意盘号")
     ok(mu.is_spark_excluded("gpu_d.3.vram_used"), "模板键匹配任意卡号")
-    ok(not mu.is_spark_excluded("gpu_d.0.vram_load"), "显存利用仍画曲线")
-    ok(not mu.is_spark_excluded("cpu.load") and not mu.is_spark_excluded("net.tx"),
+    ok(mu.is_spark_excluded("gpu_d.5.vram_load"), "显存利用模板键匹配任意卡号")
+    ok(not mu.is_spark_excluded("cpu.load") and not mu.is_spark_excluded("net.tx")
+       and not mu.is_spark_excluded("gpu_i.load"),
        "未列入者照常画曲线")
-    ok(isinstance(mu.SPARK_EXCLUDE_KEYS, tuple) and len(mu.SPARK_EXCLUDE_KEYS) >= 4,
+    ok(isinstance(mu.SPARK_EXCLUDE_KEYS, tuple) and len(mu.SPARK_EXCLUDE_KEYS) >= 7,
        "排除清单为可维护列表（新指标直接加）")
     # 源码看守：跳过走清单判定，不再硬编码 disk usage、也不按标签一刀切
     _src_l2 = open(os.path.join(os.path.dirname(os.path.dirname(
