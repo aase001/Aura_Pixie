@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -99,7 +100,8 @@ CONFIG = {
     "color_start": "#FFFFFF",   # 呼吸起始色（可配；呼吸关闭时球体恒渲此色）
     "color_mid": "#283FFE",     # 呼吸过渡色（可配，原「主题色」）
     "color_end": "#FFFFFF",     # 呼吸末尾色（可配）
-    "monitor_color": "#181A20",  # 资源监视窗格背景色（可配；字色按其亮度自动黑/白）
+    "monitor_color": "#181A20",  # 资源监视窗口色（可配；字色按其亮度自动黑/白）
+    "monitor_opacity": 100,     # 资源监视透明度（%）：监视窗格整体 alpha，范围 10~100（每阶10），默认 100
     # —— V10 呼吸开关与分段渐变时长 ——
     #   breath=False → 颜色+大小全停，恒渲染起始色；
     #   起始色==末尾色（两色态）→ 起始→过渡 用 dur_start_mid、过渡→起始 用 dur_mid_end，
@@ -113,8 +115,8 @@ CONFIG = {
     "dur_end_start": 5,         # 末尾→起始 渐变时长（仅三色态生效）
     "aura_scale": 1.0,          # 呼吸动画速度倍率 0.1x~3x（每阶0.1）：相位推进速度 × 倍率
     "idle_sec": 60,             # 动效休眠：无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停+透明度10%（30~600，每阶30）
-    "opacity": 100,             # 总体透明度（%）：球体渲染 alpha 缩放，范围 10~100，默认 100
-    "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 5~20（每阶5），默认 10（超过总体透明度则存 10）
+    "opacity": 100,             # 球体透明度（%）：球体渲染 alpha 缩放，范围 10~100，默认 100
+    "sleep_opacity": 10,        # 休眠透明度（%）：休眠时窗口透明度，范围 5~20（每阶5），默认 10（超过球体透明度则存 10）
     # —— 显示缩放（单元清单见 SCALE_UNITS）：enabled=界面复选框，percent=下拉值 ——
     #    percent 为 50~200 且 25 的整数倍；enabled=false 的单元恒按 100% 生效。
     "display_scale": {
@@ -2714,24 +2716,28 @@ CODE_HELP_TEXT = (
     "  · 每色一行「十六进制框 + 取色按钮」：填 #RRGGBB 色码，或点取色从系统取色器选。\n"
     "  · 起始色 = 末尾色 → 两色循环（起→中→起）；起始色 ≠ 末尾色 → 三色循环\n"
     "    （起→中→末→起）。\n\n"
-    "■ 资源监视（背景色）\n"
-    "  · 控制监视窗格的背景色，同样支持十六进制 + 取色。\n"
-    "  · 悬停「资源监视」标签可见提示：建议黑灰白三色确保显示效果。\n"
-    "  · 窗格名称/单位/硬件名小字按背景色亮度自动黑/白字（浅底黑字、深底白字）；\n"
-    "    数值与曲线不受此规则影响，仍按阈值范围着色。\n"
-    "  · 此项与球体呼吸无关，呼吸关闭时仍可调节。\n\n"
     "■ 渐变时长（秒，起→中 / 中→末 / 末→起）\n"
     "  · 三个小框分别对应三段渐变耗时，1~30 秒整数。\n"
     "  · 超界取最近值、小数向下取整、非法回退 5；呼吸周期 = 三段时长之和。\n\n"
     "■ 呼吸倍率（0.1x~3.0x，每阶 0.1）\n"
     "  · 全局动画速度：每段实际耗时 = 设定秒数 ÷ 倍率。只管速度，不碰尺寸。\n\n"
-    "■ 休眠倒计时（30~600 秒，每阶 30）\n"
-    "  · 无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停并转入休眠。\n\n"
-    "■ 总体透明度（10%~100%，每阶 10%）\n"
+    "■ 球体透明度（10%~100%，每阶 10%）\n"
     "  · 球体渲染 alpha 乘该系数，越低越透明。\n\n"
     "■ 休眠透明度（5%~20%，每阶 5%）\n"
-    "  · 休眠时窗口透明度；若大于总体透明度，保存时按规则归 10%。\n"
+    "  · 休眠时窗口透明度；若大于球体透明度，保存时按规则归 10%。\n"
     "  · 休眠球随系统深浅色顺色（浅色系统黑球、深色系统白球），点击唤起。\n\n"
+    "■ 休眠倒计时（30~600 秒，每阶 30）\n"
+    "  · 无球体交互（悬停/点击/拖拽）达到该秒数 → 呼吸暂停并转入休眠。\n\n"
+    "────（以下为资源监视窗格设置，与球体动效无关）────\n\n"
+    "■ 资源监视窗口色\n"
+    "  · 控制监视窗格的颜色，支持十六进制 + 取色；同时作用于中心填充与边缘虚化。\n"
+    "  · 悬停标签可见提示：建议黑灰白三色确保显示效果。\n"
+    "  · 窗格名称/单位/硬件名小字按该色亮度自动黑/白字（浅底黑字、深底白字）；\n"
+    "    数值与曲线不受此规则影响，仍按阈值范围着色。\n"
+    "  · 此项与球体呼吸无关，呼吸关闭时仍可调节。\n\n"
+    "■ 资源监视透明度（10%~100%，每阶 10%）\n"
+    "  · 监视窗格整体透明度（文字/曲线/光晕一起变透），越低越透明。\n"
+    "  · 与球体透明度相互独立，互不影响；保存后已开窗格即时生效。\n\n"
     "■ 显示缩放（勾选 = 启用，50%~200%，每阶 25%）\n"
     "  · 每单元一行「复选框 + 下拉」：球体及扇形 / 资源监视单元 / 快捷启动单元。\n"
     "  · 勾选 = 按右侧倍数缩放；取消 = 该单元恒按 100% 显示（配置值保留）。\n"
@@ -3344,6 +3350,8 @@ def load_appearance_config() -> dict:
         "monitor_color": normalize_hex(
             str(data.get("monitor_color") or CONFIG["monitor_color"]),
             CONFIG["monitor_color"]),
+        "monitor_opacity": _clamp_opacity(
+            data.get("monitor_opacity", CONFIG["monitor_opacity"])),
         "dur_start_mid": _clamp_dur(data.get("dur_start_mid", CONFIG["dur_start_mid"])),
         "dur_mid_end": _clamp_dur(data.get("dur_mid_end", CONFIG["dur_mid_end"])),
         "dur_end_start": _clamp_dur(data.get("dur_end_start", CONFIG["dur_end_start"])),
@@ -3375,6 +3383,8 @@ def save_appearance_config(cfg: dict) -> None:
         "monitor_color": normalize_hex(
             str(cfg.get("monitor_color", CONFIG["monitor_color"])),
             CONFIG["monitor_color"]),
+        "monitor_opacity": _clamp_opacity(
+            cfg.get("monitor_opacity", CONFIG["monitor_opacity"])),
         "dur_start_mid": _clamp_dur(cfg.get("dur_start_mid", CONFIG["dur_start_mid"])),
         "dur_mid_end": _clamp_dur(cfg.get("dur_mid_end", CONFIG["dur_mid_end"])),
         "dur_end_start": _clamp_dur(cfg.get("dur_end_start", CONFIG["dur_end_start"])),
@@ -3403,6 +3413,8 @@ def apply_appearance_to_config(cfg: dict) -> None:
     CONFIG["color_end"] = cfg.get("color_end", CONFIG["color_end"])
     CONFIG["monitor_color"] = normalize_hex(
         str(cfg.get("monitor_color", CONFIG["monitor_color"])), CONFIG["monitor_color"])
+    CONFIG["monitor_opacity"] = _clamp_opacity(
+        cfg.get("monitor_opacity", CONFIG["monitor_opacity"]))
     CONFIG["dur_start_mid"] = _clamp_dur(
         cfg.get("dur_start_mid", CONFIG["dur_start_mid"]))
     CONFIG["dur_mid_end"] = _clamp_dur(cfg.get("dur_mid_end", CONFIG["dur_mid_end"]))
@@ -3602,8 +3614,14 @@ class AppearanceSettingsDialog(QDialog):
 
         self.sld_sleep_op, self.lbl_sleep_op = _slider_row(
             _SLEEP_OP_SPEC, lambda v: f"{v}%",
-            "休眠时窗口透明度（5%~20%，每阶 5%）；大于总体透明度时按规则存 10%",
+            "休眠时窗口透明度（5%~20%，每阶 5%）；大于球体透明度时按规则存 10%",
             cur.get("sleep_opacity", CONFIG["sleep_opacity"]))
+
+        # 资源监视透明度（V16.3 新增）：范围/档位同球体透明度（10%~100%，每阶 10%）
+        self.sld_monitor_op, self.lbl_monitor_op = _slider_row(
+            _OPACITY_SPEC, lambda v: f"{v}%",
+            "资源监视窗格整体透明度（10%~100%，每阶 10%）；越低窗格越透",
+            cur.get("monitor_opacity", CONFIG["monitor_opacity"]))
 
         grid = QVBoxLayout()
         grid.addWidget(self.chk_breath)
@@ -3617,10 +3635,6 @@ class AppearanceSettingsDialog(QDialog):
         self.lbl_color_end = QLabel("末尾色", self)
         grid.addWidget(self.lbl_color_end)
         grid.addLayout(end_row)
-        _lbl_monitor = QLabel("资源监视", self)
-        _lbl_monitor.setToolTip("建议黑灰白三色确保显示效果")
-        grid.addWidget(_lbl_monitor)
-        grid.addLayout(monitor_row)
         self.lbl_dur = QLabel("渐变时长（秒，起→中 / 中→末 / 末→起）", self)
         grid.addWidget(self.lbl_dur)
         grid.addLayout(dur_row)
@@ -3636,12 +3650,25 @@ class AppearanceSettingsDialog(QDialog):
             grid.addLayout(row)
             return title_lbl
 
-        # UI 顺序（用户拍板 V16.1）：倍率 → 总体透明度 → 休眠透明度 → 休眠倒计时
+        # UI 顺序（V16.3 用户拍板）：倍率 → 球体透明度 → 休眠透明度 → 休眠倒计时
+        #   → 分割线 → 资源监视窗口色 → 资源监视透明度
         self.lbl_scale_title = _grid_slider_row("呼吸倍率", self.sld_scale, self.lbl_scale)
-        _grid_slider_row("总体透明度", self.sld_opacity, self.lbl_opacity)
+        _grid_slider_row("球体透明度", self.sld_opacity, self.lbl_opacity)
         self.lbl_sleep_op_title = _grid_slider_row(
             "休眠透明度", self.sld_sleep_op, self.lbl_sleep_op)
         _grid_slider_row("休眠倒计时", self.sld_idle, self.lbl_idle)
+
+        # 分割线：球体动效区与资源监视区之间（V16.3 用户拍板）
+        _sep = QFrame(self)
+        _sep.setFrameShape(QFrame.Shape.HLine)
+        _sep.setFrameShadow(QFrame.Shadow.Sunken)
+        grid.addWidget(_sep)
+
+        _lbl_monitor = QLabel("资源监视窗口色", self)
+        _lbl_monitor.setToolTip("建议黑灰白三色确保显示效果")
+        grid.addWidget(_lbl_monitor)
+        grid.addLayout(monitor_row)
+        _grid_slider_row("资源监视透明度", self.sld_monitor_op, self.lbl_monitor_op)
 
         # 显示缩放：每单元一行「复选框（=启用）+ 下拉（50%~200%，每阶 25%）」。
         # 未勾选 → 下拉置灰、恒按 100% 生效，配置值保留；单元清单与接入方式见 SCALE_UNITS。
@@ -3744,7 +3771,7 @@ class AppearanceSettingsDialog(QDialog):
 
     def settings(self) -> dict:
         """收集当前设置：滑块/下拉取档位换算值（无需再钳制）；三色非法回退原值；
-        时长按「向下取整+钳制」解析文本；休眠透明度大于总体时归一 10%。"""
+        时长按「向下取整+钳制」解析文本；休眠透明度大于球体透明度时归一 10%。"""
         op = tier_to_value(self.sld_opacity.value(), _OPACITY_SPEC)
         d1, d2, d3 = (self._dur_value(e) for e in self.edit_dur)
         return {
@@ -3757,6 +3784,8 @@ class AppearanceSettingsDialog(QDialog):
                                        self._fallback["color_end"]),
             "monitor_color": normalize_hex(self.edt_monitor.text(),
                                            self._fallback["monitor_color"]),
+            "monitor_opacity": tier_to_value(self.sld_monitor_op.value(),
+                                             _OPACITY_SPEC),
             "dur_start_mid": d1,
             "dur_mid_end": d2,
             "dur_end_start": d3,
@@ -5075,6 +5104,7 @@ def _monitor_theme() -> dict:
             "color_mid": CONFIG["color_mid"],
             "color_end": CONFIG["color_end"],
             "monitor_color": CONFIG.get("monitor_color", "#181A20"),
+            "monitor_opacity": CONFIG.get("monitor_opacity", 100),
             "system_dark_mode": system_dark_mode()}
 
 

@@ -2454,10 +2454,29 @@ def section_m():
     ok(hasattr(dlg, "edt_monitor"), "外观窗含资源监视颜色框 edt_monitor")
     ok(dlg.edt_monitor.text().upper() == M.CONFIG["monitor_color"],
        "资源监视颜色框初值=CONFIG")
-    # 标签悬停提示
-    labels = [c for c in dlg.findChildren(M.QLabel) if c.text() == "资源监视"]
+    # 标签悬停提示（V16.3 改名「资源监视窗口色」）
+    labels = [c for c in dlg.findChildren(M.QLabel) if c.text() == "资源监视窗口色"]
     ok(any("建议黑灰白三色确保显示效果" in (c.toolTip() or "") for c in labels),
-       "资源监视标签悬停提示在位")
+       "资源监视窗口色标签悬停提示在位")
+    # V16.3 资源监视透明度：滑块存在 + 主题注入 + 真实作用窗格 alpha
+    ok(hasattr(dlg, "sld_monitor_op"), "外观窗含资源监视透明度滑块")
+    ok(mu.monitor_opacity({"monitor_opacity": 40}) == 0.4,
+       "透明度换算 40% → 0.4")
+    ok(mu.monitor_opacity({}) == 1.0 and mu.monitor_opacity({"monitor_opacity": 5}) == 0.1,
+       "透明度缺省 1.0、下限钳 10%")
+    _th_op = dict(make_injections()["theme"], monitor_opacity=40)
+    _w_op, _h_op, _m_op = _make_widget()
+    _m_op.register_widget("cpu.load", _w_op, ["cpu.load"])
+    _w_op.show()
+    APP.processEvents()
+    _m_op.refresh_theme(_th_op)
+    APP.processEvents()
+    ok(abs(_w_op.windowOpacity() - 0.4) < 0.02,
+       f"资源监视透明度作用窗格整体 alpha（{(_w_op.windowOpacity()):.3f}≈0.4）")
+    _m_op.refresh_theme(dict(_th_op, monitor_opacity=100))
+    APP.processEvents()
+    ok(_w_op.windowOpacity() > 0.98, "透明度调回 100% 即时恢复不透明")
+    _w_op.close()
     # 呼吸关闭 → 三色置灰但资源监视色恒可用
     dlg.chk_breath.setChecked(False)
     ok(not dlg.edt_start.isEnabled(), "呼吸关闭三色框置灰")

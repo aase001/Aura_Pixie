@@ -1114,7 +1114,9 @@ def main() -> int:
     # 帮助文档重构：指令 + 外观设置 + 监视设置三大板块（沿用 ──── 分割）
     for _tok, _lab in (("【外观设置说明】", "含外观设置板块"),
                        ("【监视设置说明】", "含监视设置板块"),
-                       ("资源监视（背景色）", "外观含资源监视背景色说明"),
+                       ("资源监视窗口色", "外观含资源监视窗口色说明"),
+                       ("资源监视透明度（10%~100%，每阶 10%）", "外观含资源监视透明度说明"),
+                       ("球体透明度（10%~100%，每阶 10%）", "外观含球体透明度说明（原总体透明度）"),
                        ("显示缩放", "外观含显示缩放说明"),
                        ("启用资源监视（总开关）", "监视含总开关说明"),
                        ("一参数一窗格", "监视含窗格形态说明"),
@@ -1426,8 +1428,8 @@ def main() -> int:
           and M.CONFIG["color_end"] == "#FFFFFF", "", failures)
     # 对话框构建 + 修改后应用
     dlg_aura = M.AppearanceSettingsDialog()
-    check("外观对话框结构（呼吸开关+三色框+三时长框+四项滑块）",
-          len(dlg_aura.findChildren(QSlider)) == 4
+    check("外观对话框结构（呼吸开关+三色框+三时长框+五项滑块）",
+          len(dlg_aura.findChildren(QSlider)) == 5
           and hasattr(dlg_aura, "chk_breath") and dlg_aura.chk_breath.isChecked()
           and dlg_aura.edt_start is not None and dlg_aura.edt_mid is not None
           and dlg_aura.edt_end is not None and len(dlg_aura.edit_dur) == 3,
@@ -1791,7 +1793,7 @@ def main() -> int:
         _ball_n2.deleteLater()
     finally:
         M.CONFIG["idle_sec"] = _saved_idle
-    # UI 顺序：倍率 → 总体透明度 → 休眠透明度 → 休眠倒计时
+    # UI 顺序（V16.3）：倍率 → 球体透明度 → 休眠透明度 → 休眠倒计时 → 资源监视透明度
     _slider_titles = []
     _gl = dlg_aura2.layout().itemAt(0).layout()
     for _i in range(_gl.count()):
@@ -1801,9 +1803,43 @@ def main() -> int:
             if isinstance(_w0, M.QLabel) and _it.layout().itemAt(1).widget() is not None:
                 if isinstance(_it.layout().itemAt(1).widget(), M.QSlider):
                     _slider_titles.append(_w0.text())
-    check("外观滑块 UI 顺序=倍率/总体透明度/休眠透明度/休眠倒计时",
-          _slider_titles == ["呼吸倍率", "总体透明度", "休眠透明度", "休眠倒计时"],
+    check("外观滑块 UI 顺序=倍率/球体透明度/休眠透明度/休眠倒计时/资源监视透明度",
+          _slider_titles == ["呼吸倍率", "球体透明度", "休眠透明度",
+                             "休眠倒计时", "资源监视透明度"],
           f"（实得 {_slider_titles}）", failures)
+    # V16.3：资源监视窗口色移到休眠倒计时下方，两者之间有分割线
+    _widget_seq = []
+    for _i in range(_gl.count()):
+        _it = _gl.itemAt(_i)
+        _w = _it.widget()
+        if _w is not None:
+            _widget_seq.append(_w)
+    _sep_idx = [i for i, w in enumerate(_widget_seq)
+                if isinstance(w, M.QFrame)
+                and w.frameShape() == M.QFrame.Shape.HLine]
+    _mon_idx = [i for i, w in enumerate(_widget_seq)
+                if isinstance(w, M.QLabel) and w.text() == "资源监视窗口色"]
+    check("休眠倒计时与资源监视窗口色之间有分割线",
+          bool(_sep_idx) and bool(_mon_idx) and _sep_idx[0] < _mon_idx[0],
+          f"（分割线 {_sep_idx} / 窗口色 {_mon_idx}）", failures)
+    # 资源监视透明度：档位/范围同球体透明度，且 settings 收集 + 落盘生效
+    check("资源监视透明度滑块 10 档（10%~100%，每阶 10%，同球体透明度）",
+          dlg_aura2.sld_monitor_op.minimum() == 1
+          and dlg_aura2.sld_monitor_op.maximum() == 10
+          and dlg_aura2.sld_monitor_op.singleStep() == dlg_aura2.sld_opacity.singleStep(),
+          "", failures)
+    dlg_aura2.sld_monitor_op.setValue(4)   # 40%
+    _s_mon = dlg_aura2.settings()
+    check("settings 收集资源监视透明度（40%）",
+          _s_mon.get("monitor_opacity") == 40, f"（{_s_mon.get('monitor_opacity')}）", failures)
+    M.apply_appearance_to_config(_s_mon)
+    check("CONFIG 应用资源监视透明度", M.CONFIG["monitor_opacity"] == 40,
+          f"（{M.CONFIG['monitor_opacity']}）", failures)
+    M.save_appearance_config(_s_mon)
+    check("资源监视透明度落盘回读一致",
+          M.load_appearance_config()["monitor_opacity"] == 40, "", failures)
+    dlg_aura2.sld_monitor_op.setValue(10)   # 复位 100%，避免影响后续用例
+    M.apply_appearance_to_config(dlg_aura2.settings())
     # 老配置 idle_sec=0 打开窗口 → 落在永不末档（不被吸附成秒数档）
     _cfg_never = M.load_appearance_config()
     _cfg_never["idle_sec"] = 0

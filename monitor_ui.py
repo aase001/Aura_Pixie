@@ -374,6 +374,21 @@ def breath_alpha(elapsed_ms: float) -> float:
     return mid + amp * math.sin(phase)
 
 
+def monitor_opacity(theme: dict) -> float:
+    """资源监视透明度（V16.3 新增）：theme.monitor_opacity（%）→ 0.1~1.0。
+
+    作用于窗格整体窗口 alpha（含文字/曲线/光晕），与球体透明度同范围
+    （10%~100%，每阶 10%）；缺省/非法回退 1.0（完全不透明）。
+    """
+    try:
+        v = float(theme.get("monitor_opacity", 100))
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(v):
+        return 1.0
+    return max(10.0, min(100.0, v)) / 100.0
+
+
 def halo_color(theme: dict) -> QColor:
     """边缘虚化基色（V16.3 修复）：优先取「资源监视」颜色设置项
     （theme.monitor_color），与中心填充 body_color 同色——颜色值同时参与
@@ -560,6 +575,18 @@ class MonitorUnitWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.apply_topmost()
+        self.apply_opacity()   # 资源监视透明度（V16.3）
+
+    def apply_opacity(self) -> None:
+        """按主题 monitor_opacity 设置窗格整体透明度（V16.3）。
+
+        作用于整窗 alpha（文字/曲线/光晕一起变透），与球体透明度同范围。
+        Qt 会量化到 1/255，属正常（照休眠透明度先例）。
+        """
+        try:
+            self.setWindowOpacity(monitor_opacity(self.theme))
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.apply_opacity", e)
 
     def _on_anim_tick(self) -> None:
         try:
@@ -2069,16 +2096,18 @@ class MonitorWindowManager:
             self._groups.remove(grp)
 
     def refresh_theme(self, theme: dict) -> None:
-        """外观改动（资源监视背景色/呼吸三色）后刷新全部窗格与幽灵窗主题。
+        """外观改动（资源监视窗口色/透明度/呼吸三色）后刷新全部窗格与幽灵窗主题。
 
         窗格构造时持有主题副本，改色后须显式刷新才生效；只换主题+重绘，
         不动布局/位置/磁吸关系。由 main 在外观应用链路调用。
+        V16.3：同时应用 monitor_opacity（资源监视透明度即时生效）。
         """
         try:
             self.theme = dict(theme)
             self._ghost.theme = dict(theme)
             for w in self._widgets.values():
                 w.theme = dict(theme)
+                w.apply_opacity()
                 w.update()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.refresh_theme", e)
