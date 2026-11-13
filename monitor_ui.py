@@ -583,12 +583,12 @@ class MonitorUnitWidget(QWidget):
             pad_x = round(PAD_X * s)
             base_w = round(BASE_W * s)
             expanded_w = round(BASE_W_EXPANDED * s)
-            # 扩宽判定只看「当前行真实内容自然宽」（不含白名单预留样本）：
-            # 白名单最长标签在基准档内截断适配，不触发扩宽；只有真实内容
-            # （如运行时超长标签/极值）超基准才扩。扩宽档由管理器统一持有
-            # （用户拍板：一改变就全改变，所有窗格同宽）。
+            # 扩宽判定只看「标签（结构性内容）自然宽」（V16.3 修复突发扩宽）：
+            # 数值/单位是瞬时数据，字号变大后易触顶 250 导致全局扩宽且只升不降
+            # （用户反馈「窗口突然自己扩到350」，与曲线无关）。改为仅当标签
+            # 超基准才扩；数值/单位在固定窗格内截断适配，不触发扩宽。
             expanded = bool(getattr(self.manager, "_width_expanded", False))
-            if not expanded and self._natural_width() > base_w:
+            if not expanded and self._label_natural_width() > base_w:
                 request = getattr(self.manager, "request_expand_width", None)
                 if callable(request):
                     request()
@@ -674,6 +674,18 @@ class MonitorUnitWidget(QWidget):
         w_unit = max((fm.horizontalAdvance(r.unit) for r in rows), default=0)
         return (w_label + w_value + w_unit
                 + 2 * round(COL_GAP * s) + 2 * round(PAD_X * s))
+
+    def _label_natural_width(self) -> int:
+        """仅标签（结构性内容）的自然宽，供扩宽判据（V16.3）。
+
+        数值/单位是瞬时数据，不参与扩宽判定——避免字号变大后数据触顶
+        250 导致全局扩宽且只升不降。标签超宽才扩。
+        """
+        fm = QFontMetrics(self._font())
+        s = self.scale_getter()
+        w_label = max((fm.horizontalAdvance(r.label) for r in self._rows),
+                      default=0)
+        return w_label + 2 * round(COL_GAP * s) + 2 * round(PAD_X * s)
 
     def _value_text(self, row: UnitRow) -> str:
         """B 列数值文本：纯数值（不带单位），走 hub.fmt_value（不自造换算）。
@@ -1024,7 +1036,7 @@ class MonitorUnitWidget(QWidget):
             # （旧「变宽即重算撑宽」已废弃——窗格随数据长大是用户反馈的问题）。
             # 仅当内容真实宽度超基准 → 管理器把全部窗格统一扩宽（一改变就全改变）
             if (not getattr(self.manager, "_width_expanded", False)
-                    and self._natural_width() > round(BASE_W * self.scale_getter())):
+                    and self._label_natural_width() > round(BASE_W * self.scale_getter())):
                 request = getattr(self.manager, "request_expand_width", None)
                 if callable(request):
                     request()
@@ -1672,8 +1684,8 @@ class MonitorWindowManager:
             rows.append(UnitRow(key=key, label=label, value=None,
                                 unit=unit, status=mh.STATUS_STALE))
         widget.set_rows(rows)
-        # 新窗格内容超基准宽 → 全局扩宽（含本窗，所有窗格同宽）
-        if not self._width_expanded and widget._natural_width() > round(
+        # 新窗格标签超基准宽 → 全局扩宽（含本窗，所有窗格同宽；V16.3 仅标签）
+        if not self._width_expanded and widget._label_natural_width() > round(
                 BASE_W * widget.scale_getter()):
             self.request_expand_width()
 

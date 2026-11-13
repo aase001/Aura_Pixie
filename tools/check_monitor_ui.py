@@ -1826,11 +1826,31 @@ def section_k():
     # 用超长 label 的 Metric 走 update_data（label 取自 metric）
     m_long = mh.Metric("cpu.load", "超长标签" * 12, "cpu", 42.0, "%", mh.STATUS_OK)
     wd.update_data(m_long)
-    ok(mgr2._width_expanded, "update_data 超宽 → 全局扩宽")
+    ok(mgr2._width_expanded, "update_data 超长标签 → 全局扩宽")
     ok(wd.width() == mu.BASE_W_EXPANDED and we.width() == mu.BASE_W_EXPANDED,
        "数据路径扩宽两窗同步")
     wd.close()
     we.close()
+
+    # ---- K2b 宽数值/单位不触发扩宽（V16.3 突发扩宽回归：字号15数据触顶不扩窗）----
+    hub2b = FakeHub()
+    mgr2b = mu.MonitorWindowManager(hub2b, **inj)
+    wn = mu.MonitorUnitWidget("net.tx", hub2b, manager=mgr2b, **w_inj)
+    wf = mu.MonitorUnitWidget("fan.cpu.0", hub2b, manager=mgr2b, **w_inj)
+    mgr2b.register_widget("net.tx", wn, ["net.tx"])
+    mgr2b.register_widget("fan.cpu.0", wf, ["fan.cpu.0"])
+    wn.show()
+    wf.show()
+    APP.processEvents()
+    # 15px 下较宽的瞬时数值（网络 KB/s 大值、风扇大数值）→ 不应扩宽
+    wn.update_data(mh.Metric("net.tx", "网络发送速率", "net", 0.999, "MB/s", mh.STATUS_OK))
+    wf.update_data(mh.Metric("fan.cpu.0", "CPU风扇转速", "fan", 99999.0, "RPM", mh.STATUS_OK))
+    APP.processEvents()
+    ok(not mgr2b._width_expanded, "宽数值/单位不触发全局扩宽（仅标签超宽才扩）")
+    ok(wn.width() == mu.BASE_W and wf.width() == mu.BASE_W,
+       "宽数值窗格保持基准宽不突扩")
+    wn.close()
+    wf.close()
 
     # ---- K3 缩放重排：磁吸组缩放后仍贴合对齐 ----
     hub3 = FakeHub()
