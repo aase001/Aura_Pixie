@@ -896,11 +896,15 @@ class MonitorUnitWidget(QWidget):
                                   w_value + gap + w_unit, self._status_h),
                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                            st_text)
-            # 硬件名小字（CPU/GPU/硬盘）：画在参数名正下方，穿透 B/C 列用全本体宽，
-            # 字号自适应——从状态小字字号起逐步缩小，优先保证一行显示完整硬件名，
-            # 缩到下限仍放不下才截断（用户拍板）；颜色走深白浅黑（text_color）。
+            # 硬件名小字（CPU/GPU/硬盘）：画在参数名正下方，默认穿透 B/C 列用
+            # 全本体宽，字号自适应——从状态小字字号起逐步缩小，优先保证一行显示
+            # 完整硬件名，缩到下限仍放不下才截断（用户拍板）；颜色走深白浅黑。
+            # 与状态小字共存时（不可用+有硬件名，如非管理员 CPU 温度）让位到
+            # A 列区域，避免两者同 y 重叠混字（状态小字右对齐占 B/C 列）。
             if row.hardware:
                 hw_full_w = w_label + w_value + w_unit + 2 * gap
+                if not row.available and STATUS_TEXT.get(row.status, ""):
+                    hw_full_w = max(1, w_label)
                 hw_px = max(1, round(FONT_PX * 0.72 * s))
                 hw_min_px = max(1, round(FONT_PX * 0.45 * s))
                 hw_font = QFont(self._font())

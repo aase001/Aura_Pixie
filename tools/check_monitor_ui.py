@@ -558,6 +558,43 @@ def section_e():
     ok(w_d.height() == h1, "减行高度不变")
     w_d.close()
 
+    # ---- E5b 状态小字与硬件名小字同 y 不重叠（不可用+有硬件名场景）----
+    # 回归判据：非管理员 CPU 温度（need_admin + 硬件名）时，状态小字右对齐
+    # B/C 列、硬件名左对齐穿透全宽，旧实现两者同 y 重叠混字。修复后硬件名
+    # 宽度让位状态小字，两矩形水平不相交。直接调 _paint_rows 绘到 QImage
+    # 捕获矩形（绕开 grab/全局 monkeypatch 的节序状态依赖）。
+    from PySide6.QtGui import QPainter as _QP, QImage as _QI
+    from PySide6.QtCore import QRectF as _QRectF
+    w_ov, _, _ = _make_widget()
+    r_ov = _row("cpu.temp", "CPU温度", None, "℃", mh.STATUS_NEED_ADMIN)
+    r_ov.hardware = "11th Gen Intel Core i7-11800H"
+    w_ov.set_rows([r_ov])
+    _img = _QI(300, 100, _QI.Format.Format_ARGB32)
+    _img.fill(0)
+    _p = _QP(_img)
+    _rects = []
+    _orig_dt = _QP.drawText
+
+    def _spy_dt(self, *a, **k):
+        if a and isinstance(a[0], _QRectF):
+            _rects.append((a[0], a[-1] if isinstance(a[-1], str) else ""))
+        return _orig_dt(self, *a, **k)
+
+    _QP.drawText = _spy_dt
+    try:
+        w_ov._paint_rows(_p, _QRectF(0, 0, 300, 100), 1.0)  # noqa: SLF001
+    finally:
+        _QP.drawText = _orig_dt
+        _p.end()
+    _st = [r for r, t in _rects if t == mu.STATUS_TEXT[mh.STATUS_NEED_ADMIN]]
+    _hw = [r for r, t in _rects if t == r_ov.hardware]
+    ok(bool(_st) and bool(_hw), "状态小字与硬件名小字都绘制")
+    if _st and _hw:
+        _sr, _hr = _st[0], _hw[0]
+        ok(_hr.right() <= _sr.left() or _sr.right() <= _hr.left(),
+           f"状态小字与硬件名小字水平不重叠（hw.right={_hr.right():.0f}, st.left={_sr.left():.0f}）")
+    w_ov.close()
+
     # ---- E6 光晕像素：独立态有退晕、吸附态关闭 ----
     # 深色主题，光晕=主题过渡色。grab 真实渲染。
     theme_dark = {"color_start": "#FFFFFF", "color_mid": "#283FFE",
