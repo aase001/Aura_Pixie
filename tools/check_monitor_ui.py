@@ -904,7 +904,7 @@ def section_f():
     ok(diff > 20, f"sparkline 真实渲染产生像素差异（{diff} 像素）")
     w7.close()
 
-    # ---- F11 曲线底部锚定（V16.3：贴窗底、高度≤窗高2/3、不再悬半腰）----
+    # ---- F11 曲线底部锚定（V16.3 贴窗底不再悬半腰；V16.6 高度上限 45px）----
     w8, hub8, mgr8 = _make_widget()
     mgr8.register_widget("cpu.load", w8, ["cpu.load"])
     w8.show()
@@ -932,20 +932,20 @@ def section_f():
         bb = paths[0]
         H = w8.height()
         band_top = H - round(mu.HALO_PX * 1.0) - round(mu.SPARK_BOTTOM_GAP_PX * 1.0) \
-            - round(mu.BASE_H * 1.0 * mu.SPARK_H_RATIO)
+            - round(mu.SPARK_MAX_H_PX * 1.0)
         ok(bb.bottom() >= H - 10,
            f"曲线贴窗底渲染（底 {bb.bottom():.1f} vs 窗高 {H}，旧口径悬半腰必红）")
         ok(bb.top() >= band_top - 2,
-           f"曲线区顶不超窗高2/3上限（顶 {bb.top():.1f} ≥ {band_top - 2}）")
-        ok(bb.height() <= round(mu.BASE_H * 1.0 * mu.SPARK_H_RATIO) + 2,
-           f"曲线区高不超窗高2/3（{bb.height():.1f}px）")
+           f"曲线区顶不超 45px 上限（顶 {bb.top():.1f} ≥ {band_top - 2}）")
+        ok(bb.height() <= round(mu.SPARK_MAX_H_PX * 1.0) + 2,
+           f"曲线区高不超 45px（{bb.height():.1f}px）")
     # 源码看守：绘制顺序=曲线先、文字后（重叠时曲线在文字下层）
     src_f11 = open(os.path.join(root, "monitor_ui.py"), encoding="utf-8").read()
     ok(src_f11.index("self._paint_sparklines(p, body, s)")
        < src_f11.index("self._paint_rows(p, body, s)"),
        "曲线先画文字后画（重叠时曲线在文字下层）")
-    ok("SPARK_H_RATIO" in src_f11 and "SPARK_BOTTOM_GAP_PX" in src_f11,
-       "底部锚定常量在位（固定 SPARK_H 预留已废弃）")
+    ok("SPARK_MAX_H_PX" in src_f11 and "SPARK_BOTTOM_GAP_PX" in src_f11,
+       "底部锚定常量在位（V16.6 固定 45px 上限，旧 SPARK_H_RATIO 已废）")
     w8.close()
 
     # ---- F12 纵坐标阈值分档+回落（V16.3），网络保留动态；字号12 ----
@@ -984,6 +984,46 @@ def section_f():
 
     w.close()
     w2.close()
+
+
+def section_p():
+    """P. 曲线迭代（V16.6）：高度上限 45px（F13）。"""
+    print("[P] 曲线迭代：高度上限/分档读取/渐变填充")
+
+    # ---- F13 曲线高度上限 45px×缩放（V16.6 用户拍板，替代窗高×2/3）----
+    # 失败形态：上限仍按窗高比例算（80px 窗≈53px）时，全幅锯齿曲线
+    # 包围盒高度必超 45；缩放 2.0 时超 90。期望值为手算字面量。
+    from PySide6.QtGui import QPainter
+    for s, cap in ((1.0, 45.0), (2.0, 90.0)):
+        w13, hub13, mgr13 = _make_widget(scale=s)
+        mgr13.register_widget("cpu.load", w13, ["cpu.load"])
+        w13.show()
+        APP.processEvents()
+        for v in (0.0, 100.0, 0.0, 100.0, 0.0, 100.0, 0.0, 100.0):
+            hub13.set_metric("cpu.load", v, mh.STATUS_OK)
+            w13.update_data(hub13.snapshot()["cpu.load"])
+        paths = []
+        orig_dp = QPainter.drawPath
+
+        def _spy_path(self, path):
+            paths.append(path.boundingRect())
+            return orig_dp(self, path)
+
+        QPainter.drawPath = _spy_path
+        try:
+            _grab(w13)
+        finally:
+            QPainter.drawPath = orig_dp
+        ok(len(paths) >= 1, f"缩放{s}：曲线真实绘制（drawPath {len(paths)} 次）")
+        if paths:
+            bb = paths[0]
+            ok(bb.height() <= cap + 2,
+               f"缩放{s}：曲线高≤{cap:.0f}px（实际 {bb.height():.1f}，旧 2/3 口径必红）")
+            H = w13.height()
+            bottom_edge = H - round(mu.HALO_PX * s) - round(mu.SPARK_BOTTOM_GAP_PX * s)
+            ok(abs(bb.bottom() - bottom_edge) <= 2,
+               f"缩放{s}：曲线底仍贴窗底（底 {bb.bottom():.1f} vs 期望 {bottom_edge}）")
+        w13.close()
 
 
 # ---------------------------------------------------------------------------
@@ -3255,5 +3295,6 @@ if __name__ == "__main__":
     section_m()
     section_n()
     section_o()
+    section_p()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)

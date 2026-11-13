@@ -70,10 +70,11 @@ HALO_PX = 4           # 光晕退晕宽（规格 3~5px）
 HALO_ALPHA = 0.15     # 光晕主题色透明度 15%
 BODY_ALPHA = 0.82     # 本体底色透明度（保证文字可读，无深色收边）
 # sparkline 底部锚定（V16.3）：废弃固定 SPARK_H=18 预留——曲线曾悬在
-# 文本行底与窗底之间的半腰。现曲线区贴窗底渲染，高度上限 = 窗高×2/3；
-# 波动大时允许与文字重叠（曲线先画、文字后画，曲线在文字下层）。
+# 文本行底与窗底之间的半腰。现曲线区贴窗底渲染；V16.6 用户拍板：高度
+# 上限改固定 45px×缩放（替代窗高×2/3）。波动大时允许与文字重叠
+# （曲线先画、文字后画，曲线在文字下层）。
 SPARK_BOTTOM_GAP_PX = 2   # 曲线区底边距窗底留白（避圆角裁剪，×缩放）
-SPARK_H_RATIO = 2 / 3     # 曲线区高度上限占窗高比例（80px 窗 ≈ 53px）
+SPARK_MAX_H_PX = 45       # 曲线区高度上限（V16.6，×缩放；旧 SPARK_H_RATIO=2/3 已废）
 FONT_FAMILY = "Microsoft YaHei"
 
 # ---------------------------------------------------------------------------
@@ -929,9 +930,10 @@ class MonitorUnitWidget(QWidget):
         """窗格底部锚定画 QPainterPath 折线：线宽 1px×缩放、当前语义色、
         不填充不画轴、None 点断开。窗口小，全量 update 即可。
 
-        V16.3：曲线区贴窗底（留 2px 避圆角），高度上限 = 窗高×2/3；
-        不再从文本行底起算固定 18px（旧口径曲线悬在半腰）。波动大时
-        允许与文字重叠——本方法先于 _paint_rows 调用，曲线在文字下层。
+        V16.3：曲线区贴窗底（留 2px 避圆角），不再从文本行底起算固定
+        18px（旧口径曲线悬在半腰）。V16.6：高度上限改固定 45px×缩放。
+        波动大时允许与文字重叠——本方法先于 _paint_rows 调用，曲线在
+        文字下层。
         """
         pad_x = round(PAD_X * s)
         w_label, w_value, w_unit = self._col_w
@@ -939,9 +941,9 @@ class MonitorUnitWidget(QWidget):
         x0 = body.left() + pad_x
         full_w = w_label + w_value + w_unit + 2 * gap
         n = max(1, len(self._rows))
-        # 底部锚定：区底 = 本体底边 - 留白；区高 ≤ 窗高×2/3（80px 窗 ≈ 53px）
+        # 底部锚定：区底 = 本体底边 - 留白；区高 ≤ 45px×缩放（V16.6）
         bottom = body.bottom() - round(SPARK_BOTTOM_GAP_PX * s)
-        spark_h = min(round(BASE_H * s * SPARK_H_RATIO),
+        spark_h = min(round(SPARK_MAX_H_PX * s),
                       max(1, round(bottom - body.top())))
         y_base = bottom - spark_h
         pen_w = max(1.0, SPARK_LINE_PX * s)
