@@ -948,37 +948,32 @@ def section_f():
        "底部锚定常量在位（V16.6 固定 45px 上限，旧 SPARK_H_RATIO 已废）")
     w8.close()
 
-    # ---- F12 纵坐标阈值分档+回落（V16.3），网络保留动态；字号12 ----
+    # ---- F12 纵坐标分档读取（V16.6 替代 V16.3 升降+回落），网络保留动态 ----
     ok(mu.FONT_PX == 15, "基础字号 15（V16.3 用户拍板 13→15）")
     w9, hub9, mgr9 = _make_widget()
     mgr9.register_widget("cpu.load", w9, ["cpu.load"])
     r9 = w9._rows[0]
     hub9.set_metric("cpu.load", 30.0, mh.STATUS_OK)
     w9.update_data(hub9.snapshot()["cpu.load"])
-    ok(r9._y_level == 0, "低值(30<绿60) → 纵坐标绿档")
+    ok(w9._spark_y_range(r9) == (0.0, 60.0), "低值(30<绿60) → 绿档区间 [0,60]")
     ok(w9._spark_bounds(r9)[0] == 60, "绿档上界=60")
     hub9.set_metric("cpu.load", 70.0, mh.STATUS_OK)
     w9.update_data(hub9.snapshot()["cpu.load"])
-    ok(r9._y_level == 1, "超绿(70>60) → 升黄档")
+    ok(w9._spark_y_range(r9) == (60.0, 85.0), "超绿(70>60) → 黄档区间 [60,85]")
     hub9.set_metric("cpu.load", 90.0, mh.STATUS_OK)
     w9.update_data(hub9.snapshot()["cpu.load"])
-    ok(r9._y_level == 2, "超黄(90>85) → 升上限")
-    # 回落：低值 + 高值计时超时 → 逐级回落
+    ok(w9._spark_y_range(r9) == (60.0, 100.0), "超黄(90>85) → 红档区间 [60,100]")
+    # 即时跟随：低值立即回绿档（无 5s 回落延迟）
     hub9.set_metric("cpu.load", 10.0, mh.STATUS_OK)
     w9.update_data(hub9.snapshot()["cpu.load"])
-    r9._y_high_since = time.time() - mu.SPARK_Y_DECAY_S - 1
-    w9._update_y_level(r9)
-    ok(r9._y_level == 1, "超时无高值 → 上限回落黄档")
-    r9._y_high_since = time.time() - mu.SPARK_Y_DECAY_S - 1
-    w9._update_y_level(r9)
-    ok(r9._y_level == 0, "再次超时 → 黄档回落绿档")
-    # 网络保留动态：_update_y_level 不改变网络行档位
+    ok(w9._spark_y_range(r9) == (0.0, 60.0), "低值即时回绿档区间（分档读取）")
+    # 网络保留动态：_spark_y_range 返回 None
     w9n, hub9n, mgr9n = _make_widget()
     mgr9n.register_widget("net.tx", w9n, ["net.tx"])
     rn = w9n._rows[0]
     hub9n.set_metric("net.tx", 90.0, mh.STATUS_OK)
     w9n.update_data(hub9n.snapshot()["net.tx"])
-    ok(rn._y_level == 0, "网络行纵坐标不分档（保留动态 min/max）")
+    ok(w9n._spark_y_range(rn) is None, "网络行纵坐标不分档（保留动态 min/max）")
     w9.close()
     w9n.close()
 
@@ -1024,6 +1019,66 @@ def section_p():
             ok(abs(bb.bottom() - bottom_edge) <= 2,
                f"缩放{s}：曲线底仍贴窗底（底 {bb.bottom():.1f} vs 期望 {bottom_edge}）")
         w13.close()
+
+    # ---- F14 纵坐标分档读取（V16.6）：绿[0,绿上界]/黄[绿上界,黄上界]/红[绿上界,红上界] ----
+    # 失败形态：仍按旧口径 lo=0/hi=档上界归一化时，黄/红档映射坐标必错；
+    # 仍带 5s 延迟回落时，低值即时读取断言必红。期望坐标为手算字面量。
+    w14, hub14, mgr14 = _make_widget()
+    mgr14.register_widget("cpu.load", w14, ["cpu.load"])
+    r14 = w14._rows[0]
+    ok(w14._spark_y_range(r14) is None, "无读数（初始 stale/None）→ 无区间")
+    hub14.set_metric("cpu.load", 30.0, mh.STATUS_OK)
+    w14.update_data(hub14.snapshot()["cpu.load"])
+    ok(w14._spark_y_range(r14) == (0.0, 60.0),
+       "低值绿档区间 [0,60]（cpu.load 默认阈值 60/85/100）")
+    hub14.set_metric("cpu.load", 70.0, mh.STATUS_OK)
+    w14.update_data(hub14.snapshot()["cpu.load"])
+    ok(w14._spark_y_range(r14) == (60.0, 85.0), "黄档区间 [60,85]（下界=绿档上界）")
+    hub14.set_metric("cpu.load", 90.0, mh.STATUS_OK)
+    w14.update_data(hub14.snapshot()["cpu.load"])
+    ok(w14._spark_y_range(r14) == (60.0, 100.0), "红档区间 [60,100]（下界仍=绿档上界）")
+    hub14.set_metric("cpu.load", 30.0, mh.STATUS_OK)
+    w14.update_data(hub14.snapshot()["cpu.load"])
+    ok(w14._spark_y_range(r14) == (0.0, 60.0), "低值即时回绿档（分档读取，无 5s 延迟）")
+    # 渲染映射：历史 [30,70,90]，当前 90 → 红档 [60,100]，
+    # norm=(v-60)/40 → [0,0.25,0.75]，曲线区 45px、顶=29、底=74（手算）
+    for v in (30.0, 70.0, 90.0):
+        hub14.set_metric("cpu.load", v, mh.STATUS_OK)
+        w14.update_data(hub14.snapshot()["cpu.load"])
+    w14.show()
+    APP.processEvents()
+    from PySide6.QtGui import QPainterPath as _QPP14
+    pts = []
+    orig_lt = _QPP14.lineTo
+    orig_mt = _QPP14.moveTo
+
+    def _spy_lt(self, *a):
+        x, y = (a[0], a[1]) if len(a) == 2 else (a[0].x(), a[0].y())
+        pts.append((x, y))
+        return orig_lt(self, *a)
+
+    def _spy_mt(self, *a):
+        x, y = (a[0], a[1]) if len(a) == 2 else (a[0].x(), a[0].y())
+        pts.append((x, y))
+        return orig_mt(self, *a)
+
+    _QPP14.lineTo = _spy_lt
+    _QPP14.moveTo = _spy_mt
+    try:
+        _grab(w14)
+    finally:
+        _QPP14.lineTo = orig_lt
+        _QPP14.moveTo = orig_mt
+    uniq = sorted({round(y, 2) for _x, y in pts})
+    ok(len(pts) >= 3, f"曲线点真实绘制（{len(pts)} 点）")
+    ok(len(uniq) == 3 and all(abs(a - b) <= 0.6 for a, b in zip(uniq, (40.25, 62.75, 74.0))),
+       f"红档 [60,100] 映射正确（y={uniq}，期望 40.25/62.75/74；旧 lo=0 口径必红）")
+    # 网络行保留动态 min/max：_spark_y_range 返回 None
+    w14n, hub14n, mgr14n = _make_widget()
+    mgr14n.register_widget("net.tx", w14n, ["net.tx"])
+    ok(w14n._spark_y_range(w14n._rows[0]) is None, "网络行不分档（保留动态 min/max）")
+    w14.close()
+    w14n.close()
 
 
 # ---------------------------------------------------------------------------

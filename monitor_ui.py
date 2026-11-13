@@ -115,8 +115,8 @@ def is_spark_excluded(key: str) -> bool:
                 if mid.isdigit():
                     return True
     return False
-# V16.3 纵坐标阈值分档：高值档持续该秒数无高值则回落（防曲线剧烈跳变）
-SPARK_Y_DECAY_S = 5.0
+# V16.6：纵坐标改分档读取（按当前值即时取档区间，无 5s 回落延迟，
+# 旧 SPARK_Y_DECAY_S 已移除）；高负载呼吸仍按最高阈值段判定。
 BREATH_HZ = 1.0       # 高负载呼吸频率 1Hz
 BREATH_ALPHA_MIN = 0.3
 BREATH_ALPHA_MAX = 1.0
@@ -451,10 +451,8 @@ class UnitRow:
     total: Optional[float] = None  # 容量总量（与 value 同单位；用量类按比例配色，V16.2）
     history: deque = field(
         default_factory=lambda: deque(maxlen=SPARKLINE_POINTS))
-    # V16.3 纵坐标阈值分档状态：0=绿档 1=黄档 2=上限；_y_high_since 记录
-    # 最近一次高值时刻（time.time），超 SPARK_Y_DECAY_S 无高值则回落。
-    _y_level: int = 0
-    _y_high_since: float = 0.0
+    # V16.6：纵坐标改分档读取（渲染时按当前值即时取档，见 _spark_y_range），
+    # 旧 _y_level/_y_high_since 升降状态已移除。
 
     @property
     def available(self) -> bool:
@@ -968,8 +966,8 @@ class MonitorUnitWidget(QWidget):
             pen = QPen(color, pen_w)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
-            # 归一化（V16.3）：网络保留动态 min/max；其余用阈值分档固定
-            # 上界（绿/黄/上限），lo=0 → 低值波动小、不剧烈跳变。全 None 不画。
+            # 归一化（V16.6 分档读取）：网络保留动态 min/max；其余按当前档
+            # 区间 [lo,hi] 映射（绿[0,g]/黄[g,y]/红[g,t]），越界钳曲线区边缘。
             vals = [v for v in hist if v is not None]
             if not vals:
                 continue
@@ -978,10 +976,10 @@ class MonitorUnitWidget(QWidget):
                 span = (hi - lo) or 1.0
                 norm = lambda v: (v - lo) / span  # noqa: E731
             else:
-                g, y, t = self._spark_bounds(row)
-                hi = (g, y, t)[min(row._y_level, 2)]
-                span = hi or 1.0
-                norm = lambda v: min(max(v / span, 0.0), 1.0)  # noqa: E731
+                rng = self._spark_y_range(row)
+                lo, hi = rng if rng is not None else (0.0, 1.0)
+                span = (hi - lo) or 1.0
+                norm = lambda v: min(max((v - lo) / span, 0.0), 1.0)  # noqa: E731
             path = QPainterPath()
             started = False
             for j, v in enumerate(hist):
@@ -1035,34 +1033,24 @@ class MonitorUnitWidget(QWidget):
         t = th[-1]["max"] if th else y
         return g, y, t
 
-    def _update_y_level(self, row: UnitRow) -> None:
-        """V16.3 纵坐标阈值分档 + 高值回落（网络发送/接收保留动态不在此列）。
+    def _spark_y_range(self, row: UnitRow) -> Optional[tuple]:
+        """V16.6 分档读取：按当前值所在档直接取纵坐标区间（即时跟随，无回落延迟）。
 
-        默认绿档；值超绿档升黄档、超黄档升上限；高值档持续
-        SPARK_Y_DECAY_S 无高值则逐级回落。纵坐标上界=当前档边界，
-        未超档不抬升 → 低值曲线波动小、不剧烈跳变。
+        绿档 → [0, 绿档上界]；黄档 → [绿档上界, 黄档上界]；
+        红档 → [绿档上界, 红档上界]（下界仍是绿档上界，用户拍板非笔误）。
+        网络发送/接收返回 None（保留动态 min/max）；无读数返回 None。
         """
         if row.key in ("net.tx", "net.rx"):
-            return  # 网络保留动态 min/max
+            return None
         v = self._color_value(row)
         if v is None:
-            return
-        g, y, _t = self._spark_bounds(row)
+            return None
+        g, y, t = self._spark_bounds(row)
         if v > y:
-            req = 2
-        elif v > g:
-            req = 1
-        else:
-            req = 0
-        now = time.time()
-        if req > row._y_level:
-            row._y_level = req
-            row._y_high_since = now
-        elif req == row._y_level and req > 0:
-            row._y_high_since = now   # 持续高值，刷新回落计时
-        elif row._y_level > 0 and now - row._y_high_since > SPARK_Y_DECAY_S:
-            row._y_level -= 1         # 超时无高值 → 逐级回落
-            row._y_high_since = now
+            return (g, t)
+        if v > g:
+            return (g, y)
+        return (0.0, g)
 
     def _row_alpha(self, row: UnitRow) -> float:
         """高负载呼吸：进入最高阈值段 → 1Hz 正弦 0.3↔1.0；否则恒 1.0。
@@ -1101,7 +1089,7 @@ class MonitorUnitWidget(QWidget):
             row.total = getattr(metric, "total", None)   # 用量类按比例配色（V16.2）
             # history：可用记值，否则 None（断线；网速记 canonical MB/s）
             row.history.append(metric.value if row.available else None)
-            self._update_y_level(row)   # V16.3 纵坐标阈值分档+回落
+            # V16.6：纵坐标分档读取在渲染时按当前值即时取档（_spark_y_range）
             self._refresh_breathing()
             # 网速 KB↔MB 切换 → 单位列宽变化，重算布局（其余数据跳动不重算）
             if self._display_unit(row) != old_unit:
