@@ -108,28 +108,30 @@ class Metric:
 METRIC_DEFS: list[tuple[str, str, str, str]] = [
     # sys.uptime（系统运行时间）已废弃（用户拍板）：不再列入监视白名单；
     # psutil 采集与 uptime()/uptime_fmt() 能力保留，未来需要可恢复。
-    ("cpu.load",        "CPU使用率",           "cpu",   "%"),
+    ("cpu.load",        "CPU利用",             "cpu",   "%"),
     ("cpu.freq",        "CPU频率",             "cpu",   "GHz"),
     ("cpu.temp",        "CPU温度",             "cpu",   "℃"),
     ("cpu.power",       "CPU功耗",             "cpu",   "W"),
-    ("mem.load",        "内存使用率",          "mem",   "%"),
+    ("mem.load",        "内存利用",            "mem",   "%"),
     ("mem.used",        "内存用量",            "mem",   "GB"),
-    ("gpu_i.load",      "GPU使用率",           "gpu_i", "%"),
+    ("gpu_i.load",      "GPU利用",             "gpu_i", "%"),
     ("gpu_i.shared",    "共享内存用量",        "gpu_i", "GB"),
     ("net.tx",          "网络发送速率",        "net",   "MB/s"),
     ("net.rx",          "网络接收速率",        "net",   "MB/s"),
     # 动态键（按实例数量展开）：gpu_d.{i}.* / disk.{i}.temp / disk.{i}.usage / fan.{slot}.{i}
 ]
 
-# 独显全量枚举（用户拍板，参照硬盘）：每块独显 4 参数，多卡直接加设置项进组
-_GPU_D_DEFS = [("gpu_d.{i}.load",      "GPU使用率",     "gpu_d", "%"),
+# 独显全量枚举（用户拍板，参照硬盘）：每块独显 5 参数，多卡直接加设置项进组
+# 顺序即 UI 顺序：GPU功耗 紧跟 GPU温度 下方（V16.3 用户拍板，仅独显有此参数）
+_GPU_D_DEFS = [("gpu_d.{i}.load",      "GPU利用",       "gpu_d", "%"),
                ("gpu_d.{i}.temp",      "GPU温度",       "gpu_d", "℃"),
-               ("gpu_d.{i}.vram_load", "GPU显存使用率", "gpu_d", "%"),
+               ("gpu_d.{i}.power",     "GPU功耗",       "gpu_d", "W"),
+               ("gpu_d.{i}.vram_load", "GPU显存利用",   "gpu_d", "%"),
                ("gpu_d.{i}.vram_used", "GPU显存用量",   "gpu_d", "GB")]
-_GPU_D_SUFFIX = {"load": "使用率", "temp": "温度",
-                 "vram_load": "显存使用率", "vram_used": "显存用量"}
+_GPU_D_SUFFIX = {"load": "利用", "temp": "温度", "power": "功耗",
+                 "vram_load": "显存利用", "vram_used": "显存用量"}
 _DISK_DEFS = [("disk.{i}.temp", "硬盘温度", "disk", "℃"),
-              ("disk.{i}.usage", "硬盘使用率", "disk", "%")]
+              ("disk.{i}.usage", "硬盘占用空间", "disk", "%")]
 _FAN_DEFS = [("fan.{slot}.{i}", "风扇转速", "fan", "RPM")]
 _FAN_SLOTS = ("cpu", "gpu_d", "mobo")  # 主板风扇；CPU/GPU 风扇按命名启发归类
 
@@ -357,7 +359,7 @@ class _MapResult:
     fixed: dict[str, tuple[float, str]] = field(default_factory=dict)  # key -> (value, sensor)
     shared_total: Optional[float] = None  # 核显共享内存总量 GB（D3D Shared Memory Total，V16.2）
     disks: list[dict] = field(default_factory=list)   # 每盘: {name, temp, usage_lhm, total_gb}
-    gpus_d: list[dict] = field(default_factory=list)  # 每独显: {name, load, temp, vram_load, vram_used}
+    gpus_d: list[dict] = field(default_factory=list)  # 每独显: {name, load, temp, power, vram_load, vram_used}
     fans: list[dict] = field(default_factory=list)    # {slot, name, value, hw}
     hw_names: dict = field(default_factory=dict)      # 硬件名: cpu / gpu_i / disk.{i}（窗格小字）
 
@@ -438,6 +440,7 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
                     continue
                 while len(r.gpus_d) <= idx:
                     r.gpus_d.append({"name": "", "load": None, "temp": None,
+                                     "power": None,
                                      "vram_load": None, "vram_used": None,
                                      "vram_total": None})
                 g = r.gpus_d[idx]
@@ -446,6 +449,11 @@ def map_frame(frame: dict, meta: Optional[dict]) -> _MapResult:
                     g["load"] = val
                 elif sen == "Temperature" and name == "GPU Core":
                     g["temp"] = val
+                elif sen == "Power" and name.startswith("GPU"):
+                    # GPU功耗（V16.3 新增，仅独显）：NVIDIA「GPU Power」、
+                    # AMD「GPU Core」等；多路取最大（整卡功耗口径）
+                    if g["power"] is None or val > g["power"]:
+                        g["power"] = val
                 elif sen == "Load" and name == "GPU Memory":
                     g["vram_load"] = val
                 elif sen == "SmallData" and name == "GPU Memory Used":
@@ -919,17 +927,17 @@ class MetricsHub:
         # 共享内存总量（D3D Shared Memory Total，V16.2 按比例配色）
         out["gpu_i.shared"].total = mr.shared_total
 
-        # ---- 独显（全量枚举，参照硬盘）：每卡 4 参数 gpu_d.{i}.* ----
+        # ---- 独显（全量枚举，参照硬盘）：每卡 5 参数 gpu_d.{i}.* ----
         gpus_d = mr.gpus_d
         if not gpus_d:
             # 无独显：产出卡0占位（无值也罗列，换机可用），状态同侧车口径
             st = st_sidecar if not sidecar_ok else STATUS_UNSUPPORTED
-            for suffix in ("load", "temp", "vram_load", "vram_used"):
+            for suffix in ("load", "temp", "power", "vram_load", "vram_used"):
                 k = f"gpu_d.0.{suffix}"
                 out[k] = mk(k, None, "sidecar", st)
         for i, g in enumerate(gpus_d):
             st = st_sidecar if not sidecar_ok else STATUS_OK
-            for suffix in ("load", "temp", "vram_load", "vram_used"):
+            for suffix in ("load", "temp", "power", "vram_load", "vram_used"):
                 k = f"gpu_d.{i}.{suffix}"
                 out[k] = mk(k, g.get(suffix), "sidecar", st)
             # 显存总量（GPU Memory Total，V16.2 按比例配色）
@@ -1093,7 +1101,8 @@ def _def(key: str) -> tuple[str, str, str, str]:
     if (len(parts) == 3 and parts[0] == "gpu_d" and parts[1].isdigit()
             and parts[2] in _GPU_D_SUFFIX):
         label = "GPU" + _GPU_D_SUFFIX[parts[2]]
-        unit = {"load": "%", "temp": "℃", "vram_load": "%", "vram_used": "GB"}[parts[2]]
+        unit = {"load": "%", "temp": "℃", "power": "W",
+                "vram_load": "%", "vram_used": "GB"}[parts[2]]
         return (key, label, "gpu_d", unit)
     for tpl, label, group, unit in _DISK_DEFS:
         # 按完整模板匹配：disk.{i}.temp / disk.{i}.usage 两个模板头都是 disk，
@@ -1141,7 +1150,7 @@ if __name__ == "__main__":
         m = snap.get(k)
         print(f"{m.label:<16} {MetricsHub.fmt(m):>12}   [{m.status}]  {m.hardware}")
     for g in hub.list_gpus_d():
-        for suffix in ("load", "temp", "vram_load", "vram_used"):
+        for suffix in ("load", "temp", "power", "vram_load", "vram_used"):
             m = snap.get(f"gpu_d.{g['index']}.{suffix}")
             if m:
                 print(f"{m.label:<16} {MetricsHub.fmt(m):>12}   [{m.status}]  {m.hardware}")

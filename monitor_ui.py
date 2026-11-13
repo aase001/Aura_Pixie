@@ -80,6 +80,37 @@ FONT_FAMILY = "Microsoft YaHei"
 # 阶段 2 数据可视化常量
 # ---------------------------------------------------------------------------
 SPARK_LINE_PX = 1     # sparkline 线宽（乘缩放）
+# ---------------------------------------------------------------------------
+# 曲线排除清单（V16.3 用户拍板：维护成列表，新指标直接往里加）
+# 命中者不画曲线（数据层 history 照常记录，仅渲染跳过）。
+# 两种写法：
+#   · 完整键：如 "gpu_i.shared" —— 精确匹配
+#   · 模板键：如 "disk.{i}.usage" —— {i} 匹配任意实例序号（多盘/多卡通吃）
+# 口径：波动极小或近乎横线、曲线无信息量的指标才排除。
+# ---------------------------------------------------------------------------
+SPARK_EXCLUDE_KEYS: tuple[str, ...] = (
+    "disk.{i}.usage",     # 硬盘占用空间（容量占比，波动极小）
+    "disk.{i}.temp",      # 硬盘温度（V16.3 新增）
+    "gpu_i.shared",       # 共享内存用量（V16.3 新增）
+    "gpu_d.{i}.vram_used",  # GPU显存用量（V16.3 新增）
+)
+
+
+def is_spark_excluded(key: str) -> bool:
+    """该指标是否不画曲线（按 SPARK_EXCLUDE_KEYS 清单判定，不看标签文本）。
+
+    模板键 {i} 匹配任意数字实例序号；完整键精确匹配。新增排除项只改清单。
+    """
+    for pat in SPARK_EXCLUDE_KEYS:
+        if pat == key:
+            return True
+        if "{i}" in pat:
+            head, _, tail = pat.partition("{i}")
+            if key.startswith(head) and key.endswith(tail):
+                mid = key[len(head):len(key) - len(tail)] if tail else key[len(head):]
+                if mid.isdigit():
+                    return True
+    return False
 # V16.3 纵坐标阈值分档：高值档持续该秒数无高值则回落（防曲线剧烈跳变）
 SPARK_Y_DECAY_S = 5.0
 BREATH_HZ = 1.0       # 高负载呼吸频率 1Hz
@@ -429,7 +460,8 @@ def default_monitor_config() -> dict:
     """
     units = {key: {"enabled": False, "threshold": []}
              for key, _label, _group, _unit in mh.METRIC_DEFS}
-    for key in ("gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+    for key in ("gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
+                "gpu_d.0.vram_load", "gpu_d.0.vram_used",
                 "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0",
                 "disk.0.temp", "disk.0.usage"):
         units[key] = {"enabled": False, "threshold": []}
@@ -613,7 +645,7 @@ class MonitorUnitWidget(QWidget):
                            default=0)
             label_samples = [label for _k, label, _g, _u in mh.METRIC_DEFS]
             label_samples += [mh._def(k)[1] for k in
-                              ("gpu_d.0.load", "gpu_d.0.temp",
+                              ("gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
                                "gpu_d.0.vram_load", "gpu_d.0.vram_used",
                                "disk.0.temp", "disk.0.usage",
                                "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")]
@@ -882,12 +914,10 @@ class MonitorUnitWidget(QWidget):
             # 每行 sparkline 占 spark_h/n 高，水平铺满内容宽
             band_h = spark_h / n
             top = y_base + i * band_h
-            # 仅硬盘使用率（容量占比）波动极小、曲线近乎横线无信息量，不绘制
-            # （V16.2 用户拍板收窄范围：CPU/内存/GPU/显存使用率恢复画曲线）。
-            # 按键判定不依赖标签文本；数据层 history 照常记录，仅渲染跳过。
-            _kp = row.key.split(".")
-            if (len(_kp) == 3 and _kp[0] == "disk"
-                    and _kp[1].isdigit() and _kp[2] == "usage"):
+            # 曲线排除清单（V16.3 用户拍板：维护成 SPARK_EXCLUDE_KEYS 列表，
+            # 新指标直接加进去）。按键判定不依赖标签文本；数据层 history
+            # 照常记录，仅渲染跳过。
+            if is_spark_excluded(row.key):
                 continue
             hist = list(row.history)
             if len(hist) < 2:
@@ -1737,7 +1767,7 @@ class MonitorWindowManager:
         keys = set()
         for g in gpus_d:
             i = g["index"]
-            for suffix in ("load", "temp", "vram_load", "vram_used"):
+            for suffix in ("load", "temp", "power", "vram_load", "vram_used"):
                 keys.add(f"gpu_d.{i}.{suffix}")
         new = keys - self._known_gpu_d_keys
         if new:

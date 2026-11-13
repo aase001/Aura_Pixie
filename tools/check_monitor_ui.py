@@ -117,7 +117,7 @@ class FakeHub:
             d = mh._def(key)   # 独显全量枚举动态键（复用真实定义还原）
             return d[1], d[2], d[3]
         if parts[0] == "disk" and len(parts) == 3:
-            label = "硬盘温度" if parts[2] == "temp" else "硬盘使用率"
+            label = "硬盘温度" if parts[2] == "temp" else "硬盘占用空间"
             return label, "disk", ("℃" if parts[2] == "temp" else "%")
         if parts[0] == "fan" and len(parts) == 3:
             return mh._def(key)[1], "fan", "RPM"
@@ -241,7 +241,8 @@ def section_a():
     ok(cfg["layout"] == {}, "默认 layout 空")
     ok(cfg["enabled"] is False, "监视总开关默认不勾选")
     _fixed = {k for k, *_ in mh.METRIC_DEFS}
-    _dyn = {"gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+    _dyn = {"gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
+            "gpu_d.0.vram_load", "gpu_d.0.vram_used",
             "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
     ok(set(cfg["units"]) == _fixed | _dyn,
        "units 键全集=白名单固定键+独显卡0+风扇三槽+硬盘0（参数键化）")
@@ -294,7 +295,7 @@ def section_b():
        {"key", "label", "group", "value", "unit", "status", "source", "ts",
         "hardware", "total"},
        "Metric 十字段齐全（含 hardware/total，V16.2）")
-    ok(m.label == "CPU使用率" and m.group == "cpu" and m.unit == "%",
+    ok(m.label == "CPU利用" and m.group == "cpu" and m.unit == "%",
        "label/group/unit 取自白名单定义（不自造名称）")
     ok(m.source == "fake" and m.ts > 0, "source/ts 有值")
     ok(m.available is True, "available 属性与真实定义一致")
@@ -413,7 +414,8 @@ def section_c():
 
     # 白名单键全集与后端定义一致（UI 不得私增/删指标）+ 动态默认键
     _expect = {k for k, *_ in mh.METRIC_DEFS} | {
-        "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+        "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
+        "gpu_d.0.vram_load", "gpu_d.0.vram_used",
         "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
     ok(set(mu.default_monitor_config()["units"]) == _expect,
        "配置 units 与 METRIC_DEFS+动态默认键同步（加键须两侧同改）")
@@ -502,9 +504,9 @@ def section_e():
     # 扩宽档（250px）下白名单最长标签与典型值可完整预留不截断
     w_exp, _, mgr_exp = _make_widget()
     mgr_exp._width_expanded = True
-    w_exp.set_rows([_row("gpu_d.vram_load", "GPU显存使用率", 88.8, "%")])
+    w_exp.set_rows([_row("gpu_d.vram_load", "GPU显存利用", 88.8, "%")])
     ok(w_exp.width() == mu.BASE_W_EXPANDED, f"扩宽档窗格 {mu.BASE_W_EXPANDED}px")
-    ok(w_exp._col_w[0] >= fm.horizontalAdvance("GPU显存使用率"),
+    ok(w_exp._col_w[0] >= fm.horizontalAdvance("GPU显存利用"),
        "扩宽档 A 列完整显示当前行最长标签")
     # 当前行真实内容（88.8）必须完整显示不截断（列宽优先保全当前行）
     ok(w_exp._col_w[1] >= fm.horizontalAdvance(w_exp._value_text(w_exp._rows[0])),
@@ -1381,7 +1383,8 @@ def section_i():
        and d["monitor"]["idle_stop_sec"] == 300,
        "monitor 默认拉取/闲置参数")
     _expect = {k for k, *_ in mh.METRIC_DEFS} | {
-        "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+        "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
+        "gpu_d.0.vram_load", "gpu_d.0.vram_used",
         "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
     ok(set(d["monitor"]["units"]) == _expect,
        "monitor units 键全集=白名单+动态默认键")
@@ -1565,7 +1568,8 @@ def section_j():
         ok(dlg.chk_enable.text() == "启用资源监视", "总开关文案")
         ok(not dlg.chk_enable.isChecked(), "总开关默认不勾选")
         _expect = {k for k, *_ in mh.METRIC_DEFS} | {
-            "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+            "gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
+            "gpu_d.0.vram_load", "gpu_d.0.vram_used",
             "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0", "disk.0.temp", "disk.0.usage"}
         ok(set(dlg._param_checks) == _expect,
            f"参数复选框齐全（{len(dlg._param_checks)} 项）")
@@ -1635,6 +1639,23 @@ def section_j():
         # J7c 恒定中灰（V16.2 用户拍板）：不随主题变，深浅底都可见（改坏会红）
         ok(all("#808080" in lab.styleSheet() for lab in dlg._hw_labels.values()),
            "设备名颜色恒定中灰 #808080（不依赖主题）")
+        # J7d 设备名在参数名右侧同一行、起始对齐一列（V16.3 用户拍板）
+        dlg.show()
+        APP.processEvents()
+        _same_row, _xs = [], set()
+        for _k, _lab in dlg._hw_labels.items():
+            _chk = dlg._param_checks[_k]
+            _same_row.append(_lab.parent() is _chk.parent())   # 同一行容器
+            _xs.add(_lab.mapTo(dlg, _lab.rect().topLeft()).x())
+        ok(all(_same_row), "设备名与参数名同行（右侧，不再在下方）")
+        ok(len(_xs) == 1, f"设备名起始位置对齐成一列（实得 {_xs}）")
+        _lab0 = dlg._hw_labels["cpu.load"]
+        _chk0 = dlg._param_checks["cpu.load"]
+        ok(_lab0.mapTo(dlg, _lab0.rect().topLeft()).x()
+           > _chk0.mapTo(dlg, _chk0.rect().topLeft()).x(),
+           "设备名在参数名右侧")
+        dlg.hide()
+        APP.processEvents()
         # J8 设备名重载：注入硬件名 → 刷新为新名（改坏会红）
         fake.set_metric("cpu.load", 10.0, mh.STATUS_OK)
         fake._frame["cpu.load"].hardware = "i7-TEST"
@@ -2112,18 +2133,31 @@ def section_l():
 
     _vals = (10.0, 40.0, 70.0, 30.0, 90.0, 50.0)
     d_disk = _spark_draw_calls("disk.0.usage", _vals)
-    ok(d_disk == 0, f"硬盘使用率不画曲线（drawPath 0 次，实得 {d_disk}）")
+    ok(d_disk == 0, f"硬盘占用空间不画曲线（drawPath 0 次，实得 {d_disk}）")
     d_cpu = _spark_draw_calls("cpu.load", _vals)
-    ok(d_cpu >= 1, f"CPU使用率恢复画曲线（drawPath {d_cpu} 次）")
+    ok(d_cpu >= 1, f"CPU利用画曲线（drawPath {d_cpu} 次）")
     d_mem = _spark_draw_calls("mem.load", _vals)
-    ok(d_mem >= 1, f"内存使用率恢复画曲线（drawPath {d_mem} 次）")
+    ok(d_mem >= 1, f"内存利用画曲线（drawPath {d_mem} 次）")
     d_temp = _spark_draw_calls("cpu.temp", (50.0, 60.0, 70.0, 65.0, 80.0, 55.0))
     ok(d_temp >= 1, f"温度画曲线（drawPath {d_temp} 次）")
-    # 源码看守：跳过条件按键判定 disk.{i}.usage，不再按标签「使用率」一刀切
+    # V16.3 新增排除项：硬盘温度 / 共享内存用量 / GPU显存用量
+    for _k in ("disk.0.temp", "disk.1.temp", "gpu_i.shared", "gpu_d.0.vram_used"):
+        _d = _spark_draw_calls(_k, _vals)
+        ok(_d == 0, f"{_k} 不画曲线（排除清单，drawPath {_d} 次）")
+    # 排除清单可维护性：完整键 + 模板键 {i} 匹配任意实例序号
+    ok(mu.is_spark_excluded("disk.7.usage") and mu.is_spark_excluded("disk.12.temp"),
+       "模板键 {i} 匹配任意盘号")
+    ok(mu.is_spark_excluded("gpu_d.3.vram_used"), "模板键匹配任意卡号")
+    ok(not mu.is_spark_excluded("gpu_d.0.vram_load"), "显存利用仍画曲线")
+    ok(not mu.is_spark_excluded("cpu.load") and not mu.is_spark_excluded("net.tx"),
+       "未列入者照常画曲线")
+    ok(isinstance(mu.SPARK_EXCLUDE_KEYS, tuple) and len(mu.SPARK_EXCLUDE_KEYS) >= 4,
+       "排除清单为可维护列表（新指标直接加）")
+    # 源码看守：跳过走清单判定，不再硬编码 disk usage、也不按标签一刀切
     _src_l2 = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "monitor_ui.py"), encoding="utf-8").read()
-    ok('_kp[2] == "usage"' in _src_l2 and '"使用率" in row.label' not in _src_l2,
-       "曲线跳过仅按硬盘使用率键判定（源码看守）")
+    ok("is_spark_excluded(row.key)" in _src_l2 and "SPARK_EXCLUDE_KEYS" in _src_l2,
+       "曲线跳过走可维护排除清单（源码看守）")
 
     # ---- L3 单对单：独立窗 A 吸独立窗 B → 同组 2 成员 ----
     hub3 = FakeHub()
@@ -2510,10 +2544,18 @@ def section_n():
     w.close()
 
     # ---- N2 独显全量枚举：动态键定义 + 多卡标签 ----
-    ok(mh._def("gpu_d.0.load")[1] == "GPU使用率", "独显卡0标签（V16.2 无括号无卡号）")
-    ok(mh._def("gpu_d.1.load")[1] == "GPU使用率", "独显卡1标签不带卡号（设备名区分）")
+    ok(mh._def("gpu_d.0.load")[1] == "GPU利用", "独显卡0标签（V16.2 无括号无卡号）")
+    ok(mh._def("gpu_d.1.load")[1] == "GPU利用", "独显卡1标签不带卡号（设备名区分）")
     ok(mh._def("gpu_d.0.vram_used")[3] == "GB", "独显显存用量单位 GB")
     ok(mh._def("gpu_d.2.temp")[1] == "GPU温度", "独显卡2温度标签（V16.2 无后缀）")
+    # V16.3 新增独显功耗：仅独显有、单位 W、多卡枚举、排在温度下方
+    ok(mh._def("gpu_d.0.power")[1] == "GPU功耗", "独显功耗标签")
+    ok(mh._def("gpu_d.1.power")[3] == "W", "独显功耗单位 W（多卡同口径）")
+    ok("gpu_i.power" not in {k for k, *_ in mh.METRIC_DEFS},
+       "核显无功耗参数（仅独显）")
+    _gd_order = [k for k, *_ in mh._GPU_D_DEFS]
+    ok(_gd_order.index("gpu_d.{i}.power") == _gd_order.index("gpu_d.{i}.temp") + 1,
+       "GPU功耗紧跟 GPU温度 下方")
     # 快照多卡产出
     hub2 = FakeHub()
     for i in range(2):

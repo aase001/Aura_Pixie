@@ -2749,7 +2749,10 @@ CODE_HELP_TEXT = (
     "  · 勾选即实时弹出对应窗格，取消即实时关闭（以界面总开关状态为准）。\n"
     "  · 每个参数一个独立窗格；无值参数也罗列（换台式机可用），默认全不勾选。\n"
     "  · GPU独显与硬盘按实际硬件全量枚举：多独显/多盘自动增加参数项。\n"
-    "  · 参数名下方小字标注对应设备名（每次运行实时读取，换机自动更新）。\n\n"
+    "  · GPU独显每卡 5 项：GPU利用 / GPU温度 / GPU功耗 / GPU显存利用 /\n"
+    "    GPU显存用量（功耗仅独显有，核显无此项）。\n"
+    "  · 参数名右侧同一行标注对应设备名，各行设备名起始位置对齐成一列\n"
+    "    （每次运行实时读取，换机自动更新）。\n\n"
     "■ 重置按钮（「保存」左侧）\n"
     "  · 一键取消勾选全部参数并清除窗口位置记忆（总开关不受影响）。\n"
     "  · 重置后再次勾选参数，窗格统一在球体左边重叠显示，由你手动拖开/\n"
@@ -2759,8 +2762,8 @@ CODE_HELP_TEXT = (
     "    进入最高阈值段时数值与曲线 1Hz 呼吸闪烁。\n"
     "  · 内存/共享内存/显存用量按占总量的比例定绿黄红（如 64G 用 16G 为绿）。\n"
     "  · 历史曲线（约 1 分钟）贴窗格底部渲染，高度不超过窗格三分之二；\n"
-    "    波动大时可与文字重叠（曲线在文字下层）。仅硬盘使用率（容量占比）\n"
-    "    波动极小不画曲线。\n"
+    "    波动大时可与文字重叠（曲线在文字下层）。以下四项波动极小不画曲线：\n"
+    "    硬盘占用空间、硬盘温度、共享内存用量、GPU显存用量。\n"
     "  · CPU/GPU/硬盘窗格在参数名下方标注硬件名（小字，自动缩字号保证一行显示）。\n"
     "  · 网速不足 1MB/s 自动切 KB/s 显示。\n"
     "  · 无读数指标灰显 + 状态小字（需管理员/驱动、断流、不可用、采集器缺失）。\n\n"
@@ -5028,11 +5031,11 @@ _MONITOR_SCALE_APPLIED = None  # 上次已生效的监视缩放因子（变化�
 # 窗格键 = 指标 key；设置窗复选框与配置 units 均按此键。
 _MONITOR_PARAM_KEYS = tuple(k for k, _label, _group, _unit in monitor_hub.METRIC_DEFS)
 _MONITOR_FAN_KEYS = ("fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0")
-_GPU_D_SUFFIXES = ("load", "temp", "vram_load", "vram_used")
+_GPU_D_SUFFIXES = ("load", "temp", "power", "vram_load", "vram_used")
 
 
 def _monitor_gpu_d_keys(snapshot: dict | None = None) -> list:
-    """动态独显参数键：按快照中实际卡数展开（每卡 4 参数，参照硬盘）。"""
+    """动态独显参数键：按快照中实际卡数展开（每卡 5 参数，参照硬盘）。"""
     keys = []
     i = 0
     while True:
@@ -5450,7 +5453,12 @@ class MonitorSettingsDialog(QDialog):
     · 参数复选框：勾选即实时渲染对应窗格，取消即关窗格（总开关启用时）。
     · 无值参数也罗列（风扇/硬盘换机可用），默认全不勾选。
     · 非模态 show（照帮助窗先例，避坑 6 嵌套模态）；尺寸内容驱动 + adjustSize。
+    · V16.3：设备名小字在参数名右侧同一行，起始位置对齐成一列
+      （复选框列固定宽 _PARAM_COL_W，按最长参数名「GPU显存利用」留足）。
     """
+
+    #: 参数名列固定宽（px）：容纳复选框+最长参数名，使右侧设备名整列对齐
+    _PARAM_COL_W = 150
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5522,13 +5530,7 @@ class MonitorSettingsDialog(QDialog):
             lab.setFont(f)
             self._param_layout.addWidget(lab)
             for key in keys:
-                label = self._param_label(key)
-                chk = QCheckBox(label, inner)
-                chk.setToolTip(key)
-                chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
-                self._param_checks[key] = chk
-                self._param_layout.addWidget(chk)
-                self._add_hw_label(key, inner)
+                self._add_param_row(key, inner)
         self._param_layout.addStretch(1)
         scroll.setWidget(inner)
         scroll.setMinimumWidth(280)
@@ -5587,7 +5589,18 @@ class MonitorSettingsDialog(QDialog):
         for k in (f"gpu_d.0.{s}" for s in _GPU_D_SUFFIXES):
             if k not in keys:
                 keys.append(k)
-        return sorted(keys)
+        # 按「卡序号 + 后缀定义序」排列：GPU功耗 紧跟 GPU温度 下方
+        # （V16.3 用户拍板；不能用 sorted，否则 power 会排到 load 前）
+        _order = {s: i for i, s in enumerate(_GPU_D_SUFFIXES)}
+
+        def _gpu_sort_key(k: str):
+            parts = k.split(".")
+            try:
+                return (int(parts[1]), _order.get(parts[2], 99))
+            except (IndexError, ValueError):
+                return (99, 99)
+
+        return sorted(keys, key=_gpu_sort_key)
 
     @staticmethod
     def _param_label(key: str) -> str:
@@ -5625,16 +5638,37 @@ class MonitorSettingsDialog(QDialog):
         """
         return "color: #808080;"
 
-    def _add_hw_label(self, key: str, parent) -> None:
-        """参数复选框正下方加设备名小字 QLabel（仅有设备名的参数）。"""
-        if not self._hw_capable(key):
-            return
-        lab = QLabel("—", parent)
-        lab.setFont(self._hw_font(lab.font()))
-        lab.setStyleSheet(self._hw_style())
-        lab.setContentsMargins(20, 0, 0, 2)   # 与复选框文字左缘大致对齐
-        self._hw_labels[key] = lab
-        self._param_layout.addWidget(lab)
+    def _add_param_row(self, key: str, parent, insert_at: int | None = None):
+        """一行「复选框 参数名 + 右侧设备名小字」（V16.3 用户拍板）。
+
+        设备名从参数名下方移到右侧同一行，且所有行的设备名起始位置对齐
+        成一列——复选框列固定宽 _PARAM_COL_W，设备名紧随其后。
+        insert_at 非 None 时插到该位置（动态新盘/新卡补行用）。
+        返回该行 QWidget（无设备名的参数也占同样列宽，保证整列对齐）。
+        """
+        row = QWidget(parent)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        chk = QCheckBox(self._param_label(key), row)
+        chk.setToolTip(key)
+        chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
+        chk.setFixedWidth(self._PARAM_COL_W)
+        self._param_checks[key] = chk
+        lay.addWidget(chk)
+        if self._hw_capable(key):
+            lab = QLabel("—", row)
+            lab.setFont(self._hw_font(lab.font()))
+            lab.setStyleSheet(self._hw_style())
+            self._hw_labels[key] = lab
+            lay.addWidget(lab, 1)
+        else:
+            lay.addStretch(1)
+        if insert_at is None:
+            self._param_layout.addWidget(row)
+        else:
+            self._param_layout.insertWidget(insert_at, row)
+        return row
 
     def refresh_hardware_names(self, names: dict | None = None) -> None:
         """从实时快照重取全部设备名（每次运行重载，防换机/换设备残留旧名）。
@@ -5755,22 +5789,13 @@ class MonitorSettingsDialog(QDialog):
             for key in self._disk_keys_for_ui():
                 if key in self._param_checks:
                     continue
-                chk = QCheckBox(self._param_label(key), self)
-                chk.setToolTip(key)
-                chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
-                self._param_checks[key] = chk
-                # 插到硬盘分组末尾（网络组之前）：按布局顺序找网络首个标签
-                idx = self._param_layout.count() - 1  # stretch 之前
-                self._param_layout.insertWidget(idx, chk)
+                # 插到硬盘分组末尾（网络组之前）：stretch 之前
+                idx = self._param_layout.count() - 1
+                self._add_param_row(key, self, insert_at=idx)
+                chk = self._param_checks[key]
                 chk.setEnabled(self.chk_enable.isChecked())
-                if self._hw_capable(key):
-                    lab = QLabel("—", self)
-                    lab.setFont(self._hw_font(lab.font()))
-                    lab.setStyleSheet(self._hw_style())
-                    lab.setContentsMargins(20, 0, 0, 2)
-                    lab.setEnabled(self.chk_enable.isChecked())
-                    self._hw_labels[key] = lab
-                    self._param_layout.insertWidget(idx + 1, lab)
+                if key in self._hw_labels:
+                    self._hw_labels[key].setEnabled(self.chk_enable.isChecked())
                 # 全选态下新盘自动勾上（批量守卫，末尾统一保存同步一次）
                 if self.chk_select_all.isChecked():
                     self._bulk_updating = True
@@ -5798,21 +5823,12 @@ class MonitorSettingsDialog(QDialog):
             for key in self._gpu_d_keys_for_ui():
                 if key in self._param_checks:
                     continue
-                chk = QCheckBox(self._param_label(key), self)
-                chk.setToolTip(key)
-                chk.toggled.connect(lambda on, k=key: self._on_param_toggled(k, on))
-                self._param_checks[key] = chk
                 idx = self._param_layout.count() - 1  # stretch 之前
-                self._param_layout.insertWidget(idx, chk)
+                self._add_param_row(key, self, insert_at=idx)
+                chk = self._param_checks[key]
                 chk.setEnabled(self.chk_enable.isChecked())
-                if self._hw_capable(key):
-                    lab = QLabel("—", self)
-                    lab.setFont(self._hw_font(lab.font()))
-                    lab.setStyleSheet(self._hw_style())
-                    lab.setContentsMargins(20, 0, 0, 2)
-                    lab.setEnabled(self.chk_enable.isChecked())
-                    self._hw_labels[key] = lab
-                    self._param_layout.insertWidget(idx + 1, lab)
+                if key in self._hw_labels:
+                    self._hw_labels[key].setEnabled(self.chk_enable.isChecked())
                 # 全选态下新卡自动勾上（批量守卫，末尾统一保存同步一次）
                 if self.chk_select_all.isChecked():
                     self._bulk_updating = True

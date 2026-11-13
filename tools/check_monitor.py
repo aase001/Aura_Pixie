@@ -174,8 +174,8 @@ def section_a():
 
     # 动态键定义还原
     ok(mh._def("disk.1.temp")[1] == "硬盘温度", "disk.1 标签（V16.2 无盘号后缀）")
-    ok(mh._def("disk.0.usage")[1] == "硬盘使用率", "disk.0.usage 标签（防误标温度）")
-    ok(mh._def("disk.1.usage")[1] == "硬盘使用率", "disk.1.usage 标签（V16.2 无盘号后缀）")
+    ok(mh._def("disk.0.usage")[1] == "硬盘占用空间", "disk.0.usage 标签（防误标温度）")
+    ok(mh._def("disk.1.usage")[1] == "硬盘占用空间", "disk.1.usage 标签（V16.2 无盘号后缀）")
     ok(mh._def("fan.gpu_d.0")[1] == "GPU风扇转速", "风扇标签（V16.2 无独显括号）")
 
     # 格式化
