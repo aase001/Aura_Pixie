@@ -26,6 +26,15 @@ user_personal_edition/
 # —— 内部交接文档（含本机路径/环境细节，不公开）——
 handover_documents/
 
+# —— 打包物料（侧车二进制 72MB + Qt 翻译，从源码/发行包重建，不入库）——
+build_pkg/
+
+# —— 内部开发作业卡（AI 协作流程，不公开）——
+SKILL.md
+
+# —— 内部真机实测验收清单（不公开）——
+真机实测要点.md
+
 # —— 跨项目迁移资料（含本机路径/验证结论，不公开）——
 Project Migration/
 
