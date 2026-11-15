@@ -4755,10 +4755,27 @@ class AuraBall(QWidget):
         的其他窗口缓冲，于是屏幕上会闪出「陌生窗口一角」；后续展开复用已分配
         容量、收起方向又是缩窗（无新增区域），所以只在首次展开出现。repaint()
         在改尺寸的同一轮里同步整窗重绘，脏区不会出现在任何一帧画面上。
+
+        尺寸+位置必须单次 setGeometry 原子落下：旧实现 setFixedSize(改尺寸、
+        左上角锚定)+move(补位置)是两次分离的原生窗口操作，resize 已生效而 move
+        未生效的中间态里，窗口尺寸已变但位置未动，球心=位置+尺寸/2 瞬时偏移
+        (新-旧)/2 px；分层透明窗口把这一帧呈现出来就是展开/收起时「球体闪烁」。
+        setGeometry 一次设置尺寸+位置，resize/move 事件看到同一终态几何，
+        球心全程不跳变。
         """
         grew = size > self.width()
-        self.setFixedSize(size, size)
-        self._apply_center()
+        x = round(self._center.x() - size / 2.0)
+        y = round(self._center.y() - size / 2.0)
+        # setFixedSize 会把 min/max 都锁在当前尺寸，直接 setGeometry 会被钳回；
+        # 先放开「目标方向」的约束，setGeometry 才能单次原子落下尺寸+位置。
+        if grew:
+            self.setMaximumSize(size, size)
+            self.setGeometry(x, y, size, size)
+            self.setMinimumSize(size, size)
+        else:
+            self.setMinimumSize(size, size)
+            self.setGeometry(x, y, size, size)
+            self.setMaximumSize(size, size)
         if grew:
             self.repaint()
 

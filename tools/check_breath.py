@@ -1519,6 +1519,55 @@ def main() -> int:
     check("回收后解冻呼吸", bf._breath_frozen is False and bf.state == "hidden",
           f"（frozen={bf._breath_frozen}, state={bf.state}）", failures)
 
+    # ── 展开/收起球心不跳变（真机：主/次扇形展开收起过程球体闪烁）──────
+    # 根因：_resize_keep_center 旧实现 setFixedSize(改尺寸、左上角锚定)+move(补位置)
+    # 是两次分离的原生窗口操作。resize 已生效而 move 未生效的中间态，窗口尺寸已变
+    # 但位置未动，球心=位置+尺寸/2 瞬时偏移 (新-旧)/2 px；分层透明窗口把这一帧呈现
+    # 出来就是「球体闪烁」。次级环=收主环(缩窗)+展次级(扩窗)两次切换，闪得更明显。
+    # 行为断言：尺寸切换的每一个几何事件里，窗口几何推出的球心都必须等于 _center。
+    # 期望值 _center 是独立摆位的字面量，不复用被测代码逻辑。
+    class _CenterProbe(M.AuraBall):
+        def __init__(self):
+            super().__init__()
+            self.geo_events = []       # 每个几何事件的窗口球心（防空测）
+            self.center_offsets = []   # 球心偏离 _center 的事件（跳变帧）
+
+        def _rec(self):
+            g = self.geometry()
+            cx = g.x() + g.width() / 2.0
+            cy = g.y() + g.height() / 2.0
+            self.geo_events.append((cx, cy))
+            if abs(cx - self._center.x()) > 0.5 or abs(cy - self._center.y()) > 0.5:
+                self.center_offsets.append((g.x(), g.y(), g.width(), g.height()))
+
+        def resizeEvent(self, e):  # noqa: N802
+            self._rec()
+            super().resizeEvent(e)
+
+        def moveEvent(self, e):  # noqa: N802
+            self._rec()
+            super().moveEvent(e)
+
+    bp = _CenterProbe()
+    bp._screen_override = (0, 0, 1920, 1040)  # noqa: SLF001
+    bp.place_at(960, 520)
+    bp.show()
+    app.processEvents()
+    bp.center_offsets.clear()
+    bp.geo_events.clear()
+    bp._resize_keep_center(M.ACTIVE_SIZE)   # noqa: SLF001 - 展开扩窗
+    check("展开扩窗：确有几何事件（非空测）", len(bp.geo_events) > 0,
+          f"（事件数={len(bp.geo_events)}）", failures)
+    check("展开扩窗：球心全程不跳变（防闪烁）", not bp.center_offsets,
+          f"（跳变帧 {bp.center_offsets}）", failures)
+    bp.center_offsets.clear()
+    bp.geo_events.clear()
+    bp._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 收起缩窗
+    check("收起缩窗：确有几何事件（非空测）", len(bp.geo_events) > 0,
+          f"（事件数={len(bp.geo_events)}）", failures)
+    check("收起缩窗：球心全程不跳变（防闪烁）", not bp.center_offsets,
+          f"（跳变帧 {bp.center_offsets}）", failures)
+
     # ---------- 18 外观设置（V12：原「动效设置」改名 + 四项改滑块） ----------
     print("\n外观设置")
     cases = [("#ff0000", "#FF0000"), ("ff0000", "#FF0000"), ("f00", "#FF0000"),
