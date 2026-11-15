@@ -4785,6 +4785,13 @@ class AuraBall(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         try:
             painter = QPainter(self)
+            # 分层透明窗口 + WA_NoSystemBackground：Qt 不自动填背景，后备存储
+            # 跨帧保留。若不先以 Source 模式清透明，半透明光晕/扇形会逐帧叠加
+            # 累积成鬼影（收缩外圈残留、越刷越实）。每帧先整窗清透明再绘制。
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver)
             if self._asleep:
                 # 休眠：按纵深色渲染（浅色系统→黑，深色系统→白）
                 paint_ball(painter, self.width(), self._phase,

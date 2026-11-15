@@ -1530,6 +1530,57 @@ def main() -> int:
     ps._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 缩窗
     check("缩窗同帧同步重绘（防收缩闪烁·累积效应）", ps.paint_calls >= 1,
           f"（paint_calls={ps.paint_calls}）", failures)
+
+    # ── 分层窗口每帧透明清屏（真机：半透明光晕/扇形逐帧累积成鬼影）──────
+    # WA_NoSystemBackground 禁止 Qt 自动填背景，paintEvent 若不先以 Source 模式
+    # 清透明，后备存储逐帧叠加 → 收缩外圈残留/累积闪烁。行为断言：绘制前必须
+    # 有一次覆盖全窗的 CompositionMode_Source 透明填充。
+    from PySide6.QtGui import QPainter as _QP  # noqa: E402
+
+    class _ClearSpy(M.AuraBall):
+        def __init__(self):
+            super().__init__()
+            self.saw_clear = False
+            self._orig_fill = None
+            self._orig_setcomp = None
+
+        def paintEvent(self, e):  # noqa: N802
+            comp = {"mode": None}
+            orig_setcomp = _QP.setCompositionMode
+            orig_fill = _QP.fillRect
+
+            def setcomp(self_p, mode):
+                comp["mode"] = mode
+                return orig_setcomp(self_p, mode)
+
+            def fill(self_p, *a):
+                if (comp["mode"] == _QP.CompositionMode.CompositionMode_Source
+                        and len(a) >= 2):
+                    from PySide6.QtGui import QColor as _QC  # noqa: E402
+                    col = a[1]
+                    if not hasattr(col, "alpha"):
+                        col = _QC(col)   # GlobalColor 枚举包装成 QColor
+                    if col.alpha() == 0:
+                        self.saw_clear = True
+                return orig_fill(self_p, *a)
+
+            _QP.setCompositionMode = setcomp
+            _QP.fillRect = fill
+            try:
+                super().paintEvent(e)
+            finally:
+                _QP.setCompositionMode = orig_setcomp
+                _QP.fillRect = orig_fill
+
+    cs = _ClearSpy()
+    cs._screen_override = (0, 0, 1920, 1040)  # noqa: SLF001
+    cs.place_at(960, 520)
+    cs.show()
+    app.processEvents()
+    cs.saw_clear = False
+    cs.repaint()
+    check("paintEvent 先以 Source 透明清屏（防分层窗口逐帧累积鬼影）",
+          cs.saw_clear, f"（saw_clear={cs.saw_clear}）", failures)
     _w0 = bf.width()
     bf._resize_keep_center(_w0 + 100)
     check("扩容路径可执行且球心不偏移", bf.width() == _w0 + 100, "", failures)
