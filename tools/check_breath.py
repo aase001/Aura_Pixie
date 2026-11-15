@@ -1504,14 +1504,32 @@ def main() -> int:
           f"（phase={bf._phase}，期望 {phase_before}）", failures)
     bf._clock.invalidate()
 
-    # ── 首次展开闪动修复看守（真机：扩容瞬间露出后备存储的陈旧像素）──────
-    # 离屏测不出合成器层面的瞬时闪动，故看守「修复动作本身还在」：扩容必须
-    # 同帧 repaint()，且只在变大时做（收起是缩窗、无新增区域，多刷一次白费）。
-    _src_rs = inspect.getsource(M.AuraBall._resize_keep_center)
-    check("扩容后同步整窗重绘（防首次展开闪出陌生窗口一角）",
-          "self.repaint()" in _src_rs and "grew" in _src_rs, "", failures)
-    check("重绘仅在扩容方向触发（缩窗不刷）",
-          "if grew:" in _src_rs, "", failures)
+    # ── 尺寸切换同帧同步重绘（真机：分层窗口陈旧表面致展开/收起闪烁）──────
+    # 分层透明窗口的原生层表面只在重绘 flush 时更新。缩窗若不同步重绘，DWM 在
+    # 下一帧心跳前一直合成旧的大尺寸表面 → 收缩闪烁（高频触发更明显）。行为断言：
+    # 扩/缩两个方向都必须在 _resize_keep_center 返回前同步触发 paintEvent。
+    class _PaintSpy(M.AuraBall):
+        def __init__(self):
+            super().__init__()
+            self.paint_calls = 0
+
+        def paintEvent(self, e):  # noqa: N802
+            self.paint_calls += 1
+            super().paintEvent(e)
+
+    ps = _PaintSpy()
+    ps._screen_override = (0, 0, 1920, 1040)  # noqa: SLF001
+    ps.place_at(960, 520)
+    ps.show()
+    app.processEvents()
+    ps.paint_calls = 0
+    ps._resize_keep_center(M.ACTIVE_SIZE)   # noqa: SLF001 - 扩容
+    check("扩容同帧同步重绘（防展开首帧陈旧表面）", ps.paint_calls >= 1,
+          f"（paint_calls={ps.paint_calls}）", failures)
+    ps.paint_calls = 0
+    ps._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 缩窗
+    check("缩窗同帧同步重绘（防收缩闪烁·累积效应）", ps.paint_calls >= 1,
+          f"（paint_calls={ps.paint_calls}）", failures)
     _w0 = bf.width()
     bf._resize_keep_center(_w0 + 100)
     check("扩容路径可执行且球心不偏移", bf.width() == _w0 + 100, "", failures)

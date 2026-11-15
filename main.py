@@ -4750,11 +4750,13 @@ class AuraBall(QWidget):
     def _resize_keep_center(self, size: int) -> None:
         """改窗口尺寸并保持球心不动（球心是唯一坐标真源）。
 
-        扩容后必须 repaint()：setFixedSize 变大时，Qt 后备存储的**新增区域内容
-        未定义**，只被标脏、等下一帧才补画。首次展开时这块内存恰是系统回收来
-        的其他窗口缓冲，于是屏幕上会闪出「陌生窗口一角」；后续展开复用已分配
-        容量、收起方向又是缩窗（无新增区域），所以只在首次展开出现。repaint()
-        在改尺寸的同一轮里同步整窗重绘，脏区不会出现在任何一帧画面上。
+        尺寸变化后必须同帧同步 repaint()（扩容、缩窗两个方向都要）：
+        ① 扩容：Qt 后备存储的新增区域内容未定义，只被标脏、等下一帧才补画，
+           首次展开时这块内存恰是系统回收来的其他窗口缓冲，闪出「陌生窗口一角」；
+        ② 缩窗：分层透明窗口的原生层表面只在重绘 flush 时更新，缩窗后若不同步
+           重绘，DWM 在下一帧心跳前一直合成旧的大尺寸表面——屏幕上残留旧扇形环
+           1~2 帧，即「收缩闪烁」；触发越频繁单位时间缩窗越多、越明显（累积效应）。
+        repaint() 在改尺寸的同一轮里同步整窗重绘，陈旧表面不会出现在任何一帧。
 
         尺寸+位置必须单次 setGeometry 原子落下：旧实现 setFixedSize(改尺寸、
         左上角锚定)+move(补位置)是两次分离的原生窗口操作，resize 已生效而 move
@@ -4776,8 +4778,8 @@ class AuraBall(QWidget):
             self.setMinimumSize(size, size)
             self.setGeometry(x, y, size, size)
             self.setMaximumSize(size, size)
-        if grew:
-            self.repaint()
+        # 扩/缩都同帧同步重绘：缩窗不刷会让 DWM 合成旧的大尺寸分层表面（收缩闪烁）
+        self.repaint()
 
     # ------------------------------------------------------------ 绘制
     def paintEvent(self, event) -> None:  # noqa: N802
