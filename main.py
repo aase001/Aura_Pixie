@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import ctypes
+import hashlib
 import math
 import os
 import re
@@ -414,7 +415,8 @@ STATE_PATH = os.path.join(APP_CONFIG_DIR, "state.yaml")      # v2.03 运行时�
 BACKUP_DIR = os.path.join(APP_CONFIG_DIR, "backup")           # v2.03 迁移/导入前快照目录（保留最近 5 份自建快照）
 SETTINGS_PATH = CONFIG_PATH   # 历史别名：旧代码/自检按此名引用，两者恒指向同一文件
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
-RUNNER_DIR = os.path.join(tempfile.gettempdir(), "AuraPixie")   # py 代码临时脚本目录
+RUNNER_DIR = os.path.join(APP_CONFIG_DIR, "command")     # v2.03 执行脚本缓存（哈希命名、只写一次、存在即复用）
+RUNNER_TEST_DIR = os.path.join(RUNNER_DIR, "test")       # 「测试」按钮的一次性脚本与输出（一次一份、读后即删）
 
 
 def _clamp_tune(v, lo, hi, default):
@@ -993,6 +995,140 @@ def _spawn(argv: list[str]) -> subprocess.Popen:
     return subprocess.Popen(argv, cwd=BASE_DIR, creationflags=CREATE_NO_WINDOW)
 
 
+def _runner_script_bytes(kind: str, payload: str) -> bytes:
+    """脚本的实际落盘字节（哈希必须算编码后字节——坑 10：bat 是 GBK，py 是 UTF-8）。
+
+    内容生成规则与历史 run_code / build_code_test 完全一致：bat 前置 `@echo off`、
+    逐行 rstrip 后以 CRLF 结尾、跳过空行；py 原样写 payload。
+    非 cmd/py 的通道（ps/pwsh 走 -EncodedCommand）不落盘脚本，抛 ValueError。
+    """
+    if kind == "cmd":
+        body = "@echo off\r\n"
+        for ln in payload.splitlines():
+            if ln.strip():
+                body += ln.rstrip() + "\r\n"
+        return body.encode("gbk")     # 可能抛 UnicodeEncodeError（含 gbk 外字符）
+    if kind == "py":
+        return payload.encode("utf-8")
+    raise ValueError(f"kind={kind} 不落盘脚本（ps/pwsh 走 -EncodedCommand）")
+
+
+def ensure_runner_script(kind: str, payload: str) -> str | None:
+    """按内容哈希取得执行脚本的缓存路径；不存在才写，存在即复用、绝不改写。
+
+    【作用范围】command\\ 下 `fn_<sha1前16位>.bat/.py` 的执行脚本缓存。
+    【影响】同内容指令永远命中同一文件（只写一次），不再每次点击扇区都新建一个
+      临时脚本堆积；**「已存在即复用、绝不重写」是硬约束**——cmd.exe 逐行读 bat，
+      执行途中被改写会破坏正在跑的指令（计划 §七）。
+    返回 None = 无法落盘（含 gbk 外字符，或写盘失败），调用方走不落盘的兜底通道。
+    """
+    try:
+        data = _runner_script_bytes(kind, payload)
+    except UnicodeEncodeError:
+        return None                   # gbk 覆盖不了（生僻字/emoji）→ 直连兜底
+    except ValueError:
+        return None                   # ps/pwsh 不落盘脚本
+    name = ("fn_" + hashlib.sha1(data).hexdigest()[:16]
+            + (".bat" if kind == "cmd" else ".py"))
+    path = os.path.join(RUNNER_DIR, name)
+    if os.path.isfile(path):
+        return path                   # 只写一次：存在即复用，绝不改写
+    try:
+        os.makedirs(RUNNER_DIR, exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+    except OSError as exc:
+        _log_crash("ensure_runner_script", exc)
+        return None
+    return path
+
+
+_test_seq = 0   # 测试脚本序号：同毫秒内连续调用也保证路径唯一
+
+
+def build_runner_test_path(kind: str) -> str:
+    """「测试」按钮的一次性脚本路径：command\\test\\tst_<pid>_<ms>_<序号>.<ext>。
+
+    【作用范围】指令编辑窗「测试」通道的脚本（.out/.err 输出同目录）。
+    【影响】测试**不复用**哈希缓存——一次一份、读后即删（沿用 _out_files 机制），
+      否则「改了代码再点测试」可能命中旧缓存脚本，给用户「改动没生效」的错觉；
+      独立子目录 test\\ 与正式缓存分开，孤儿回收不会碰它。
+    """
+    global _test_seq
+    _test_seq += 1
+    ext = ".bat" if kind == "cmd" else ".py"
+    stamp = f"{os.getpid()}_{int(time.time() * 1000)}_{_test_seq}"
+    try:
+        os.makedirs(RUNNER_TEST_DIR, exist_ok=True)
+    except OSError as exc:
+        _log_crash("build_runner_test_path", exc)
+    return os.path.join(RUNNER_TEST_DIR, f"tst_{stamp}{ext}")
+
+
+def _referenced_runner_names() -> set:
+    """当前 command.yaml 全部指令（含次级项）对应的脚本缓存文件名集合。
+
+    逐条走 parse_special_sections → classify_code → _runner_script_bytes，
+    算出「这些指令若被执行会命中哪个缓存文件」；与 ensure_runner_script 同一套
+    字节生成规则，故哈希必然对得上。gbk 外字符（走直连通道不落盘）跳过。
+    """
+    names: set = set()
+    for row in read_all_rows():
+        code = row.get("code") or ""
+        parsed = parse_special_sections(code)
+        if parsed["items"]:
+            texts = [parsed["main"]] + [it.get("code") or "" for it in parsed["items"]]
+        else:
+            texts = [code]
+        for text in texts:
+            kind, payload, err = classify_code(text)
+            if err or not payload or kind not in ("cmd", "py"):
+                continue
+            try:
+                data = _runner_script_bytes(kind, payload)
+            except (UnicodeEncodeError, ValueError):
+                continue
+            names.add("fn_" + hashlib.sha1(data).hexdigest()[:16]
+                      + (".bat" if kind == "cmd" else ".py"))
+    return names
+
+
+def reclaim_runner_orphans() -> list:
+    """孤儿回收：删除 command\\ 下不再被任何指令引用的 fn_* 脚本（v2.03）。
+
+    【作用范围】RUNNER_DIR 顶层的 fn_*.bat / fn_*.py；不碰 test\\ 子目录
+      （tst_* 归 _out_files 读后即删），也不碰任何非 fn_* 文件。
+    【影响】替代旧 cleanup_runner_dir 的「24 小时全清」——按引用关系精确回收：
+      仍被 command.yaml 任一指令（含次级项）引用的脚本保留（下次点击秒复用），
+      无人引用的删掉，缓存目录不再随指令编辑历史无限增长。
+      **删除失败（文件正被 cmd.exe 占用）则跳过、下轮再试**，绝不强删正在执行的
+      脚本（计划 §七：只写一次 + 跳过占用，两条保护缺一不可）。
+    返回已删文件名列表（诊断/日志用）。启动与右键「重载」各调一次。
+    """
+    removed: list = []
+    try:
+        names = os.listdir(RUNNER_DIR)
+    except OSError:
+        return removed
+    referenced = _referenced_runner_names()
+    for name in names:
+        if not name.startswith("fn_"):
+            continue
+        if not (name.endswith(".bat") or name.endswith(".py")):
+            continue
+        if name in referenced:
+            continue
+        path = os.path.join(RUNNER_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            continue          # 被占用（cmd 正在逐行读）→ 跳过，下轮再试
+        removed.append(name)
+    return removed
+
+
 def run_code(text: str) -> str | None:
     """静默执行功能代码。返回 None=已启动；返回字符串=未执行的错误说明。
 
@@ -1012,27 +1148,18 @@ def run_code(text: str) -> str | None:
         # subprocess.list2cmdline 会把内部 " 转义成 \"，cmd 对 \" 的处理与 C 规则
         # 不同，start "" "path" 会被拆错，报「Windows 找不到 '\' 文件」。
         # 改成写 .bat：cmd 按批处理规则解析文件内容，引号原样保留。
-        os.makedirs(RUNNER_DIR, exist_ok=True)
-        bat = os.path.join(RUNNER_DIR, f"fn_{os.getpid()}_{int(time.time() * 1000)}.bat")
-        # cmd 批处理默认按系统 ANSI 代码页(GBK)读取，中文路径用 gbk 写出
-        try:
-            with open(bat, "w", encoding="gbk") as fh:
-                fh.write("@echo off\r\n")
-                for ln in payload.splitlines():
-                    if ln.strip():
-                        fh.write(ln.rstrip() + "\r\n")
+        # v2.03：脚本走 command\ 哈希缓存（同内容复用、只写一次，见 ensure_runner_script）
+        bat = ensure_runner_script("cmd", payload)
+        if bat is not None:
             proc = _spawn(["cmd.exe", "/c", bat])
-        except UnicodeEncodeError:
-            # gbk 无法覆盖的字符（生僻字/emoji）兜底退化为旧通道
-            try:
-                os.remove(bat)   # 半截 bat 已无用，顺手清理（不留给 24h 残留清扫）
-            except OSError:
-                pass
-            one_line = " & ".join(ln.strip() for ln in payload.splitlines() if ln.strip())
-            proc = _spawn(["cmd.exe", "/c", one_line])
-            _log_crash("cmd_unicode_fallback",
-                       RuntimeError(f"含 gbk 外字符，退回直接执行：{one_line}"))
-        SESSION_RUNNERS.append((proc, bat))
+            SESSION_RUNNERS.append((proc, bat))
+            return None
+        # gbk 无法覆盖的字符（生僻字/emoji）→ 不落盘，兜底退化为直连通道
+        one_line = " & ".join(ln.strip() for ln in payload.splitlines() if ln.strip())
+        proc = _spawn(["cmd.exe", "/c", one_line])
+        _log_crash("cmd_unicode_fallback",
+                   RuntimeError(f"含 gbk 外字符，退回直接执行：{one_line}"))
+        SESSION_RUNNERS.append((proc, ""))   # 无脚本文件，仅记句柄供回收
         return None
     if kind == "ps":
         # -EncodedCommand：UTF-16LE Base64，不含引号/特殊字符，绝无转义破坏问题
@@ -1052,47 +1179,49 @@ def run_code(text: str) -> str | None:
                 "-EncodedCommand", enc])
         return None
 
-    os.makedirs(RUNNER_DIR, exist_ok=True)
-    fname = os.path.join(RUNNER_DIR, f"fn_{os.getpid()}_{int(time.time() * 1000)}.py")
-    with open(fname, "w", encoding="utf-8") as fh:
-        fh.write(payload)
+    # py：v2.03 走 command\ 哈希缓存（同内容复用、只写一次）
+    fname = ensure_runner_script("py", payload)
+    if fname is None:      # 落盘失败（目录不可写等）→ 退回一次性临时脚本
+        os.makedirs(RUNNER_DIR, exist_ok=True)
+        fname = os.path.join(RUNNER_DIR,
+                             f"fn_{os.getpid()}_{int(time.time() * 1000)}.py")
+        with open(fname, "w", encoding="utf-8") as fh:
+            fh.write(payload)
     proc = _spawn([sys.executable, fname])
     SESSION_RUNNERS.append((proc, fname))
     return None
 
 
-# 本会话派发的一次性 py 脚本 [(进程, 路径)]；退出时只删已结束的，绝不等待。
+# 本会话派发的子进程 [(进程, 脚本路径)]；退出时只释放句柄，绝不等待。
+# v2.03：路径是 command\ 下的哈希缓存脚本，**句柄回收不再删它**（同内容要复用），
+# 空串表示该次走直连通道、没有落盘脚本。残留由 reclaim_runner_orphans 按引用回收。
 SESSION_RUNNERS: list[tuple[subprocess.Popen, str]] = []
 
 
 def prune_session_runners() -> None:
-    """回收已结束的派发子进程：移出列表并删其临时脚本。
+    """回收已结束的派发子进程：移出簿记列表（释放句柄），但不删缓存脚本。
 
     长会话里每次点击都 append，句柄只增不减会持续累积；心跳低频调用本函数
     清理。只动 poll() 非 None（已结束）的条目，绝不等待、绝不触碰运行中进程。
+    v2.03：脚本文件是「哈希命名 + 存在即复用」的缓存，此处不删——删了下次点击
+    就要重建，且正被 cmd.exe 逐行读取时删除会破坏执行。脚本生命周期改由
+    reclaim_runner_orphans 按「是否仍被 command.yaml 引用」统一管理。
     """
     kept: list[tuple[subprocess.Popen, str]] = []
     for proc, path in SESSION_RUNNERS:
         if proc.poll() is None:
             kept.append((proc, path))
-            continue
-        try:
-            os.remove(path)
-        except OSError:
-            pass
     SESSION_RUNNERS[:] = kept
 
 
 def cleanup_runner_dir() -> None:
-    """删除 24 小时前的残留临时脚本；本会话新写入的随退出删除。"""
-    try:
-        cutoff = time.time() - 24 * 3600
-        for name in os.listdir(RUNNER_DIR):
-            path = os.path.join(RUNNER_DIR, name)
-            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
-                os.remove(path)
-    except OSError:
-        pass
+    """清理执行脚本缓存（v2.03：按引用孤儿回收，替代旧「24 小时全清」）。
+
+    旧口径按 mtime 删 24h 前的脚本，会把仍被指令引用、下次点击就要复用的缓存
+    一并删掉（无谓重建）；新口径只删「不再被 command.yaml 任何指令引用」的 fn_*，
+    被引用的保留、被占用的跳过下轮再试。见 reclaim_runner_orphans。
+    """
+    reclaim_runner_orphans()
 
 
 # ---------------------------------------------------------------- 指令测试执行（指令编辑窗「测试」用）
@@ -1128,9 +1257,9 @@ def build_code_test(text: str):
     cleanup: list[str] = []
     if kind == "cmd":
         # 同 run_code：写 GBK .bat 交 cmd /c（引号原样保留）；GBK 外字符兜底退化为 & 连接
-        os.makedirs(RUNNER_DIR, exist_ok=True)
-        bat = os.path.join(RUNNER_DIR,
-                           f"tst_{os.getpid()}_{int(time.time() * 1000)}.bat")
+        # v2.03：测试脚本入 command\test\（一次一份、读后即删，不复用哈希缓存——
+        # 否则「改了代码再点测试」会命中旧脚本，让用户误以为改动没生效）
+        bat = build_runner_test_path("cmd")
         try:
             with open(bat, "w", encoding="gbk") as fh:
                 fh.write("@echo off\r\n")
@@ -1161,9 +1290,7 @@ def build_code_test(text: str):
             argv = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
                     "-EncodedCommand", enc]
     else:   # py（含无前缀默认）
-        os.makedirs(RUNNER_DIR, exist_ok=True)
-        fname = os.path.join(RUNNER_DIR,
-                             f"tst_{os.getpid()}_{int(time.time() * 1000)}.py")
+        fname = build_runner_test_path("py")
         with open(fname, "w", encoding="utf-8") as fh:
             fh.write(payload)
         argv = [sys.executable, fname]
@@ -1179,10 +1306,12 @@ def _test_spawn(argv: list[str]) -> tuple[subprocess.Popen, str, str]:
     文件无缓冲上限，进程结束后由调用方读回内容并删除。
     返回 (进程, stdout 文件路径, stderr 文件路径)。
     """
-    os.makedirs(RUNNER_DIR, exist_ok=True)
-    stamp = f"{os.getpid()}_{int(time.time() * 1000)}"
-    out_path = os.path.join(RUNNER_DIR, f"tst_{stamp}.out")
-    err_path = os.path.join(RUNNER_DIR, f"tst_{stamp}.err")
+    os.makedirs(RUNNER_TEST_DIR, exist_ok=True)
+    global _test_seq
+    _test_seq += 1
+    stamp = f"{os.getpid()}_{int(time.time() * 1000)}_{_test_seq}"
+    out_path = os.path.join(RUNNER_TEST_DIR, f"tst_{stamp}.out")
+    err_path = os.path.join(RUNNER_TEST_DIR, f"tst_{stamp}.err")
     fh_out = open(out_path, "wb")
     fh_err = open(err_path, "wb")
     try:
@@ -5580,6 +5709,10 @@ class AuraBall(QWidget):
             _MONITOR_MGR.retune_layout()
         if _MONITOR_HUB is not None:
             _MONITOR_HUB.retune_collect()
+        # v2.03：执行脚本孤儿回收（计划 §七「启动/重载时」）。须在 load_functions
+        # 之后——command.yaml 刚重新加载，引用集才是新的；用户删掉某条指令后，
+        # 它对应的 fn_* 脚本立刻成孤儿被回收，缓存不随编辑历史无限增长。
+        reclaim_runner_orphans()
         self.update()
 
     # 双击不触发任何操作：此前双击（含双击展开的扇形）会直接退出程序，
@@ -5587,13 +5720,10 @@ class AuraBall(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # 球心位置记忆已由「移动停止 10s 自动写配置」接管（_note_motion_settle），
-        # 退出时不再写坐标；此处仅清理已结束的临时脚本，绝不等待仍在运行的子进程
-        for proc, path in list(SESSION_RUNNERS):
-            if proc.poll() is not None:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+        # 退出时不再写坐标。v2.03：SESSION_RUNNERS 里是 command\ 的哈希缓存脚本，
+        # 退出时**不删**（下次启动同指令仍要复用），只清空簿记释放句柄；
+        # 绝不等待仍在运行的子进程。残留由启动/重载的 reclaim_runner_orphans 回收。
+        SESSION_RUNNERS.clear()
         super().closeEvent(event)
 
     # ------------------------------------------------------------ 自检接口

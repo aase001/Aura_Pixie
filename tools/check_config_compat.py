@@ -231,6 +231,11 @@ if hasattr(M, "load_interaction_config"):
     #   history_points 变→清历史。main 侧用无参 MetricsHub()，构造默认读 COLLECT_LIVE）
     ck("reload_config 接线 retune_collect（collect 硬件参数热重载）",
        "retune_collect" in inspect.getsource(M.AuraBall.reload_config))
+    # 计划 §七：孤儿回收须在「启动 + 重载」两处触发——重载后 command.yaml 可能
+    # 删掉了指令，对应脚本即成孤儿；只在启动回收会让缓存随编辑历史无限增长
+    ck("reload_config 接线脚本孤儿回收（指令被删后缓存不残留）",
+       "reclaim_runner_orphans" in inspect.getsource(M.AuraBall.reload_config)
+       or "cleanup_runner_dir" in inspect.getsource(M.AuraBall.reload_config))
 
 # ---- 场景7：v2.03 四文件路由（统一视图漏斗：write 拆分 + read 合并 + 旧单文件回退 + 导入不覆盖 state）----
 import inspect as _insp   # noqa: E402

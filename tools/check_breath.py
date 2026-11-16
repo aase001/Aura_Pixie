@@ -407,7 +407,10 @@ def main() -> int:
         check("语法错误拒绝执行并返回原因", err is not None and "语法错误" in err
               and set(os.listdir(tmp)) == before, f"（{err}）", failures)
 
-        # C7 句柄回收：已结束条目移出列表并删脚本；运行中条目原样保留
+        # C7 句柄回收：已结束条目移出簿记列表；运行中条目原样保留。
+        # v2.03 起 fn_* 是「哈希命名 + 只写一次 + 存在即复用」的缓存，句柄回收
+        # 不再删脚本（删了就没法复用），残留改由 reclaim_runner_orphans 按
+        # 「是否仍被 command.yaml 引用」回收 —— 故此处只断言句柄簿记。
         _p_done = os.path.join(tmp, "done.py")
         with open(_p_done, "w", encoding="utf-8") as fh:
             fh.write("pass")
@@ -419,12 +422,13 @@ def main() -> int:
                        os.path.join(tmp, "live.py"))
         M.SESSION_RUNNERS.append(_live_entry)
         M.prune_session_runners()
-        check("句柄回收：已结束条目移除且脚本删除",
-              not os.path.exists(_p_done)
-              and all(pr is not _fake_done for pr, _ in M.SESSION_RUNNERS),
+        check("句柄回收：已结束条目移出簿记列表",
+              all(pr is not _fake_done for pr, _ in M.SESSION_RUNNERS),
               "", failures)
         check("句柄回收：运行中条目保留（绝不触碰）",
               any(pr is _live_entry[0] for pr, _ in M.SESSION_RUNNERS), "", failures)
+        check("句柄回收不删缓存脚本（v2.03：脚本改由孤儿回收管理，保持可复用）",
+              os.path.exists(_p_done), f"（{_p_done} 被删了）", failures)
         _live_entry[0].terminate()
         M.SESSION_RUNNERS[:] = [e for e in M.SESSION_RUNNERS if e is not _live_entry]
 
@@ -436,6 +440,145 @@ def main() -> int:
         check("GBK 外字符兜底直连执行（不留半截 bat）",
               err is None and not _bats_new and wait_file(_p_uni, app),
               f"（err={err}, 新增bat={_bats_new or '无'}）", failures)
+
+        # ---------- C9 v2.03 执行脚本缓存：哈希命名 + 只写一次复用 + 孤儿回收 ----------
+        import re as _re9
+        print("\n执行脚本缓存（哈希复用 + 孤儿回收）")
+        _rd9 = tempfile.mkdtemp(prefix="aura_runner9_")
+        _old_runner_dir = M.RUNNER_DIR
+        _old_test_dir9 = getattr(M, "RUNNER_TEST_DIR", None)
+        # ① 缓存目录：断言「改造前」的 RUNNER_DIR 指向配置目录下的 command\。
+        #    必须在下面 monkeypatch 之前取值断言；判据用「父目录 == APP_CONFIG_DIR」
+        #    而非「路径不含 Temp」——自检本身把 LOCALAPPDATA 隔离到 tempfile.mkdtemp，
+        #    路径天然含 Temp，写死环境前提会误红（坑 65 第四形态）。
+        check("RUNNER_DIR 指向配置目录下的 command（脚本缓存不再散落 %TEMP%）",
+              _old_runner_dir == os.path.join(M.APP_CONFIG_DIR, "command")
+              and os.path.dirname(_old_runner_dir) == M.APP_CONFIG_DIR,
+              f"（实得 {_old_runner_dir}）", failures)
+        check("测试脚本目录 RUNNER_TEST_DIR = command\\test",
+              _old_test_dir9 == os.path.join(M.APP_CONFIG_DIR, "command", "test"),
+              f"（实得 {_old_test_dir9}）", failures)
+        _rows9_before = M.read_all_rows(M.CONFIG_PATH)   # 坑 15：快照原值供 finally 还原
+        M.RUNNER_DIR = _rd9
+        M.RUNNER_TEST_DIR = os.path.join(_rd9, "test")
+        try:
+            # ② 哈希命名：fn_<sha1前16位>.bat/.py，同内容同路径、不同内容不同路径
+            _p1 = M.ensure_runner_script("cmd", "echo hello")
+            _p2 = M.ensure_runner_script("cmd", "echo hello")
+            check("同内容 → 同一路径（哈希命名可复用）", _p1 == _p2,
+                  f"（{_p1} vs {_p2}）", failures)
+            check("cmd 脚本扩展名 .bat", _p1 is not None and _p1.endswith(".bat"),
+                  f"（{_p1}）", failures)
+            check("文件名格式 fn_<16位十六进制>.bat",
+                  bool(_re9.fullmatch(r"fn_[0-9a-f]{16}\.bat", os.path.basename(_p1 or ""))),
+                  f"（{os.path.basename(_p1 or '')}）", failures)
+            _p3 = M.ensure_runner_script("py", "print(1)")
+            check("py 脚本扩展名 .py 且格式合规",
+                  bool(_re9.fullmatch(r"fn_[0-9a-f]{16}\.py", os.path.basename(_p3 or ""))),
+                  f"（{os.path.basename(_p3 or '')}）", failures)
+            _p4 = M.ensure_runner_script("cmd", "echo world")
+            check("不同内容 → 不同路径（哈希区分）", _p4 != _p1,
+                  f"（{_p1} vs {_p4}）", failures)
+            check("脚本确实落盘", os.path.isfile(_p1) and os.path.isfile(_p3)
+                  and os.path.isfile(_p4), "", failures)
+
+            # ③ 哈希算的是「实际落盘字节」：.bat 是 GBK 编码（坑 10），中文内容
+            #    须与 GBK 字节的 sha1 一致，而非 utf-8 字节
+            import hashlib as _hl9
+            _zh_payload = "echo 中文路径"
+            _pzh = M.ensure_runner_script("cmd", _zh_payload)
+            _want_body = "@echo off\r\n" + "echo 中文路径\r\n"
+            _h_gbk = _hl9.sha1(_want_body.encode("gbk")).hexdigest()[:16]
+            _h_u8 = _hl9.sha1(_want_body.encode("utf-8")).hexdigest()[:16]
+            check("bat 哈希取 GBK 编码字节（非 utf-8）",
+                  os.path.basename(_pzh) == f"fn_{_h_gbk}.bat",
+                  f"（实得 {os.path.basename(_pzh)}，GBK 期望 fn_{_h_gbk}.bat，"
+                  f"utf8 会是 fn_{_h_u8}.bat）", failures)
+            with open(_pzh, "rb") as fh:
+                check("bat 内容以 GBK 字节落盘（中文可被 cmd 正确解析）",
+                      fh.read() == _want_body.encode("gbk"), "", failures)
+
+            # ④ 只写一次：已存在即复用、绝不改写（cmd.exe 逐行读 bat，
+            #    执行中改写会破坏正在跑的指令）→ 用 mtime 不变证明未被重写
+            _mt1 = os.path.getmtime(_p1)
+            time.sleep(0.05)
+            with open(_p1, "a", encoding="gbk") as fh:
+                fh.write("echo 篡改标记\r\n")   # 人为改内容，若被重写则会还原
+            _mt_bad = os.path.getmtime(_p1)
+            _p1b = M.ensure_runner_script("cmd", "echo hello")
+            check("复用已存在脚本：路径不变", _p1b == _p1, f"（{_p1b}）", failures)
+            check("复用不改写文件（mtime 保持篡改后的值，未被重写还原）",
+                  os.path.getmtime(_p1) == _mt_bad and _mt_bad >= _mt1,
+                  f"（{_mt1} → {os.path.getmtime(_p1)}）", failures)
+            with open(_p1, encoding="gbk") as fh:
+                check("复用后文件内容仍含篡改标记（证明只写一次）",
+                      "篡改标记" in fh.read(), "", failures)
+
+            # ⑤ 孤儿回收：只删「不被 command.yaml 任何指令引用」的 fn_*
+            _rows9 = [{"name": "留", "code": "cmd: echo keepme", "active": True},
+                      {"name": "次级", "code": ("cmd: echo main9\n【【【子9】】】\n"
+                                                "cmd: echo sub9\n【【【子9】】】"),
+                       "active": True}]
+            M.save_functions(_rows9, M.CONFIG_PATH)
+            _keep_main = M.ensure_runner_script("cmd", "echo keepme")   # 主指令
+            _keep_sub = M.ensure_runner_script("cmd", "echo sub9")      # 次级项指令
+            _orphan = M.ensure_runner_script("cmd", "echo orphan9")     # 无人引用
+            check("前置：三个脚本都在", all(os.path.isfile(p) for p in
+                                            (_keep_main, _keep_sub, _orphan)), "", failures)
+            _removed = M.reclaim_runner_orphans()
+            check("孤儿回收删掉不被引用的 fn_*", not os.path.exists(_orphan),
+                  f"（{os.path.basename(_orphan)} 仍在）", failures)
+            check("孤儿回收保留主指令脚本", os.path.isfile(_keep_main),
+                  f"（{os.path.basename(_keep_main)} 被误删）", failures)
+            check("孤儿回收保留次级项指令脚本", os.path.isfile(_keep_sub),
+                  f"（{os.path.basename(_keep_sub)} 被误删）", failures)
+            check("孤儿回收返回删除清单（供诊断/日志）",
+                  isinstance(_removed, list) and os.path.basename(_orphan) in _removed,
+                  f"（{_removed}）", failures)
+            check("幂等：再回收一次不再删任何文件", M.reclaim_runner_orphans() == [],
+                  "", failures)
+
+            # ⑥ 删除跳过被占用文件（cmd 正在逐行读时不可删），下轮再试
+            _busy = M.ensure_runner_script("cmd", "echo busy9")
+            _real_remove9 = os.remove
+
+            def _busy_remove(p, *a, **k):
+                if p == _busy:
+                    raise PermissionError(32, "另一个程序正在使用此文件", p)
+                return _real_remove9(p, *a, **k)
+
+            os.remove = _busy_remove
+            try:
+                _removed_busy = M.reclaim_runner_orphans()
+            finally:
+                os.remove = _real_remove9
+            check("被占用脚本删除失败时跳过、不抛异常", os.path.isfile(_busy),
+                  f"（{_busy} 状态异常）", failures)
+            check("被占用脚本不计入已删清单（下轮再试）",
+                  os.path.basename(_busy) not in _removed_busy, f"（{_removed_busy}）",
+                  failures)
+            os.remove(_busy)   # 解除占用后可正常删除
+
+            # ⑦ 测试通道 tst_*：一次一份、不复用，且落在 command\test\ 下
+            _t1 = M.build_runner_test_path("cmd")
+            _t2 = M.build_runner_test_path("cmd")
+            check("测试脚本路径落在 command\\test 子目录",
+                  os.path.dirname(_t1) == M.RUNNER_TEST_DIR, f"（{_t1}）", failures)
+            check("测试脚本一次一份（两次路径不同，不复用哈希）", _t1 != _t2,
+                  f"（{_t1} vs {_t2}）", failures)
+            check("测试脚本前缀 tst_", os.path.basename(_t1).startswith("tst_"),
+                  f"（{os.path.basename(_t1)}）", failures)
+            check("孤儿回收不碰测试目录 tst_*（归 _out_files 读后即删）",
+                  not os.path.isdir(M.RUNNER_TEST_DIR)
+                  or all(not n.startswith("fn_")
+                         for n in os.listdir(M.RUNNER_TEST_DIR)), "", failures)
+        finally:
+            M.RUNNER_DIR = _old_runner_dir
+            M.RUNNER_TEST_DIR = _old_test_dir9
+            shutil.rmtree(_rd9, ignore_errors=True)
+            # 还原 functions 为进入 C9 前的快照（坑 15：动态读取原值再还原，
+            # 绝不用空列表清空——用户/前置用例的配置不能被子测试抹掉）
+            M.save_functions(_rows9_before, M.CONFIG_PATH)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
