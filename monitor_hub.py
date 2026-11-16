@@ -63,6 +63,80 @@ STATUS_STALE = "stale"
 #: 历史环形缓冲点数（60 ≈ 1 分钟，侧车 ~1.1s/帧）。关窗不停采，重开秒回曲线。
 HISTORY_POINTS = 60
 
+# ---------------------------------------------------------------------------
+# v2.03 配置拆分：collect 调参的冻结默认快照 + 生效值表 + 唯一写入口
+#   【作用范围】config.yaml 的 collect 组中由 monitor_hub 自身消费的六个键：
+#     history_points / sidecar_interval_ms / stale_sec / max_restarts /
+#     poll_ms / first_frame_timeout_sec。
+#   【影响】apply_tuning 把这些值写进 COLLECT_LIVE 生效表 + HISTORY_POINTS 全局；
+#     main 侧构造 MetricsHub/SidecarRunner、调 wait_first_frame 时读 COLLECT_LIVE
+#     传参，构造签名不变（坑 100 同款：注入生效值而非动签名）。enabled=false 时
+#     main 传 {}，整表回退内置默认。每次从 COLLECT_DEFAULTS 整表重算，幂等。
+#     注：refresh_ms / idle_stop_sec 虽同在 config.yaml collect 组，但其生效走
+#     main 侧「setting 已设值 > config 生效值 > 内置默认」三级优先级（_effective_*），
+#     不由本模块处理（计划 §四）。history_points 是单一真源（决策12）：同时决定
+#     本模块 deque(maxlen=) 与 monitor_ui.SPARKLINE_POINTS（后者由 main 侧 apply_tuning
+#     联动注入），杜绝两键不等致「记 N 点只画 M 点」错位。
+# ---------------------------------------------------------------------------
+COLLECT_DEFAULTS = {
+    "history_points": HISTORY_POINTS,   # 60，被 _record_history 的 deque(maxlen=) 消费
+    "sidecar_interval_ms": 1000,        # SidecarRunner.interval_ms
+    "stale_sec": 5.0,                   # SidecarRunner.stale_sec（断流判定）
+    "max_restarts": 3,                  # SidecarRunner.max_restarts（连续失败重启上限）
+    "poll_ms": 1000,                    # MetricsHub.poll_ms（psutil 聚合节拍）
+    "first_frame_timeout_sec": 15.0,    # wait_first_frame(timeout)
+}
+# 各键钳制范围（下界, 上界）；对照配置拆分实施计划 §五 collect 组
+_COLLECT_RANGE = {
+    "history_points": (10, 300),
+    "sidecar_interval_ms": (200, 5000),
+    "stale_sec": (2.0, 30.0),
+    "max_restarts": (0, 10),
+    "poll_ms": (200, 5000),
+    "first_frame_timeout_sec": (5.0, 60.0),
+}
+# 整型键（其余按 float 处理）；max_restarts 下界 0 合法=禁用重启
+_COLLECT_INT_KEYS = {"history_points", "sidecar_interval_ms",
+                     "max_restarts", "poll_ms"}
+
+#: 生效值表（apply_tuning 写、main 侧构造 hub/runner 时读）；出厂=内置默认
+COLLECT_LIVE = dict(COLLECT_DEFAULTS)
+
+
+def _clamp_num(v, lo, hi, default) -> float:
+    """把用户值钳进 [lo,hi]；非数值/NaN/inf 回退 default。返回 float。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return float(default)
+    if f != f or f == float("inf") or f == float("-inf"):
+        return float(default)
+    return max(float(lo), min(float(hi), f))
+
+
+def apply_tuning(values: dict) -> None:
+    """config.yaml collect 组（hub 自身消费部分）的唯一写入口（v2.03 配置拆分）。
+
+    【作用范围】COLLECT_DEFAULTS 列出的六个键。
+    【影响】每次从 COLLECT_DEFAULTS 整表重算：values={}（enabled=false 或无文件）→
+      全部回内置默认；values 含某键 → 钳制后写入 COLLECT_LIVE，超界钳边界、
+      非法值（非数值/NaN）回退默认。history_points 同时同步写模块全局
+      HISTORY_POINTS（单一真源）。坏值绝不致命，调用方无需 try/except。
+    方向 main→monitor_hub（本模块不 import main，不违反依赖约束）。
+    """
+    global HISTORY_POINTS, COLLECT_LIVE
+    v = values if isinstance(values, dict) else {}
+    live = {}
+    for key, dflt in COLLECT_DEFAULTS.items():
+        lo, hi = _COLLECT_RANGE[key]
+        c = _clamp_num(v[key], lo, hi, dflt) if key in v else float(dflt)
+        live[key] = int(round(c)) if key in _COLLECT_INT_KEYS else c
+    COLLECT_LIVE = live
+    # history_points 单一真源（决策12）：同步模块全局 HISTORY_POINTS，
+    # _record_history 的 deque(maxlen=HISTORY_POINTS) 下一拍即按新容量积累
+    HISTORY_POINTS = live["history_points"]
+
+
 CREATE_NO_WINDOW = 0x08000000
 
 #: 侧车 exe 查找顺序：环境变量 → onefile 解压目录（Nuitka）→ 源码期 collector/pub

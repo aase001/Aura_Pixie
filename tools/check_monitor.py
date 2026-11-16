@@ -396,10 +396,76 @@ def section_d():
         hub.stop()
 
 
+# ---------------------------------------------------------------------------
+# E. v2.03 配置拆分：collect 调参写入口 apply_tuning（钳制 + HISTORY_POINTS 单一真源）
+# ---------------------------------------------------------------------------
+def section_e():
+    print("[E] collect 调参写入口 apply_tuning")
+    ok(hasattr(mh, "COLLECT_DEFAULTS"), "COLLECT_DEFAULTS 冻结默认快照存在")
+    ok(hasattr(mh, "apply_tuning"), "apply_tuning 唯一写入口存在")
+    ok(hasattr(mh, "COLLECT_LIVE"), "COLLECT_LIVE 生效值表存在")
+    if not (hasattr(mh, "apply_tuning") and hasattr(mh, "COLLECT_DEFAULTS")
+            and hasattr(mh, "COLLECT_LIVE")):
+        print("  [E] collect 调参写入口未实现，跳过行为断言")
+        return
+    d = mh.COLLECT_DEFAULTS
+    ok(set(d) >= {"history_points", "sidecar_interval_ms", "stale_sec",
+                  "max_restarts", "poll_ms", "first_frame_timeout_sec"},
+       f"COLLECT_DEFAULTS 六键齐全（实际 {sorted(d)}）")
+    ok(d["history_points"] == 60,
+       f"COLLECT_DEFAULTS.history_points=60（实际 {d['history_points']}）")
+    try:
+        # apply_tuning({}) 幂等回内置默认
+        mh.apply_tuning({})
+        ok(mh.HISTORY_POINTS == 60 and mh.COLLECT_LIVE["poll_ms"] == 1000,
+           f"apply_tuning({{}}) 幂等回默认（HISTORY_POINTS={mh.HISTORY_POINTS} poll_ms={mh.COLLECT_LIVE['poll_ms']}）")
+        # history_points → HISTORY_POINTS（决策12 单一真源，被 _record_history 消费）
+        mh.apply_tuning({"history_points": 90})
+        ok(mh.HISTORY_POINTS == 90, f"history_points→HISTORY_POINTS 生效（实际 {mh.HISTORY_POINTS}）")
+        mh.apply_tuning({"history_points": 9999})
+        ok(mh.HISTORY_POINTS == 300, f"history_points 超上界钳到 300（实际 {mh.HISTORY_POINTS}）")
+        mh.apply_tuning({"history_points": 1})
+        ok(mh.HISTORY_POINTS == 10, f"history_points 超下界钳到 10（实际 {mh.HISTORY_POINTS}）")
+        # COLLECT_LIVE 各键生效（main 侧构造 hub/runner 时读此表）
+        mh.apply_tuning({"sidecar_interval_ms": 1500, "stale_sec": 8.0,
+                         "max_restarts": 5, "poll_ms": 2000,
+                         "first_frame_timeout_sec": 30})
+        L = mh.COLLECT_LIVE
+        ok(L["sidecar_interval_ms"] == 1500 and L["poll_ms"] == 2000,
+           f"sidecar_interval_ms/poll_ms 生效（{L['sidecar_interval_ms']}/{L['poll_ms']}）")
+        ok(L["stale_sec"] == 8.0 and L["max_restarts"] == 5
+           and L["first_frame_timeout_sec"] == 30,
+           f"stale_sec/max_restarts/first_frame_timeout_sec 生效"
+           f"（{L['stale_sec']}/{L['max_restarts']}/{L['first_frame_timeout_sec']}）")
+        # 超界钳制（范围对照计划 §五 collect 组）
+        mh.apply_tuning({"sidecar_interval_ms": 99999, "stale_sec": 999,
+                         "max_restarts": 999, "poll_ms": 1,
+                         "first_frame_timeout_sec": 999})
+        L = mh.COLLECT_LIVE
+        ok(L["sidecar_interval_ms"] == 5000, f"sidecar_interval_ms 钳到上界 5000（实际 {L['sidecar_interval_ms']}）")
+        ok(L["stale_sec"] == 30, f"stale_sec 钳到上界 30（实际 {L['stale_sec']}）")
+        ok(L["max_restarts"] == 10, f"max_restarts 钳到上界 10（实际 {L['max_restarts']}）")
+        ok(L["poll_ms"] == 200, f"poll_ms 钳到下界 200（实际 {L['poll_ms']}）")
+        ok(L["first_frame_timeout_sec"] == 60, f"first_frame_timeout_sec 钳到上界 60（实际 {L['first_frame_timeout_sec']}）")
+        # max_restarts 下界 0 合法（禁用重启），不得抬成默认
+        mh.apply_tuning({"max_restarts": 0})
+        ok(mh.COLLECT_LIVE["max_restarts"] == 0,
+           f"max_restarts=0 合法保留（实际 {mh.COLLECT_LIVE['max_restarts']}）")
+        # 非法值回退默认（不致命）
+        mh.apply_tuning({"history_points": "abc", "poll_ms": None, "stale_sec": "x"})
+        ok(mh.HISTORY_POINTS == 60 and mh.COLLECT_LIVE["poll_ms"] == 1000
+           and mh.COLLECT_LIVE["stale_sec"] == 5.0,
+           f"非法值回退默认（HP={mh.HISTORY_POINTS} poll={mh.COLLECT_LIVE['poll_ms']} stale={mh.COLLECT_LIVE['stale_sec']}）")
+    finally:
+        # 幂等回默认，防污染（section_c 依赖 HISTORY_POINTS==60，但其先于本节执行）
+        mh.apply_tuning({})
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
     section_c()
     section_d()
+    section_e()
     print(f"\n== PASS {PASS} / FAIL {FAIL} / SKIP {SKIP} ==")
     sys.exit(1 if FAIL else 0)
