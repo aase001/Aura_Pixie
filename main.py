@@ -411,6 +411,7 @@ CONFIG_PATH = os.path.join(APP_CONFIG_DIR, "setting.yaml")   # 统一配置文�
 TUNING_PATH = os.path.join(APP_CONFIG_DIR, "config.yaml")    # v2.03 数值调参文件（enabled 默认 false）
 COMMAND_PATH = os.path.join(APP_CONFIG_DIR, "command.yaml")  # v2.03 功能块（原 setting.yaml.functions）
 STATE_PATH = os.path.join(APP_CONFIG_DIR, "state.yaml")      # v2.03 运行时状态（球心坐标 + monitor.layout，程序独占写）
+BACKUP_DIR = os.path.join(APP_CONFIG_DIR, "backup")           # v2.03 迁移/导入前快照目录（保留最近 5 份自建快照）
 SETTINGS_PATH = CONFIG_PATH   # 历史别名：旧代码/自检按此名引用，两者恒指向同一文件
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
 RUNNER_DIR = os.path.join(tempfile.gettempdir(), "AuraPixie")   # py 代码临时脚本目录
@@ -1439,6 +1440,107 @@ def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
     _write_yaml_block(state_path, STATE_HEADER, state_data)
 
 
+def _backup_snapshot(kind: str, data: dict, backup_dir: str | None = None) -> str | None:
+    """把一份配置视图落进 backup\\ 作为回滚快照（决策7）。
+
+    kind = "pre_split"（迁移前）/ "pre_import"（导入覆盖前）；目录名
+    {kind}_{yyyyMMddHHmmss}，内含 setting.yaml 全量视图。落完裁剪：backup\\ 内
+    自建快照（pre_split_* / pre_import_*）只保留最近 5 份，超出删最旧——
+    只裁这两类自建物，不碰用户放进 backup\\ 的其他内容。
+    返回快照目录路径；失败记 crash.log 并返回 None（备份失败不阻断主流程，
+    但迁移会因此中止，见 migrate_to_split_layout）。
+    """
+    bdir = backup_dir if backup_dir is not None else BACKUP_DIR
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    snap_dir = os.path.join(bdir, f"{kind}_{stamp}")
+    try:
+        # 同秒内二次快照（自检连续触发）会撞名：加序号后缀保证不覆盖已有快照
+        if os.path.exists(snap_dir):
+            n = 1
+            while os.path.exists(f"{snap_dir}_{n}"):
+                n += 1
+            snap_dir = f"{snap_dir}_{n}"
+        os.makedirs(snap_dir, exist_ok=True)
+        with open(os.path.join(snap_dir, "setting.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("# Aura Pixie 配置快照（程序自动生成，用于回滚）\n")
+            yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False,
+                           default_flow_style=False, width=1000)
+    except OSError as exc:
+        _log_crash("backup_snapshot", exc)
+        return None
+    _trim_backups(bdir)
+    return snap_dir
+
+
+def _trim_backups(bdir: str | None = None, keep: int = 5) -> None:
+    """裁剪 backup\\ 内自建快照，只保留最近 keep 份（按名称时间戳升序删最旧）。
+
+    只认 pre_split_* / pre_import_* 两类程序自建物（计划 §十.7「只裁 backup\\ 内
+    自建快照」）；用户自己放进来的文件/目录一律不动。
+    """
+    root = bdir if bdir is not None else BACKUP_DIR
+    try:
+        names = [n for n in os.listdir(root)
+                 if n.startswith("pre_split_") or n.startswith("pre_import_")]
+    except OSError:
+        return
+    if len(names) <= keep:
+        return
+    names.sort()   # 名称含 yyyyMMddHHmmss，字典序 == 时间序；同秒后缀 _n 也递增
+    for old in names[:len(names) - keep]:
+        p = os.path.join(root, old)
+        try:
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+        except OSError as exc:
+            _log_crash("trim_backups", exc)
+
+
+def migrate_to_split_layout(path: str = SETTINGS_PATH) -> bool:
+    """首启一次性迁移：老式单 setting.yaml → 四文件布局（计划 §十）。
+
+    【作用范围】主位置 setting.yaml（含其兄弟 command.yaml / state.yaml）。
+    【影响】
+      · 已迁移（setting.yaml 含 layout_version: 2）→ 直接返回 False，不重复快照、
+        不改任何文件（幂等，每次启动都会调）；
+      · 未迁移且文件存在 → ① 先把当前全量视图落 backup\\pre_split_<ts>\\setting.yaml；
+        ② 经 write_setting 拆写三文件（functions→command.yaml，window.pos_x/pos_y 与
+        monitor.layout→state.yaml，其余留 setting.yaml 并写 layout_version: 2）；
+        ③ 偏好与开关原样保留，其中 monitor.refresh_ms/idle_stop_sec 按 §十.3 决策
+        **不剥离**，继续留在 setting.yaml 作为「用户已设值」（三级优先级最高档）；
+      · 快照落盘失败 → 中止迁移并返回 False（宁可不迁移，也不在无回滚点的情况下
+        改写用户配置）；
+      · 主位置无 setting.yaml（全新用户）→ 返回 False，由 ensure_settings 直接生成
+        四文件出厂默认。
+    必须在任何稳态写盘之前调用（write_setting 已具拆分能力，老配置若先被写盘会
+    无快照地拆分），故接在 ensure_settings 读取主位置之后、返回之前。
+    """
+    if not _is_main_position(path):
+        return False
+    raw = _read_yaml_file(path)
+    if not raw:
+        return False                      # 无老配置（全新用户）→ 无需迁移
+    if raw.get("layout_version") == 2:
+        return False                      # 已迁移 → 幂等返回
+    try:
+        cmd_path, state_path = _sibling_paths(path)
+        # 迁移前全量视图（此时兄弟文件通常不存在，视图即老 setting.yaml 内容）
+        view = _merge_setting_view(raw, _read_yaml_file(cmd_path),
+                                   _read_yaml_file(state_path))
+        if _backup_snapshot("pre_split", view) is None:
+            print("[配置] 迁移前快照失败，本次不迁移（保留原单文件配置）",
+                  file=sys.stderr)
+            return False
+        write_setting(view, path)         # 拆分落四文件 + 写 layout_version=2
+        print(f"[配置] 已迁移到四文件布局：{os.path.dirname(path)}", file=sys.stderr)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 迁移失败不致命，保留原配置
+        _log_crash("migrate_to_split_layout", exc)
+        return False
+
+
 def apply_imported_config(src: dict, path: str = SETTINGS_PATH) -> dict:
     """把导入的配置合并写入主位置，但保留用户当前坐标与监视布局（v2.03 四文件）。
 
@@ -1446,6 +1548,7 @@ def apply_imported_config(src: dict, path: str = SETTINGS_PATH) -> dict:
     若照写会把用户当前球心位置/窗格布局冲掉——导入不应改变「运行时状态」。
     因此先读当前视图（经 read_setting 合并，老用户从旧单文件回退也能读到），
     把当前 pos/layout 注入合并结果，再走 write_setting 拆分落盘。
+    覆盖前落 backup\\pre_import_<ts> 快照（决策7），可回滚。
     返回最终写入的视图（自检/诊断用）。GUI 的 _import_config 调本函数，不直接调 write_setting。
     """
     cur = read_setting(path)
@@ -1464,6 +1567,9 @@ def apply_imported_config(src: dict, path: str = SETTINGS_PATH) -> dict:
     m_mon = dict(merged.get("monitor") if isinstance(merged.get("monitor"), dict) else {})
     m_mon["layout"] = dict(cur_mon.get("layout") or {})
     merged["monitor"] = m_mon
+    # 覆盖前快照（仅主位置；导出/自检临时路径不产生快照）
+    if cur and _is_main_position(path):
+        _backup_snapshot("pre_import", cur)
     write_setting(merged, path)
     return merged
 
@@ -1607,7 +1713,10 @@ def ensure_settings(path: str = SETTINGS_PATH, base: str | None = None) -> dict:
       4) 根目录没有合法 yaml → 写出厂默认配置并返回。
     base 可注入扫描目录（自检隔离用）；None 时用 exe 所在目录。
     """
-    # 1) 主位置已有 → 直接读取
+    # 1) 主位置已有 → 先做一次性迁移（老单文件 → 四文件），再读取载入。
+    #    迁移必须在任何稳态写盘之前：write_setting 已具拆分能力，老配置若先被
+    #    写盘（如移动球体触发坐标记忆）会无快照地拆分。已迁移则幂等返回。
+    migrate_to_split_layout(path)
     data = read_setting(path)
     if data:
         return data

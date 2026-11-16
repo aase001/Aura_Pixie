@@ -11,8 +11,10 @@
 跑法：python tools/check_config_compat.py（退出码 0 全过）
 """
 import os
+import shutil
 import sys
 import tempfile
+import time
 
 _ISO = tempfile.mkdtemp(prefix="aura_cfg_audit_")
 os.environ["LOCALAPPDATA"] = _ISO
@@ -360,6 +362,165 @@ for _f in (_set7, _cmd7, _state7, _bak7):
             os.remove(_f)
         except OSError:
             pass
+
+# ---- 场景8：v2.03 首启一次性迁移 + backup 快照（决策7 + 计划 §十）----
+_d8 = os.path.join(_ISO, "mig8")
+os.makedirs(_d8, exist_ok=True)
+_set8 = os.path.join(_d8, "setting.yaml")
+_cmd8 = os.path.join(_d8, "command.yaml")
+_state8 = os.path.join(_d8, "state.yaml")
+_bkdir8 = os.path.join(_d8, "backup")
+M.SETTINGS_PATH = M.CONFIG_PATH = _set8
+M.COMMAND_PATH, M.STATE_PATH = _cmd8, _state8
+M.BACKUP_DIR = _bkdir8
+for _f in (_set8, _cmd8, _state8):
+    if os.path.exists(_f):
+        os.remove(_f)
+shutil.rmtree(_bkdir8, ignore_errors=True)
+
+# 注意：上面已 monkeypatch M.BACKUP_DIR 做隔离，hasattr 必为 True（弱断言，坑 65）；
+# 故用源码看守验证 main.py 真的定义了 BACKUP_DIR 常量与迁移函数
+_main_src8 = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "main.py"), encoding="utf-8").read()
+ck("main.py 定义 BACKUP_DIR 常量", "BACKUP_DIR =" in _main_src8)
+ck("migrate_to_split_layout 函数存在", hasattr(M, "migrate_to_split_layout"))
+ck("迁移/备份在运行时读 BACKUP_DIR（可被隔离替换，非默认参数绑定）",
+   "_backup_snapshot(" in _main_src8)
+if hasattr(M, "migrate_to_split_layout") and "BACKUP_DIR =" in _main_src8:
+    # 老式单文件（无 layout_version，functions/坐标/layout 全挤在 setting.yaml）
+    _legacy8 = {
+        "functions": [{"name": "老功能", "code": "print(7)", "active": True},
+                      {"name": "老功能2", "code": "print(8)", "active": False}],
+        "appearance": {"breath": False, "color_mid": "#0A0B0C", "idle_sec": 90},
+        "autostart": {"enabled": True},
+        "window": {"always_on_top": True, "locked": True,
+                   "pos_x": 777.0, "pos_y": 888.0},
+        "monitor": {"enabled": True, "topmost": True, "refresh_ms": 2000,
+                    "idle_stop_sec": 60,
+                    "units": {"cpu.load": {"enabled": True, "threshold": []}},
+                    "layout": {"cpu.load": {"x": 5, "y": 6, "group_id": "gg"}}},
+    }
+    with open(_set8, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(_legacy8, fh, allow_unicode=True)
+
+    M.migrate_to_split_layout(_set8)
+    # ① 迁移前全量快照落 backup\pre_split_<ts>\setting.yaml
+    _pre = sorted(d for d in (os.listdir(_bkdir8) if os.path.isdir(_bkdir8) else [])
+                  if d.startswith("pre_split_"))
+    ck("迁移落 pre_split 快照目录", len(_pre) == 1, f"（实际 {_pre}）")
+    _snap_path = os.path.join(_bkdir8, _pre[0], "setting.yaml") if _pre else None
+    _snap = (yaml.safe_load(open(_snap_path, encoding="utf-8"))
+             if _snap_path and os.path.exists(_snap_path) else None)
+    ck("快照为迁移前全量内容（functions + 坐标 + layout）",
+       isinstance(_snap, dict)
+       and (_snap.get("functions") or [{}])[0].get("name") == "老功能"
+       and _snap.get("window", {}).get("pos_x") == 777.0
+       and _snap.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 5,
+       f"（快照 {list(_snap) if isinstance(_snap, dict) else _snap}）")
+    # ② 拆写三文件
+    _rc8 = yaml.safe_load(open(_cmd8, encoding="utf-8")) if os.path.exists(_cmd8) else {}
+    _rt8 = yaml.safe_load(open(_state8, encoding="utf-8")) if os.path.exists(_state8) else {}
+    _rs8 = yaml.safe_load(open(_set8, encoding="utf-8"))
+    ck("迁移拆出 command.yaml（functions 2 条全保留含未激活）",
+       len(_rc8.get("functions") or []) == 2
+       and _rc8["functions"][1].get("active") is False)
+    ck("迁移拆出 state.yaml（坐标 777/888 + layout）",
+       _rt8.get("window", {}).get("pos_x") == 777.0
+       and _rt8.get("window", {}).get("pos_y") == 888.0
+       and _rt8.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 5)
+    ck("迁移后 setting.yaml 写 layout_version=2 且不含 functions/坐标/layout",
+       _rs8.get("layout_version") == 2 and "functions" not in _rs8
+       and "pos_x" not in _rs8.get("window", {})
+       and "layout" not in _rs8.get("monitor", {}), str(list(_rs8)))
+    # ③ 偏好与开关完整保留（不丢用户既有设置）
+    ck("迁移保留 appearance（breath=False/色/idle_sec）",
+       _rs8.get("appearance", {}).get("breath") is False
+       and _rs8.get("appearance", {}).get("color_mid") == "#0A0B0C"
+       and _rs8.get("appearance", {}).get("idle_sec") == 90, str(_rs8.get("appearance")))
+    ck("迁移保留 window 开关（always_on_top/locked）",
+       _rs8.get("window", {}).get("always_on_top") is True
+       and _rs8.get("window", {}).get("locked") is True, str(_rs8.get("window")))
+    ck("迁移保留 monitor 开关与 refresh_ms/idle_stop_sec（决策：不剥离，用户已设值）",
+       _rs8.get("monitor", {}).get("enabled") is True
+       and _rs8.get("monitor", {}).get("topmost") is True
+       and _rs8.get("monitor", {}).get("refresh_ms") == 2000
+       and _rs8.get("monitor", {}).get("idle_stop_sec") == 60,
+       str(list(_rs8.get("monitor", {}))))
+    ck("迁移保留 monitor.units 勾选",
+       _rs8.get("monitor", {}).get("units", {}).get("cpu.load", {}).get("enabled") is True)
+    ck("迁移保留 autostart", _rs8.get("autostart", {}).get("enabled") is True)
+    # ④ 迁移后视图读回与老配置等价（端到端不丢数据）
+    _view8 = M.read_setting(_set8)
+    ck("迁移后视图还原：functions/坐标/layout/外观全部可读回",
+       (_view8.get("functions") or [{}])[0].get("name") == "老功能"
+       and _view8.get("window", {}).get("pos_x") == 777.0
+       and _view8.get("window", {}).get("locked") is True
+       and _view8.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 5
+       and _view8.get("appearance", {}).get("color_mid") == "#0A0B0C")
+    # ⑤ 幂等：已迁移（layout_version=2）再调不重复快照、不改内容
+    _before_ids = sorted(os.listdir(_bkdir8))
+    _before_cmd = yaml.safe_load(open(_cmd8, encoding="utf-8"))
+    _before_state = yaml.safe_load(open(_state8, encoding="utf-8"))
+    M.migrate_to_split_layout(_set8)
+    ck("迁移幂等：已迁移再调不新增快照",
+       sorted(os.listdir(_bkdir8)) == _before_ids, f"（{sorted(os.listdir(_bkdir8))}）")
+    ck("迁移幂等：command/state 内容不变",
+       yaml.safe_load(open(_cmd8, encoding="utf-8")) == _before_cmd
+       and yaml.safe_load(open(_state8, encoding="utf-8")) == _before_state)
+    # ⑥ backup 保留最近 5 份：预置 6 个不同时间戳的旧快照 + 触发一次真实迁移
+    #    （不靠连续迁移：时间戳精度为秒，同秒多次会目录名冲突）
+    shutil.rmtree(_bkdir8, ignore_errors=True)
+    for _ts in ("20260101000001", "20260101000002", "20260101000003",
+                "20260101000004", "20260101000005", "20260101000006"):
+        os.makedirs(os.path.join(_bkdir8, f"pre_split_{_ts}"), exist_ok=True)
+        with open(os.path.join(_bkdir8, f"pre_split_{_ts}", "setting.yaml"),
+                  "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"marker": _ts}, fh)
+    with open(_set8, "w", encoding="utf-8") as fh:      # 回到未迁移态
+        yaml.safe_dump(_legacy8, fh, allow_unicode=True)
+    for _f in (_cmd8, _state8):
+        if os.path.exists(_f):
+            os.remove(_f)
+    M.migrate_to_split_layout(_set8)
+    _allsnaps = sorted(d for d in os.listdir(_bkdir8) if d.startswith("pre_split_"))
+    ck("backup 裁剪到最近 5 份 pre_split 快照", len(_allsnaps) == 5,
+       f"（实际 {len(_allsnaps)} 份：{_allsnaps}）")
+    ck("裁剪保留最新 5 份、删掉最旧的 20260101000001",
+       "pre_split_20260101000001" not in _allsnaps
+       and "pre_split_20260101000006" in _allsnaps, f"（{_allsnaps}）")
+    ck("裁剪只动 backup 内自建快照，不碰配置四文件",
+       os.path.exists(_set8) and os.path.exists(_cmd8) and os.path.exists(_state8))
+    # ⑦ 导入覆盖前落 pre_import 快照
+    shutil.rmtree(_bkdir8, ignore_errors=True)
+    M.apply_imported_config({"functions": [{"name": "X", "code": "p", "active": True}],
+                             "appearance": {"color_mid": "#111111"}}, _set8)
+    _imps = sorted(d for d in os.listdir(_bkdir8) if d.startswith("pre_import_")) \
+        if os.path.isdir(_bkdir8) else []
+    ck("导入覆盖前落 pre_import 快照", len(_imps) >= 1, f"（实际 {_imps}）")
+    _imp_snap_p = os.path.join(_bkdir8, _imps[0]) if _imps else None
+    _imp_snap = None
+    if _imp_snap_p and os.path.isdir(_imp_snap_p):
+        _cands = [os.path.join(_imp_snap_p, n) for n in os.listdir(_imp_snap_p)]
+        _imp_snap = yaml.safe_load(open(_cands[0], encoding="utf-8")) if _cands else None
+    elif _imp_snap_p and os.path.isfile(_imp_snap_p):
+        _imp_snap = yaml.safe_load(open(_imp_snap_p, encoding="utf-8"))
+    ck("pre_import 快照为导入前完整视图（含被覆盖前 functions/坐标）",
+       isinstance(_imp_snap, dict)
+       and (_imp_snap.get("functions") or [{}])[0].get("name") == "老功能"
+       and _imp_snap.get("window", {}).get("pos_x") == 777.0,
+       f"（快照 {list(_imp_snap) if isinstance(_imp_snap, dict) else _imp_snap}）")
+    _rt_after = yaml.safe_load(open(_state8, encoding="utf-8"))
+    ck("导入后 state.yaml 坐标仍未被覆盖（777/888）",
+       _rt_after.get("window", {}).get("pos_x") == 777.0, str(_rt_after.get("window")))
+
+for _f in (_set8, _cmd8, _state8):
+    if os.path.exists(_f):
+        try:
+            os.remove(_f)
+        except OSError:
+            pass
+shutil.rmtree(_bkdir8, ignore_errors=True)
+shutil.rmtree(_d8, ignore_errors=True)
 
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:
