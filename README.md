@@ -56,7 +56,7 @@ Aura Pixie 是一个驻留在桌面任意位置的呼吸光效圆球小助手：
 * 开机自启（可选）：任务计划程序（登录触发 + 最高权限），打包形态启动自愈
 * 管理员运行：资源监视温度/功耗/硬盘类读数依赖内核驱动，启动自动 UAC 提权；调试可用 `--no-elevate` 免提权（温度类指标不可用）
 * 位置记忆：球体移动停止 10 秒自动落盘，强杀/断电位置也不丢；无记录默认屏幕右侧中间贴边
-* 统一配置：`%LOCALAPPDATA%\Aura_Pixie\setting.yaml`（functions / appearance / autostart / window / monitor 五块）
+* 统一配置根目录：`%LOCALAPPDATA%\Aura_Pixie\`，按写入方拆成四文件——`config.yaml`（数值调参）/ `command.yaml`（功能指令）/ `setting.yaml`（外观偏好与开关）/ `state.yaml`（坐标与布局，程序自动写）；另有首启释放的 `README.md` 与异常日志 `crash.log`
 * 配置导入/导出：一键备份到任意文件夹、导入合并（内容合法性校验）
 * 单文件分发：图标、采集侧车、中文翻译全部内嵌，无需安装依赖
 
@@ -186,13 +186,29 @@ monitor:                               # 内置动作：打开监视设置窗
 
 ## 配置说明
 
-配置文件：`%LOCALAPPDATA%\Aura_Pixie\setting.yaml`（五个功能块）：
+配置根目录：`%LOCALAPPDATA%\Aura_Pixie\`。v2.03 起按**写入方**拆成四个文件，各管一块，互不干扰：
+
+| 文件 | 内容 | 谁在写 |
+| --- | --- | --- |
+| `config.yaml` | 全软件数值调参（球体交互 / 监视窗格 / 采集层），总开关 `enabled` 默认 `false` | 你手改；程序只读 |
+| `command.yaml` | `functions` 功能扇区列表 | 「设置」窗保存 |
+| `setting.yaml` | `appearance` 外观 / `autostart` 自启 / `window` 开关 / `monitor` 开关与 units | 「外观」「监视」窗保存 |
+| `state.yaml` | 球心坐标 `window.pos_x/pos_y` + `monitor.layout` 窗格布局 | 程序自动写（勿手改） |
+
+另有首启释放的 `README.md`（参数逐项中文说明）、`crash.log`（异常日志，超 1MB 轮转保留一代 `crash.old.log`）、`backup\`（迁移/导入前快照，保留最近 5 份）、`command\`（执行脚本缓存，哈希命名复用；`test\` 子目录放测试产物）。
+
+**数值调参（config.yaml）**：出厂 `enabled: false` = 安全模式，改任何数值都不生效；改成 `true` 后数值才生效（逐键钳制，非法值回退默认），改完须在球体上**右键「重载」**——程序不监听文件。完整键表与每项的【作用范围】【影响】【取值范围】见配置目录里的 `README.md`。
+
+下面按文件给出 `command.yaml` / `setting.yaml` 的结构（`state.yaml` 由程序维护，不需手写）：
 
 ```yaml
+# ── command.yaml ────────────────────────────────────────────────
 functions:                          # 功能扇区（顺序 = 扇形顺序）
   - name: "开记事本"                # ≤6 汉字 / 12 字母
     code: "cmd: start notepad"      # 前缀：无/py:（默认）/ cmd: / ps: / pwsh: / monitor:；可含成对标记【【【名】】】挂载 2~9 个次级项
     active: true                    # 勾选计扇形
+
+# ── setting.yaml ────────────────────────────────────────────────
 appearance:                         # 外观
   breath: true                      # 球体呼吸开关（false=颜色与大小全停，恒渲染起始色）
   color_start: "#FFFFFF"            # 起始色（十六进制）
@@ -224,23 +240,34 @@ autostart:
 window:
   always_on_top: false              # 保持球体置顶（开关在「外观」窗首行）
   locked: false                     # 球体锁定：禁拖动，悬停/点击/右键交互照常
-  pos_x: null                       # 球心记忆位置（移动停止 10s 自动落盘）
-  pos_y: null
 monitor:                            # 资源监视
   enabled: false                    # 总开关（勾选并保存才拉起采集）
   topmost: false                    # 窗口置顶（与球体置顶解耦）
   locked: false                     # 窗格锁定：禁移动 + 禁拆分/合并组
-  refresh_ms: 1000                  # 采样周期（毫秒）
-  idle_stop_sec: 300                # 全部窗格关闭后闲置多少秒停采（0=永不停采）
+  refresh_ms: 1000                  # 采样周期（毫秒）；仅在「你设过」时留在此处，见下方优先级
+  idle_stop_sec: 300                # 闲置停采秒数（0=永不停采）；同上
   units:                            # 每参数：enabled=勾选建窗，threshold=自定义阈值段
     cpu.load: {enabled: false, threshold: []}
     gpu_d.0.power: {enabled: false, threshold: []}   # 独显按卡展开：gpu_d.{卡序}.{参数}
     disk.0.usage: {enabled: false, threshold: []}    # 硬盘按盘展开：disk.{盘序}.{参数}
     # …其余参数同构，默认全不勾选；threshold 形如 [{min: 0, max: 60, color: "#3FB950"}, …]
-  layout: {}                        # 位置与吸附组记忆：{参数key: {x, y, group_id}}，自动维护
+layout_version: 2                   # 四文件拆分标记（迁移与未来格式演进锚点）
+
+# ── state.yaml（程序自动写，请勿手改）────────────────────────────
+window:
+  pos_x: 2455.0                     # 球心记忆位置（移动停止 10s 自动落盘）
+  pos_y: 884.4
+monitor:
+  layout: {}                        # 位置与吸附组记忆：{参数key: {x, y, group_id}}
 ```
 
-配置迁移：设置窗「导入/导出配置」支持备份与恢复；首次运行自动扫描 exe 目录下的旧版 yaml 合并迁移。旧配置缺新键时自动回退默认值，旧字段（如 `idle_min`、旧独显固定键）自动换算升级。
+**采集周期两键的优先级**：`refresh_ms` / `idle_stop_sec` 的最终生效值 = `setting.yaml` 里你设过的值 > `config.yaml` 的 `collect` 组生效值（需 `enabled: true`）> 内置默认。这是迁移兼容特例——老版本里你在监视设置设过的周期，升级后继续生效、观感不变；从没设过的则可以用 `config.yaml` 调。保存监视设置时不会替你伪造这两个键，所以 `config.yaml` 的调参不会被挡住。
+
+配置迁移：
+* **老版本升级**：首次启动检测到旧版单文件 `setting.yaml`（无 `layout_version: 2`）时，先把全量快照落 `backup\pre_split_<时间戳>\setting.yaml`，再一次性拆成四文件并写 `layout_version: 2`；偏好、开关、坐标、布局全部原样保留。已迁移则不再重复动作。快照落盘失败就不迁移（保留原文件，绝不在无回滚点时改写你的配置）。
+* **导入旧备份**：设置窗「导入/导出配置」支持备份与恢复；导入前落 `backup\pre_import_<时间戳>` 快照，且**不覆盖 `state.yaml`**——别人机器上的坐标/布局不会冲掉你当前的位置。
+* 首次运行仍会自动扫描 exe 目录下的旧版 yaml 合并迁移；旧配置缺新键回退默认，旧字段（如 `idle_min`、旧独显固定键）自动换算升级。
+* `backup\` 只保留最近 5 份程序自建快照，超出自动裁剪；你自己放进该目录的文件不受影响。
 
 ## 开发与测试
 
@@ -326,7 +353,7 @@ Q：指令点击后没反应？
 A：先确认指令格式无误（参考上文「指令格式」）；py 语法错误 / 指令为空的条目不会执行，扇区闪红光提示。可以在设置窗右键 → 高级编辑 →「测试」直接查看真实输出与错误信息。
 
 Q：配置在哪里？换电脑怎么迁移？
-A：配置位于 `%LOCALAPPDATA%\Aura_Pixie\setting.yaml`。设置窗「导入/导出配置」→ 导出可备份到任意文件夹（`setting.yaml.bak`），新机器上「导入」即可迁移；或直接复制该 yaml 文件。
+A：配置都在 `%LOCALAPPDATA%\Aura_Pixie\` 目录里（四个 yaml：`config.yaml` / `command.yaml` / `setting.yaml` / `state.yaml`）。设置窗「导入/导出配置」→ 导出会把完整配置写成一个 `setting.yaml.bak` 到任意文件夹，新机器上「导入」即可迁移（导入不会覆盖你当前的球体坐标与窗格布局）；手动迁移则直接复制那四个 yaml 文件即可——`command\`（脚本缓存）与 `cache\`（运行缓存）是可再生的，不必带走。
 
 Q：怎么开机自启动？
 A：设置窗勾选「开机自启动」即可（注册「任务计划程序」项：登录触发 + 管理员权限，打包形态启动自愈自动重建）。
@@ -359,7 +386,7 @@ A：不会。位置与组合自动记忆，退出/关机立即落盘，重启自
 | ------ | ------ |
 | GUI | PySide6 6.12（Qt6，LGPL）：透明无边框窗口 + QPainter 自绘 + QTimer 动画 |
 | UI 主题 | Fusion 样式 + 统一调色板 + DWM 标题栏着色 + 运行时深浅色监视，全窗口跟随系统主题 |
-| 配置 | YAML（pyyaml）单文件五块，主位置 `%LOCALAPPDATA%\Aura_Pixie\setting.yaml` |
+| 配置 | YAML（pyyaml）按写入方拆四文件（config/command/setting/state），根目录 `%LOCALAPPDATA%\Aura_Pixie\`；读取合并成统一视图、写入按块拆分，老单文件自动迁移并留快照 |
 | 资源监视 | C# 侧车（.NET 8 + LibreHardwareMonitorLib 0.9.6，MPL 2.0）+ psutil 双源；JSON 行协议 |
 | 跨进程 | QLocalServer / QLocalSocket 命名管道（单实例定位指令） |
 | 进程执行 | subprocess.Popen fire-and-forget，`CREATE_NO_WINDOW` 全静默 |
