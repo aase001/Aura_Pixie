@@ -222,7 +222,7 @@ def app_executable() -> str:
     return os.path.abspath(__file__)
 
 
-BASE_DIR = os.path.dirname(app_executable())   # exe/脚本所在目录（迁移源、图标、crash.log 位置）
+BASE_DIR = os.path.dirname(app_executable())   # exe/脚本所在目录（迁移源、图标、子进程 cwd）
 
 _zh_translators_keep: list = []   # 翻译器实例须长期持有，否则被回收后 Qt 自动卸载
 _titlebar_filter_keep: list = []  # 标题栏主题过滤器须长期持有（同翻译器保引用）
@@ -417,6 +417,10 @@ SETTINGS_PATH = CONFIG_PATH   # 历史别名：旧代码/自检按此名引用�
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
 RUNNER_DIR = os.path.join(APP_CONFIG_DIR, "command")     # v2.03 执行脚本缓存（哈希命名、只写一次、存在即复用）
 RUNNER_TEST_DIR = os.path.join(RUNNER_DIR, "test")       # 「测试」按钮的一次性脚本与输出（一次一份、读后即删）
+# v2.03：crash.log 从 exe 旁（BASE_DIR）移进配置目录——打包版 exe 目录可能只读，
+# 且每个归档目录都会各写一份，散落难找。懒生成（首次出错才建）+ 超 1MB 轮转保留一代。
+CRASH_LOG_PATH = os.path.join(APP_CONFIG_DIR, "crash.log")   # 唯一可调项；上一代 crash.old.log 由它同目录推导
+CRASH_LOG_MAX_BYTES = 1024 * 1024   # 轮转阈值 1MB（写入前检查，超限移交 old 后新开）
 
 
 def _clamp_tune(v, lo, hi, default):
@@ -976,16 +980,35 @@ def validate_sub_items_count(total: int, limit_min: int = MIN_SECTORS,
 
 
 def _log_crash(where: str, exc: BaseException) -> None:
-    """拦截回调异常并写入 crash.log。
+    """拦截回调异常并写入 crash.log（配置目录内；超 1MB 轮转保留一代）。
 
     PySide6 6.x 对槽函数/虚函数里的未捕获异常会直接终止进程——上次点保存后
     程序整体消失正是这类问题。所有我们自己的回调一律兜住，程序必须活着。
+
+    v2.03：日志随配置一起收进 %LOCALAPPDATA%\\Aura_Pixie\\（不再散落 exe 旁——
+    打包版 exe 目录可能只读，且每个归档目录都会各写一份）。写入前若已超
+    CRASH_LOG_MAX_BYTES（1MB）→ 现文件改名 crash.old.log（覆盖上一代）后新开，
+    只保留一代：既能追溯最近两批异常，又不会在长驻运行下无限增长。
+    懒生成不变：首次出错才建文件，全新用户目录下没有 crash.log。
+    配置目录不存在时自建（日志功能不因目录缺失而失效）。
     """
     import traceback
     msg = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     print(f"[异常拦截] {where}:\n{msg}", file=sys.stderr)
     try:
-        with open(os.path.join(BASE_DIR, "crash.log"), "a", encoding="utf-8") as fh:
+        parent = os.path.dirname(CRASH_LOG_PATH)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        # 轮转：超上限先把现文件移交同目录 crash.old.log（覆盖上一代），再新开。
+        # old 路径由 CRASH_LOG_PATH 现场推导（单一真源）——日志位置被重定向时
+        # 两代始终同目录，不会出现「新日志在 A、旧代留在 B」的割裂。
+        try:
+            if (os.path.isfile(CRASH_LOG_PATH)
+                    and os.path.getsize(CRASH_LOG_PATH) > CRASH_LOG_MAX_BYTES):
+                os.replace(CRASH_LOG_PATH, os.path.join(parent, "crash.old.log"))
+        except OSError:
+            pass          # 轮转失败（被占用等）不致命：继续追加写现文件
+        with open(CRASH_LOG_PATH, "a", encoding="utf-8") as fh:
             fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {where} ===\n{msg}")
     except OSError:
         pass

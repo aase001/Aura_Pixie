@@ -582,6 +582,74 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---------- C10 v2.03 crash.log 移入配置目录 + 1MB 轮转 ----------
+    print("\ncrash.log 路径与轮转")
+    _logd = tempfile.mkdtemp(prefix="aura_crash_")
+    _old_crash = getattr(M, "CRASH_LOG_PATH", None)
+    check("CRASH_LOG_PATH 常量存在且指向配置目录（不再是 exe 旁 BASE_DIR）",
+          _old_crash == os.path.join(M.APP_CONFIG_DIR, "crash.log"),
+          f"（实得 {_old_crash}）", failures)
+    check("BASE_DIR 下不再有 crash.log 写入点（源码看守）",
+          'os.path.join(BASE_DIR, "crash.log")' not in inspect.getsource(M._log_crash),
+          "", failures)
+    _crash9 = os.path.join(_logd, "crash.log")
+    _old9 = os.path.join(_logd, "crash.old.log")
+    M.CRASH_LOG_PATH = _crash9
+    try:
+        # 懒生成：首错才出现，之前目录里没有该文件
+        check("懒生成：未出错时不存在 crash.log", not os.path.exists(_crash9),
+              "", failures)
+        M._log_crash("selftest_first", RuntimeError("第一次异常"))
+        check("首次异常 → 生成 crash.log 并写入标记",
+              os.path.isfile(_crash9)
+              and "selftest_first" in open(_crash9, encoding="utf-8").read(),
+              "", failures)
+        _size_before = os.path.getsize(_crash9)
+        M._log_crash("selftest_second", RuntimeError("第二次"))
+        check("后续异常追加写（不清空既有内容）",
+              os.path.getsize(_crash9) > _size_before
+              and "selftest_first" in open(_crash9, encoding="utf-8").read(),
+              "", failures)
+        # 未超 1MB → 不轮转
+        check("未超上限不轮转（无 crash.old.log）", not os.path.exists(_old9),
+              "", failures)
+        # 造一个刚超 1MB 的日志 → 下次写入触发轮转
+        with open(_crash9, "w", encoding="utf-8") as fh:
+            fh.write("X" * (M.CRASH_LOG_MAX_BYTES + 10))
+        M._log_crash("selftest_rotate", RuntimeError("触发轮转"))
+        check("超 1MB → 旧日志改名 crash.old.log", os.path.isfile(_old9),
+              "", failures)
+        check("轮转后 crash.old.log 保留旧内容（可追溯）",
+              os.path.getsize(_old9) > M.CRASH_LOG_MAX_BYTES, "", failures)
+        _newsize = os.path.getsize(_crash9)
+        check("轮转后新开 crash.log（只含本次记录，远小于 1MB）",
+              _newsize < 10000
+              and "selftest_rotate" in open(_crash9, encoding="utf-8").read(),
+              f"（新文件 {_newsize} 字节）", failures)
+        check("轮转后旧记录不在新 crash.log 里（已移交 old）",
+              "X" * 100 not in open(_crash9, encoding="utf-8").read(), "", failures)
+        # 再轮转一次 → 只保留一代（旧 old 被覆盖，不无限堆积）
+        with open(_crash9, "w", encoding="utf-8") as fh:
+            fh.write("Y" * (M.CRASH_LOG_MAX_BYTES + 10))
+        M._log_crash("selftest_rotate2", RuntimeError("第二次轮转"))
+        _olds = [n for n in os.listdir(_logd) if n.startswith("crash")]
+        check("只保留一代：目录内仅 crash.log + crash.old.log 两个文件",
+              sorted(_olds) == ["crash.log", "crash.old.log"], f"（实得 {_olds}）", failures)
+        check("第二代覆盖上一代 old（内容为 Y 填充）",
+              "Y" * 100 in open(_old9, encoding="utf-8").read()
+              and "X" * 100 not in open(_old9, encoding="utf-8").read(), "", failures)
+        # 配置目录不存在时也能写（自建目录，不让日志功能失效）
+        _sub = os.path.join(_logd, "nodir", "crash.log")
+        M.CRASH_LOG_PATH = _sub
+        M._log_crash("selftest_mkdir", RuntimeError("目录不存在"))
+        check("配置目录不存在 → 自建目录后仍成功写日志",
+              os.path.isfile(_sub)
+              and "selftest_mkdir" in open(_sub, encoding="utf-8").read(),
+              "", failures)
+    finally:
+        M.CRASH_LOG_PATH = _old_crash
+        shutil.rmtree(_logd, ignore_errors=True)
+
     # ---------- 9 点击扇区 ----------
     print("\n点击扇区反馈")
     b7 = fresh_ball()
