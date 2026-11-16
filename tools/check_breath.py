@@ -569,6 +569,34 @@ def main() -> int:
     check("休眠后误触回调不展开次级环",
           b10._sub_sectors is None, "", failures)
 
+    # —— v2.03：confirm_extra_ms 外置（双击确认窗附加时长改读 CONFIG，非硬编码 30）——
+    b11 = fresh_ball()
+    b11._sectors = [{"name": "有标记", "code": marked, "placeholder": False},
+                    {"name": "无标记", "code": "print(1)", "placeholder": False}]
+    b11._state, b11._progress = "open", 1.0  # noqa: SLF001
+    b11._highlight = 0  # noqa: SLF001
+    dci = int(QApplication.doubleClickInterval())
+    extra = M.CONFIG.get("confirm_extra_ms")
+    check("CONFIG 含 confirm_extra_ms 键（默认 30）",
+          extra == 30, f"（实际 {extra}）", failures)
+    b11._arm_click(0)  # noqa: SLF001  # 单击登记待展开 → 启动确认窗
+    check("确认窗时长 = 系统双击间隔 + confirm_extra_ms（默认 30）",
+          b11._click_timer.interval() == dci + 30,
+          f"（实际 {b11._click_timer.interval()}，期望 {dci + 30}）", failures)
+    # 改 CONFIG 值 → 确认窗随之变（证明读的是 CONFIG 而非硬编码 30）
+    M.CONFIG["confirm_extra_ms"] = 100
+    b11._arm_click(0)  # noqa: SLF001
+    check("confirm_extra_ms 改值 100 → 确认窗时长随之变（非硬编码 30）",
+          b11._click_timer.interval() == dci + 100,
+          f"（实际 {b11._click_timer.interval()}，期望 {dci + 100}）", failures)
+    # 还原：按测试前原值复位（GREEN 后该键是 CONFIG 正式成员，须还原成 30 而非删；
+    # RED 阶段原本无此键，extra=None → 删掉测试期临时加的键）
+    if extra is None:
+        M.CONFIG.pop("confirm_extra_ms", None)
+    else:
+        M.CONFIG["confirm_extra_ms"] = extra
+    b11._click_timer.stop()
+
     # —— V10.1 拖动「移动」光标：判定成立挂起、松手恢复、成对防抖 ——
     b11 = fresh_ball()
     c0 = QApplication.overrideCursor()

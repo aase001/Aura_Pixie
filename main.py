@@ -156,6 +156,9 @@ CONFIG = {
     "snap_margin": 200.0,      # 扇形外边缘距屏幕边缘 ≤200px → 松手即吸附
     "snap_anim_ms": 280.0,     # 吸附 / 回位的非线性动画时长
     "warn_period_ms": 500.0,   # 越界闪烁周期
+    "confirm_extra_ms": 30,    # 双击确认窗附加时长（v2.03 外置；含标记扇区单击后
+                               # 等待「是否还有第二击」的确认窗 = 系统双击间隔 + 此值，
+                               # 范围 [0,300]；经 config.yaml ball.click.confirm_extra_ms 调）
     "pos_settle_ms": 10000.0,  # 球心位置记忆：移动停止（上次采样后 <0.5px 位移）满该时长 → 立即写入配置
     "press_hold_ms": 500.0,    # 悬停展开扇形后按住球体超过该时长 → 判为即将拖动，回收扇形
     "drag_grace_ms": 500.0,    # 按住拖动回收宽限期：从按下起 500ms 内，无论是否已进入拖动，
@@ -4961,7 +4964,8 @@ class AuraBall(QWidget):
         self._cancel_pending_sub()          # 防御：旧的待展开先作废（含连点场景）
         if self._is_main_ring_with_marks(sector):
             self._pending_sub_sector = sector
-            self._click_timer.start(int(QApplication.doubleClickInterval()) + 30)
+            self._click_timer.start(int(QApplication.doubleClickInterval())
+                                    + int(CONFIG["confirm_extra_ms"]))
             return
         self.trigger_sector(sector)
 
