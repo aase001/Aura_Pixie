@@ -230,6 +230,137 @@ if hasattr(M, "load_interaction_config"):
     ck("reload_config 接线 retune_collect（collect 硬件参数热重载）",
        "retune_collect" in inspect.getsource(M.AuraBall.reload_config))
 
+# ---- 场景7：v2.03 四文件路由（统一视图漏斗：write 拆分 + read 合并 + 旧单文件回退 + 导入不覆盖 state）----
+import inspect as _insp   # noqa: E402
+_d7 = os.path.join(_ISO, "Aura_Pixie")
+os.makedirs(_d7, exist_ok=True)
+_set7 = os.path.join(_d7, "setting.yaml")
+_cmd7 = os.path.join(_d7, "command.yaml")
+_state7 = os.path.join(_d7, "state.yaml")
+# 显式把四路径指向隔离目录（write/read 漏斗按 path==SETTINGS_PATH 判主位置）
+M.SETTINGS_PATH = M.CONFIG_PATH = _set7
+M.COMMAND_PATH, M.STATE_PATH = _cmd7, _state7
+for _f in (_set7, _cmd7, _state7):
+    if os.path.exists(_f):
+        os.remove(_f)
+ck("COMMAND_PATH/STATE_PATH 与 setting.yaml 同目录（兄弟文件）",
+   os.path.dirname(M.COMMAND_PATH) == os.path.dirname(M.SETTINGS_PATH)
+   and os.path.dirname(M.STATE_PATH) == os.path.dirname(M.SETTINGS_PATH))
+
+_full7 = {
+    "functions": [{"name": "功能甲", "code": "print(1)", "active": True}],
+    "appearance": {"breath": True, "color_mid": "#123456"},
+    "autostart": {"enabled": False},
+    "window": {"always_on_top": True, "locked": False, "pos_x": 111.0, "pos_y": 222.0},
+    "monitor": {"enabled": True, "refresh_ms": 1500, "idle_stop_sec": 120,
+                "units": {"cpu.load": {"enabled": True, "threshold": []}},
+                "layout": {"cpu.load": {"x": 10, "y": 20, "group_id": "g1"}}},
+}
+M.write_setting(_full7, _set7)
+_rs = yaml.safe_load(open(_set7, encoding="utf-8")) if os.path.exists(_set7) else {}
+_rc = yaml.safe_load(open(_cmd7, encoding="utf-8")) if os.path.exists(_cmd7) else {}
+_rt = yaml.safe_load(open(_state7, encoding="utf-8")) if os.path.exists(_state7) else {}
+ck("write 拆分：functions 落 command.yaml", os.path.exists(_cmd7)
+   and (_rc.get("functions") or [{}])[0].get("name") == "功能甲")
+ck("write 拆分：setting.yaml 不再含 functions", "functions" not in _rs)
+ck("write 拆分：window.pos 落 state.yaml",
+   _rt.get("window", {}).get("pos_x") == 111.0 and _rt.get("window", {}).get("pos_y") == 222.0,
+   str(_rt.get("window")))
+ck("write 拆分：monitor.layout 落 state.yaml",
+   _rt.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 10)
+ck("write 拆分：setting.yaml window 不含 pos、保留开关",
+   "pos_x" not in _rs.get("window", {}) and _rs.get("window", {}).get("always_on_top") is True,
+   str(_rs.get("window")))
+ck("write 拆分：setting.yaml monitor 不含 layout、保留 enabled/refresh_ms/idle_stop_sec/units",
+   "layout" not in _rs.get("monitor", {}) and _rs.get("monitor", {}).get("enabled") is True
+   and _rs.get("monitor", {}).get("refresh_ms") == 1500
+   and _rs.get("monitor", {}).get("idle_stop_sec") == 120
+   and "cpu.load" in _rs.get("monitor", {}).get("units", {}),
+   str(list(_rs.get("monitor", {}))))
+ck("write 拆分：setting.yaml 写 layout_version=2 迁移标记",
+   _rs.get("layout_version") == 2, str(_rs.get("layout_version")))
+
+_back7 = M.read_setting(_set7)
+ck("read 合并视图：functions 还原", (_back7.get("functions") or [{}])[0].get("name") == "功能甲")
+ck("read 合并视图：window.pos 还原", _back7.get("window", {}).get("pos_x") == 111.0)
+ck("read 合并视图：window 开关还原", _back7.get("window", {}).get("always_on_top") is True)
+ck("read 合并视图：monitor.layout 还原",
+   _back7.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 10)
+ck("read 合并视图：monitor.units 还原", "cpu.load" in _back7.get("monitor", {}).get("units", {}))
+ck("read 合并视图：appearance 还原", _back7.get("appearance", {}).get("color_mid") == "#123456")
+
+# 优雅回退：删 command/state，仅留旧式全量 setting.yaml（老用户未迁移也不丢配置）
+for _f in (_cmd7, _state7):
+    if os.path.exists(_f):
+        os.remove(_f)
+_legacy7 = {
+    "functions": [{"name": "旧功能", "code": "print(9)", "active": True}],
+    "appearance": {"color_mid": "#ABCDEF"},
+    "window": {"always_on_top": False, "pos_x": 555.0, "pos_y": 666.0},
+    "monitor": {"enabled": False, "layout": {"cpu.temp": {"x": 1, "y": 2}}},
+}
+with open(_set7, "w", encoding="utf-8") as fh:
+    yaml.safe_dump(_legacy7, fh, allow_unicode=True)
+_rb7 = M.read_setting(_set7)
+ck("旧单文件回退：functions 从 setting.yaml 读", (_rb7.get("functions") or [{}])[0].get("name") == "旧功能")
+ck("旧单文件回退：window.pos 从 setting.yaml 读", _rb7.get("window", {}).get("pos_x") == 555.0)
+ck("旧单文件回退：monitor.layout 从 setting.yaml 读",
+   _rb7.get("monitor", {}).get("layout", {}).get("cpu.temp", {}).get("x") == 1)
+
+# 导入不覆盖 state.yaml：apply_imported_config 保留当前坐标/布局，不被导入包冲掉
+M.write_setting(_full7, _set7)   # 先建立 state：pos 111/222、layout cpu.load 10/20
+ck("前置：state.yaml 已建立坐标 111/222",
+   os.path.exists(_state7)
+   and (yaml.safe_load(open(_state7, encoding="utf-8")).get("window", {}).get("pos_x") == 111.0))
+ck("apply_imported_config 函数存在", hasattr(M, "apply_imported_config"))
+if hasattr(M, "apply_imported_config"):
+    _imp7 = {"functions": [{"name": "导入功能", "code": "print(2)", "active": True}],
+             "appearance": {"color_mid": "#654321"},
+             "window": {"always_on_top": True, "pos_x": 999.0, "pos_y": 999.0},
+             "monitor": {"enabled": True, "layout": {"cpu.load": {"x": 999, "y": 999}}}}
+    M.apply_imported_config(_imp7, _set7)
+    _ra7 = yaml.safe_load(open(_state7, encoding="utf-8"))
+    ck("导入不覆盖 state.yaml：坐标仍 111/222（不被导入的 999 冲掉）",
+       _ra7.get("window", {}).get("pos_x") == 111.0, str(_ra7.get("window")))
+    ck("导入不覆盖 state.yaml：layout 仍 10/20",
+       _ra7.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 10)
+    _rsi = yaml.safe_load(open(_set7, encoding="utf-8"))
+    _rci = yaml.safe_load(open(_cmd7, encoding="utf-8")) if os.path.exists(_cmd7) else {}
+    ck("导入写 setting.yaml（appearance/window 开关用导入值）",
+       _rsi.get("appearance", {}).get("color_mid") in ("#654321", "#654321".upper())
+       and _rsi.get("window", {}).get("always_on_top") is True)
+    ck("导入写 command.yaml（functions 用导入值）",
+       (_rci.get("functions") or [{}])[0].get("name") == "导入功能")
+
+# 非主位置路径（导出 .bak）写完整单文件，不拆分、不覆盖主 command/state
+_bak7 = os.path.join(_d7, "setting.yaml.bak")
+_cmd_before = (yaml.safe_load(open(_cmd7, encoding="utf-8"))
+               if os.path.exists(_cmd7) else None)
+_state_before = (yaml.safe_load(open(_state7, encoding="utf-8"))
+                 if os.path.exists(_state7) else None)
+M.write_setting(_full7, _bak7)
+_rbak = yaml.safe_load(open(_bak7, encoding="utf-8"))
+ck("导出 .bak 写完整单文件（含 functions + window.pos + monitor.layout）",
+   (_rbak.get("functions") or [{}])[0].get("name") == "功能甲"
+   and _rbak.get("window", {}).get("pos_x") == 111.0
+   and _rbak.get("monitor", {}).get("layout", {}).get("cpu.load", {}).get("x") == 10,
+   str(list(_rbak)))
+_cmd_after = (yaml.safe_load(open(_cmd7, encoding="utf-8"))
+              if os.path.exists(_cmd7) else None)
+_state_after = (yaml.safe_load(open(_state7, encoding="utf-8"))
+                if os.path.exists(_state7) else None)
+ck("导出 .bak 不触发对主 command.yaml 的拆分覆盖（前后内容不变）",
+   _cmd_before == _cmd_after, f"{_cmd_before} -> {_cmd_after}")
+ck("导出 .bak 不触发对主 state.yaml 的覆盖（前后内容不变）",
+   _state_before == _state_after, f"{_state_before} -> {_state_after}")
+
+for _f in (_set7, _cmd7, _state7, _bak7):
+    if os.path.exists(_f):
+        try:
+            os.remove(_f)
+        except OSError:
+            pass
+
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:
     print("  -", f)

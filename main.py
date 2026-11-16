@@ -409,6 +409,8 @@ _APP_DATA_ROOT = os.environ.get("LOCALAPPDATA") or os.path.join(
 APP_CONFIG_DIR = os.path.join(_APP_DATA_ROOT, "Aura_Pixie")
 CONFIG_PATH = os.path.join(APP_CONFIG_DIR, "setting.yaml")   # 统一配置文件（functions+appearance+后续块）
 TUNING_PATH = os.path.join(APP_CONFIG_DIR, "config.yaml")    # v2.03 数值调参文件（enabled 默认 false）
+COMMAND_PATH = os.path.join(APP_CONFIG_DIR, "command.yaml")  # v2.03 功能块（原 setting.yaml.functions）
+STATE_PATH = os.path.join(APP_CONFIG_DIR, "state.yaml")      # v2.03 运行时状态（球心坐标 + monitor.layout，程序独占写）
 SETTINGS_PATH = CONFIG_PATH   # 历史别名：旧代码/自检按此名引用，两者恒指向同一文件
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
 RUNNER_DIR = os.path.join(tempfile.gettempdir(), "AuraPixie")   # py 代码临时脚本目录
@@ -1202,37 +1204,50 @@ def _test_spawn(argv: list[str]) -> tuple[subprocess.Popen, str, str]:
 # ---------------------------------------------------------------- 配置读写
 SETTINGS_HEADER = (
     "# Aura Pixie 设置（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml，"
-    "由设置/外观/监视界面写回）\n"
-    "# 分块：functions = 功能扇区列表；appearance = 外观（breath 呼吸开关 + 起始/过渡/末尾三色 + "
+    "由外观/监视界面写回）\n"
+    "# v2.03 起配置按写入方拆成四文件（同目录）：本文件存偏好；功能指令在 command.yaml；"
+    "球心坐标与监视窗格布局在 state.yaml；数值调参在 config.yaml。\n"
+    "# 分块：appearance = 外观（breath 呼吸开关 + 起始/过渡/末尾三色 + "
     "三段渐变时长 dur_* + 倍率 aura_scale + 球体透明度 opacity + 休眠透明度 sleep_opacity + "
     "休眠倒计时 idle_sec + 资源监视窗口色 monitor_color + 底色填充开关 monitor_fill"
     "（勾选=填充窗口色，取消=填充透明色） + 资源监视透明度 monitor_opacity + "
     "显示缩放 display_scale；旧块名 aura 仍兼容读取）；\n"
     "#       autostart = 开机自启动（计划任务，V11 起不再写注册表 Run）；\n"
-    "#       window = 球体窗口行为（always_on_top = 保持球体置顶、locked = 锁定禁止拖动，"
-    "两开关都在「外观」窗；pos_x/pos_y = 球心记忆位置）；\n"
+    "#       window = 球体窗口开关（always_on_top = 保持球体置顶、locked = 锁定禁止拖动，"
+    "两开关都在「外观」窗；球心坐标 pos_x/pos_y 已移至 state.yaml）；\n"
     "#       monitor = 资源监视（enabled 总开关 + topmost 窗口置顶【与球体置顶独立】 + "
     "locked 锁定禁止窗格移动与拆分/合并组 + "
     "refresh_ms 拉取周期 + idle_stop_sec 闲置停采 + "
-    "units 各参数开关/阈值 + layout 窗格位置与吸附组记忆）。\n"
+    "units 各参数开关/阈值；窗格布局 layout 已移至 state.yaml）。\n"
     "# display_scale = 每单元 {enabled: 勾选启用, percent: 50~200 且为 25 的整数倍}，"
     "未勾选的单元恒按 100% 生效；当前单元："
     + " / ".join(f"{_k}（{_v}）" for _k, _v in SCALE_UNITS) + "。\n"
-    "# 扇区等分数 = functions 中 active: true 的条目数；最少 2，最多 9（超出只取前 9）；"
-    "扇区顺序 = 条目顺序。\n"
-    "# code 格式：默认 py 代码；以 cmd: 开头走 CMD，以 ps:/powershell: 开头走 PowerShell 5.1，"
-    "以 pwsh: 开头走 PowerShell 7，均静默执行。\n"
+    "# layout_version: 2 = 四文件拆分标记（迁移与未来 schema 演进锚点）。\n"
     "# 兼容：老配置缺失的键一律按出厂默认兜底，不覆盖已有值；旧 idle_min（分钟）"
     "自动换算为 idle_sec（秒）。\n"
 )
 
+COMMAND_HEADER = (
+    "# Aura Pixie 功能指令（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\command.yaml，"
+    "由「设置」窗写回）\n"
+    "# functions = 功能扇区列表：name 名称、code 指令、active 是否激活。\n"
+    "# 扇区等分数 = active: true 的条目数；最少 2，最多 9（超出只取前 9）；扇区顺序 = 条目顺序。\n"
+    "# code 格式：默认 py 代码；以 cmd: 开头走 CMD，以 ps:/powershell: 开头走 PowerShell 5.1，"
+    "以 pwsh: 开头走 PowerShell 7，均静默执行。\n"
+)
 
-def read_setting(path: str = SETTINGS_PATH) -> dict:
-    """读取指定 yaml 配置文件的全部内容（dict）。文件缺失 / 损坏时返回空 dict，不给主程序添乱。
+STATE_HEADER = (
+    "# Aura Pixie 运行时状态（本文件位于 %LOCALAPPDATA%\\Aura_Pixie\\state.yaml，"
+    "由程序自动写入，请勿手改）\n"
+    "# window.pos_x/pos_y = 球心记忆坐标；monitor.layout = 监视窗格位置与吸附组记忆。\n"
+)
 
-    迁移（从根目录迁移源复制到 %LOCALAPPDATA%）只发生在启动时的
-    ensure_settings 一次性流程中；本函数不做任何兜底读取。
-    """
+#: 四文件拆分中归属 state.yaml 的 window 子键（球心坐标）
+_STATE_WINDOW_KEYS = ("pos_x", "pos_y")
+
+
+def _read_yaml_file(path: str) -> dict:
+    """读取单个 yaml 文件为 dict；缺失/损坏返回空 dict（不给主程序添乱）。"""
     try:
         with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
@@ -1242,6 +1257,95 @@ def read_setting(path: str = SETTINGS_PATH) -> dict:
     except Exception as exc:  # noqa: BLE001
         print(f"[配置] 读取失败：{exc}", file=sys.stderr)
         return {}
+
+
+def _is_main_position(path: str) -> bool:
+    """path 是否为配置主位置（四文件拆分只作用于主位置；导出 .bak/自检临时走单文件）。"""
+    try:
+        return os.path.abspath(path) == os.path.abspath(SETTINGS_PATH)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _sibling_paths(setting_path: str) -> tuple[str, str]:
+    """由 setting.yaml 路径派生同目录的 (command.yaml, state.yaml) 路径。"""
+    d = os.path.dirname(setting_path)
+    return (os.path.join(d, "command.yaml"), os.path.join(d, "state.yaml"))
+
+
+def _split_setting_view(data: dict) -> tuple[dict, dict, dict]:
+    """把统一配置视图拆成 (setting_data, command_data, state_data) 三块（v2.03 四文件）。
+
+    · functions → command.yaml
+    · window.pos_x/pos_y + monitor.layout → state.yaml
+    · 其余（appearance/autostart/window 开关/monitor 开关与 units）+ layout_version → setting.yaml
+    不修改入参 data（各块新建 dict）；window/monitor 缺失时对应块给安全空值。
+    """
+    data = data if isinstance(data, dict) else {}
+    command_data = {"functions": list(data.get("functions") or [])}
+    win = data.get("window") if isinstance(data.get("window"), dict) else {}
+    mon = data.get("monitor") if isinstance(data.get("monitor"), dict) else {}
+    state_data = {
+        "window": {k: win[k] for k in _STATE_WINDOW_KEYS if k in win},
+        "monitor": {"layout": dict(mon.get("layout") or {})},
+    }
+    set_win = {k: v for k, v in win.items() if k not in _STATE_WINDOW_KEYS}
+    set_mon = {k: v for k, v in mon.items() if k != "layout"}
+    setting_data: dict = {}
+    for k, v in data.items():
+        if k == "functions":
+            continue
+        if k == "window":
+            setting_data["window"] = set_win
+        elif k == "monitor":
+            setting_data["monitor"] = set_mon
+        else:
+            setting_data[k] = v
+    setting_data["layout_version"] = 2   # 迁移/schema 演进锚点
+    return setting_data, command_data, state_data
+
+
+def _merge_setting_view(setting_raw: dict, command_raw: dict, state_raw: dict) -> dict:
+    """把四文件原始内容合并成统一配置视图（read_setting 主位置用）。
+
+    command/state 缺失（老用户尚未迁移）时，setting_raw 自带的 functions /
+    window.pos / monitor.layout 原样保留——优雅回退，绝不丢配置（把稳态路由
+    与一次性迁移解耦：即使迁移未跑，老单文件也能被完整读出）。
+    """
+    view = dict(setting_raw) if isinstance(setting_raw, dict) else {}
+    if isinstance(command_raw, dict) and "functions" in command_raw:
+        view["functions"] = command_raw.get("functions")
+    if isinstance(state_raw, dict):
+        st_win = state_raw.get("window") if isinstance(state_raw.get("window"), dict) else {}
+        st_mon = state_raw.get("monitor") if isinstance(state_raw.get("monitor"), dict) else {}
+        if st_win:
+            win = dict(view.get("window") if isinstance(view.get("window"), dict) else {})
+            for k in _STATE_WINDOW_KEYS:
+                if k in st_win:
+                    win[k] = st_win[k]
+            view["window"] = win
+        if "layout" in st_mon:
+            mon = dict(view.get("monitor") if isinstance(view.get("monitor"), dict) else {})
+            mon["layout"] = st_mon.get("layout")
+            view["monitor"] = mon
+    return view
+
+
+def read_setting(path: str = SETTINGS_PATH) -> dict:
+    """读取配置并返回统一视图（dict）。文件缺失 / 损坏时返回空 dict，不给主程序添乱。
+
+    v2.03 四文件：主位置（%LOCALAPPDATA%\\Aura_Pixie\\setting.yaml）读时合并同目录
+    command.yaml（functions）+ state.yaml（window.pos/monitor.layout）成完整视图；
+    兄弟文件缺失则回退 setting.yaml 自带块（老用户未迁移不丢配置）。
+    非主位置路径（导出 .bak / 自检临时文件）按单文件原样读，不合并。
+    迁移（从根目录迁移源复制到 %LOCALAPPDATA%）只发生在启动时的 ensure_settings
+    一次性流程中；本函数不做迁移。
+    """
+    raw = _read_yaml_file(path)
+    if not _is_main_position(path):
+        return raw
+    cmd_path, state_path = _sibling_paths(path)
+    return _merge_setting_view(raw, _read_yaml_file(cmd_path), _read_yaml_file(state_path))
 
 
 def _yaml_blocks_legal(src) -> bool:
@@ -1299,11 +1403,8 @@ def _find_root_yamls(base: str | None = None) -> list[str]:
     return [p for _t, p in cands]
 
 
-def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
-    """全量写回 setting.yaml（保留注释头；调用方负责构造完整 dict）。
-
-    目标目录可能尚不存在（%LOCALAPPDATA%\\Aura_Pixie），先创建再写。
-    """
+def _write_yaml_block(path: str, header: str, data: dict) -> None:
+    """把 data 连同注释头写入单个 yaml 文件（目录不存在先建）。"""
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         try:
@@ -1311,9 +1412,60 @@ def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
         except OSError as exc:
             _log_crash("mkdir_settings", exc)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(SETTINGS_HEADER)
+        if header:
+            fh.write(header)
         yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False,
                        default_flow_style=False, width=1000)
+
+
+def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
+    """写回配置（保留注释头；调用方负责构造完整 dict）。
+
+    v2.03 四文件：主位置（== SETTINGS_PATH）按写入方拆分——
+      · appearance/autostart/window 开关/monitor 开关与 units + layout_version → setting.yaml
+      · functions → command.yaml
+      · window.pos_x/pos_y + monitor.layout → state.yaml
+    非主位置路径（导出 .bak / 自检临时文件）写完整单文件，不拆分、不碰兄弟文件。
+    目标目录可能尚不存在（%LOCALAPPDATA%\\Aura_Pixie），先创建再写。
+    导入配置须保留当前坐标/布局，走 apply_imported_config（不直接调本函数）。
+    """
+    if not _is_main_position(path):
+        _write_yaml_block(path, SETTINGS_HEADER, data)
+        return
+    setting_data, command_data, state_data = _split_setting_view(data)
+    cmd_path, state_path = _sibling_paths(path)
+    _write_yaml_block(path, SETTINGS_HEADER, setting_data)
+    _write_yaml_block(cmd_path, COMMAND_HEADER, command_data)
+    _write_yaml_block(state_path, STATE_HEADER, state_data)
+
+
+def apply_imported_config(src: dict, path: str = SETTINGS_PATH) -> dict:
+    """把导入的配置合并写入主位置，但保留用户当前坐标与监视布局（v2.03 四文件）。
+
+    导入包可能带 window.pos_x/pos_y 与 monitor.layout（来自别人机器的旧配置），
+    若照写会把用户当前球心位置/窗格布局冲掉——导入不应改变「运行时状态」。
+    因此先读当前视图（经 read_setting 合并，老用户从旧单文件回退也能读到），
+    把当前 pos/layout 注入合并结果，再走 write_setting 拆分落盘。
+    返回最终写入的视图（自检/诊断用）。GUI 的 _import_config 调本函数，不直接调 write_setting。
+    """
+    cur = read_setting(path)
+    merged = merge_settings_with_defaults(src)
+    # 保留当前球心坐标（导入包的坐标一律丢弃）
+    cur_win = cur.get("window") if isinstance(cur.get("window"), dict) else {}
+    m_win = dict(merged.get("window") if isinstance(merged.get("window"), dict) else {})
+    for k in _STATE_WINDOW_KEYS:
+        if k in cur_win:
+            m_win[k] = cur_win[k]
+        else:
+            m_win.pop(k, None)
+    merged["window"] = m_win
+    # 保留当前监视布局（导入包的 layout 一律丢弃）
+    cur_mon = cur.get("monitor") if isinstance(cur.get("monitor"), dict) else {}
+    m_mon = dict(merged.get("monitor") if isinstance(merged.get("monitor"), dict) else {})
+    m_mon["layout"] = dict(cur_mon.get("layout") or {})
+    merged["monitor"] = m_mon
+    write_setting(merged, path)
+    return merged
 
 
 def _extract_appearance_block(src: dict) -> dict | None:
@@ -1507,19 +1659,16 @@ def ensure_settings(path: str = SETTINGS_PATH, base: str | None = None) -> dict:
 
 
 def load_functions(path: str = CONFIG_PATH) -> list[dict]:
-    """读取 setting.yaml → 扇区列表。顺序 = 文件条目顺序（设置界面可拖拽调整）。
+    """读取配置 → 扇区列表。顺序 = 文件条目顺序（设置界面可拖拽调整）。
+
+    v2.03 四文件：走 read_setting 视图漏斗——主位置的 functions 来自 command.yaml
+    （自动合并），非主位置（自检临时/导出 .bak）从该单文件读；不再直接 open
+    setting.yaml（拆分后那里已无 functions）。read_setting 内部已兜底缺失/损坏为空。
 
     激活数决定等分数量：<2 补占位到 2，>9 截断到 9；代码为空的条目按占位灰色处理。
     """
-    raw: list = []
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
-        raw = [f for f in (data.get("functions") or []) if isinstance(f, dict)]
-    except FileNotFoundError:
-        print(f"[配置] 未找到 {path}，使用占位扇区", file=sys.stderr)
-    except Exception as exc:
-        print(f"[配置] 解析失败，使用占位扇区：{exc}", file=sys.stderr)
+    data = read_setting(path)
+    raw = [f for f in (data.get("functions") or []) if isinstance(f, dict)]
 
     active = [f for f in raw if f.get("active")]
     if len(active) > MAX_SECTORS:

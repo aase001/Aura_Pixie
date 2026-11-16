@@ -988,9 +988,8 @@ def main() -> int:
     # ---------- 12 设置保存（崩溃回归）+ 顺序 + 输入截断 ----------
     print("\n设置保存（崩溃回归）、顺序与输入截断")
     cfg = M.CONFIG_PATH
-    n_before = len(yaml.safe_load(open(cfg, encoding="utf-8"))["functions"])
-    backup = cfg + ".bak_selftest"
-    shutil.copyfile(cfg, backup)
+    n_before = len(M.read_setting(cfg).get("functions") or [])
+    _snapshot = M.read_setting(cfg)   # 四文件合并视图快照（替代物理单文件备份）
     try:
         rows = [{"name": "甲", "code": "print(1)", "active": True},
                 {"name": "乙", "code": "print(2)", "active": True},
@@ -1099,12 +1098,11 @@ def main() -> int:
               f"（实得 {names_blank}）", failures)
         dlg_blank.deleteLater()
     finally:
-        shutil.copyfile(backup, cfg)
-        os.remove(backup)
-        restored = yaml.safe_load(open(cfg, encoding="utf-8"))
-        check(f"setting.yaml 已原样恢复（应为 {n_before} 条）",
-              len(restored["functions"]) == n_before,
-              f"（实得 {len(restored['functions'])} 条）", failures)
+        M.write_setting(_snapshot, cfg)   # 还原：拆分回四文件
+        restored = M.read_setting(cfg)
+        check(f"配置已原样恢复（应为 {n_before} 条）",
+              len(restored.get("functions") or []) == n_before,
+              f"（实得 {len(restored.get('functions') or [])} 条）", failures)
 
     # ---------- 13g 拖动回收不冻结跟手（回收动画持续推进，收完才跟手） ----------
     print("\n拖动回收不冻结跟手")
