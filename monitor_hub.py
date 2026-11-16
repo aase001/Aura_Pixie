@@ -225,9 +225,14 @@ class SidecarRunner:
     否则看守线程会被连带退出，进程崩溃路径上的重启永远走不到。
     """
 
-    def __init__(self, exe_path: Optional[str] = None, interval_ms: int = 1000,
-                 stale_sec: float = 5.0, max_restarts: int = 3,
+    def __init__(self, exe_path: Optional[str] = None, interval_ms: Optional[int] = None,
+                 stale_sec: Optional[float] = None, max_restarts: Optional[int] = None,
                  on_frame: Optional[Callable[[dict], None]] = None):
+        # v2.03 配置拆分：interval_ms/stale_sec/max_restarts 默认 None → 读 COLLECT_LIVE
+        # 生效值（main 侧无参构造即享调参）；显式传参优先（向后兼容旧调用）。
+        interval_ms = COLLECT_LIVE["sidecar_interval_ms"] if interval_ms is None else interval_ms
+        stale_sec = COLLECT_LIVE["stale_sec"] if stale_sec is None else stale_sec
+        max_restarts = COLLECT_LIVE["max_restarts"] if max_restarts is None else max_restarts
         self.exe = exe_path if exe_path is not None else find_sidecar()
         self.interval_ms = max(200, int(interval_ms))
         self.stale_sec = stale_sec
@@ -291,7 +296,10 @@ class SidecarRunner:
                 t.join(timeout=2.0)
         self.alive = False
 
-    def wait_first_frame(self, timeout: float = 15.0) -> bool:
+    def wait_first_frame(self, timeout: Optional[float] = None) -> bool:
+        # v2.03：timeout 默认 None → 读 COLLECT_LIVE（first_frame_timeout_sec 调参生效）
+        if timeout is None:
+            timeout = COLLECT_LIVE["first_frame_timeout_sec"]
         end = time.time() + timeout
         while time.time() < end:
             if self._latest is not None:
@@ -830,8 +838,12 @@ class MetricsHub:
     监视 UI 接入时改为一帧映射一次复用。"""
 
     def __init__(self, sidecar_path: Optional[str] = None,
-                 interval_ms: int = 1000, poll_ms: int = 1000,
+                 interval_ms: Optional[int] = None, poll_ms: Optional[int] = None,
                  max_fans: int = 8, max_disks: int = 8):
+        # v2.03 配置拆分：interval_ms/poll_ms 默认 None → 读 COLLECT_LIVE 生效值
+        # （main 侧无参 MetricsHub() 即享调参）；显式传参优先（向后兼容旧调用）。
+        # sidecar_interval/stale/max_restarts 由 SidecarRunner 同样读 COLLECT_LIVE。
+        poll_ms = COLLECT_LIVE["poll_ms"] if poll_ms is None else poll_ms
         self.runner = SidecarRunner(exe_path=sidecar_path, interval_ms=interval_ms)
         self.ps = PsutilSource()
         self.poll_ms = max(200, int(poll_ms))
@@ -868,6 +880,38 @@ class MetricsHub:
         if self._poller is not None and self._poller.is_alive():
             self._poller.join(timeout=2.0)
         self.runner.stop()
+
+    def retune_collect(self) -> None:
+        """调参（apply_tuning）后把 collect 生效值热应用到运行中的 hub（v2.03）。
+
+        【作用范围】poll_ms / runner.stale_sec / runner.max_restarts /
+          runner.interval_ms（侧车采样间隔）/ history_points（历史缓冲容量）。
+        【影响】
+          · poll_ms / stale_sec / max_restarts 是现读的实例属性，更新即下一拍生效
+            （_poll_loop 每拍重读 self.poll_ms；is_stale/_watch_loop 现读 runner 属性），
+            无需重启线程；
+          · sidecar_interval_ms 是 spawn 时传给侧车进程的 --interval 参数，值变且
+            侧车当前活着（runner.alive）→ stop+start 重启侧车使新间隔生效；侧车未运行
+            时只更新属性，下次 start 自然用新值（绝不在未运行时主动 spawn）；
+          · history_points 变 → 清空历史环形缓冲（旧 deque 的 maxlen 已固定），
+            下一拍 _record_history 按新 HISTORY_POINTS 重建（曲线短暂清空，计划已注明需提示）。
+        由 main 在右键「重载」链路调用（reload_config）；不重启 poller 线程。
+        """
+        live = COLLECT_LIVE
+        self.poll_ms = max(200, int(live["poll_ms"]))
+        self.runner.stale_sec = live["stale_sec"]
+        self.runner.max_restarts = live["max_restarts"]
+        old_interval = self.runner.interval_ms
+        new_interval = max(200, int(live["sidecar_interval_ms"]))
+        self.runner.interval_ms = new_interval
+        # 采样间隔变且侧车在跑 → 重启侧车（--interval 是进程参数，热改无效）
+        if old_interval != new_interval and self.runner.alive:
+            self.runner.stop()
+            self.runner.start()
+        # history_points 变 → 清空历史待按新 maxlen 重建（检测现有 deque 容量）
+        with self._history_lock:
+            if any(dq.maxlen != HISTORY_POINTS for dq in self._history.values()):
+                self._history.clear()
 
     def _poll_loop(self) -> None:
         while not self._stop.wait(self.poll_ms / 1000.0):

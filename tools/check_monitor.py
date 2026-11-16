@@ -461,11 +461,80 @@ def section_e():
         mh.apply_tuning({})
 
 
+# ---------------------------------------------------------------------------
+# F. v2.03：collect 生效接线——MetricsHub 构造读 COLLECT_LIVE + retune_collect 热重载
+#    main 侧用无参 MetricsHub()，故构造默认须读 COLLECT_LIVE 才能让调参生效。
+# ---------------------------------------------------------------------------
+def section_f():
+    print("[F] collect 生效接线（构造读 COLLECT_LIVE + retune_collect 热重载）")
+    if not hasattr(mh, "apply_tuning"):
+        print("  [F] apply_tuning 未实现，跳过")
+        return
+    ok(hasattr(mh.MetricsHub, "retune_collect"),
+       "MetricsHub.retune_collect 热重载入口存在")
+    if not hasattr(mh.MetricsHub, "retune_collect"):
+        mh.apply_tuning({})
+        return
+    try:
+        # 构造读 COLLECT_LIVE：设 sidecar_interval/poll/stale/max_restarts → 无参构造 hub
+        mh.apply_tuning({"sidecar_interval_ms": 2000, "poll_ms": 2500,
+                         "stale_sec": 9.0, "max_restarts": 7})
+        hub = mh.MetricsHub(sidecar_path=__file__)   # 假路径：installed 但永不出帧
+        ok(hub.poll_ms == 2500, f"无参构造 poll_ms 读 COLLECT_LIVE（实际 {hub.poll_ms}）")
+        ok(hub.runner.interval_ms == 2000,
+           f"无参构造 runner.interval_ms 读 COLLECT_LIVE（实际 {hub.runner.interval_ms}）")
+        ok(hub.runner.stale_sec == 9.0,
+           f"无参构造 runner.stale_sec 读 COLLECT_LIVE（实际 {hub.runner.stale_sec}）")
+        ok(hub.runner.max_restarts == 7,
+           f"无参构造 runner.max_restarts 读 COLLECT_LIVE（实际 {hub.runner.max_restarts}）")
+        # 显式传参优先于 COLLECT_LIVE（向后兼容旧调用）
+        hub2 = mh.MetricsHub(sidecar_path=__file__, poll_ms=500)
+        ok(hub2.poll_ms == 500, f"显式 poll_ms=500 覆盖 COLLECT_LIVE（实际 {hub2.poll_ms}）")
+        hub2.stop()
+        # retune_collect 热重载：poll_ms 现读即生效（_poll_loop 每拍重读 self.poll_ms）
+        mh.apply_tuning({"poll_ms": 3000})
+        hub.retune_collect()
+        ok(hub.poll_ms == 3000, f"retune_collect 后 poll_ms 热更新（实际 {hub.poll_ms}）")
+        # history_points 变 → 重建历史（清旧 deque，下拍按新 maxlen 积累）
+        now = time.time()
+        with hub._lock:
+            hub._ps_cache = {"cpu.load": (now, 42.0), "sys.uptime": (now, 1.0),
+                             "mem.load": (now, 1.0), "mem.used": (now, 1.0),
+                             "net.tx": (now, 0.0), "net.rx": (now, 0.0),
+                             "cpu.freq_ps": (now, 1.0), "disk_busy": (now, 0.0)}
+        for _ in range(5):
+            hub._record_history()
+        ok(len(hub.history("cpu.load")) == 5, "retune 前历史已积累 5 点")
+        mh.apply_tuning({"history_points": 90})
+        hub.retune_collect()
+        ok(hub.history("cpu.load") == [],
+           f"history_points 变 → retune_collect 清空历史待重建（实际 {len(hub.history('cpu.load'))} 点）")
+        ok(mh.HISTORY_POINTS == 90, f"retune_collect 同步 HISTORY_POINTS=90（实际 {mh.HISTORY_POINTS}）")
+        # sidecar_interval 变 → runner.interval_ms 更新（真实重启侧车需活进程，此处验属性）
+        mh.apply_tuning({"sidecar_interval_ms": 1234})
+        hub.retune_collect()
+        ok(hub.runner.interval_ms == 1234,
+           f"sidecar_interval 变 → runner.interval_ms 更新（实际 {hub.runner.interval_ms}）")
+        hub.stop()
+        # first_frame_timeout_sec 接线：wait_first_frame 默认 timeout 读 COLLECT_LIVE
+        mh.apply_tuning({"first_frame_timeout_sec": 6})
+        hub3 = mh.MetricsHub(sidecar_path=__file__)
+        t0 = time.time()
+        hub3.runner.wait_first_frame()   # 假路径永不出帧、alive=False → 立即 False
+        ok(hub3.runner.wait_first_frame() is False,
+           "wait_first_frame 默认读 COLLECT_LIVE 且不阻塞（假路径立即 False）")
+        ok(time.time() - t0 < 3, "wait_first_frame 未卡满（alive=False 即时返回）")
+        hub3.stop()
+    finally:
+        mh.apply_tuning({})
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
     section_c()
     section_d()
     section_e()
+    section_f()
     print(f"\n== PASS {PASS} / FAIL {FAIL} / SKIP {SKIP} ==")
     sys.exit(1 if FAIL else 0)
