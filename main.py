@@ -47,6 +47,7 @@ import winreg
 import yaml
 import monitor_hub
 import monitor_ui
+from config_docs import CONFIG_README_TEXT, CONFIG_TUNING_TEMPLATE
 from PySide6.QtCore import (QByteArray, QElapsedTimer, QEvent, QLibraryInfo,
                             QMimeData, QObject, QPoint,
                             QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer,
@@ -1852,6 +1853,37 @@ def merge_settings_with_defaults(src: dict) -> dict:
     return _merge_config(default_settings(), src)
 
 
+def release_config_docs(directory: str) -> None:
+    """首启释放 README.md + 出厂 config.yaml 到配置目录（已存在则不覆盖）。
+
+    【作用范围】配置目录下的 README.md（用户说明）与 config.yaml（数值调参，
+      enabled 默认 false）。内容来自代码内嵌的 config_docs 模块（倾向代码内嵌
+      而非 --include-data-files，避免打包遗漏；计划 §十一）。
+    【影响】
+      · 目录不存在先自建（全新用户）；
+      · **已存在的文件一律不覆盖**——用户可能改过 enabled/数值或改过 README，
+        覆盖会丢用户改动；只补缺失的那份；
+      · 释放失败（只读目录等）记 crash.log 但不致命，不阻断启动。
+    老用户升级同样经此拿到 config.yaml（见 ensure_settings：释放在所有分支之前）。
+    """
+    try:
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory, exist_ok=True)
+    except OSError as exc:
+        _log_crash("release_config_docs_mkdir", exc)
+        return
+    for name, text in (("README.md", CONFIG_README_TEXT),
+                       ("config.yaml", CONFIG_TUNING_TEMPLATE)):
+        target = os.path.join(directory, name)
+        if os.path.exists(target):
+            continue          # 已存在不覆盖（尊重用户修改）
+        try:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as exc:
+            _log_crash("release_config_docs", exc)
+
+
 def ensure_settings(path: str = SETTINGS_PATH, base: str | None = None) -> dict:
     """保证配置文件存在并返回其内容（配置主位置 %LOCALAPPDATA%\\Aura_Pixie\\setting.yaml）。
 
@@ -1865,6 +1897,12 @@ def ensure_settings(path: str = SETTINGS_PATH, base: str | None = None) -> dict:
       4) 根目录没有合法 yaml → 写出厂默认配置并返回。
     base 可注入扫描目录（自检隔离用）；None 时用 exe 所在目录。
     """
+    # 0) 首启释放 README.md + 出厂 config.yaml（v2.03，计划 §十一）。
+    #    必须放在**所有分支之前**：下面分支 1 对「主位置已有 setting.yaml」会直接
+    #    return，若把释放放进建目录分支，升级到 v2.03 的老用户就永远拿不到
+    #    config.yaml（调参无从下手）。release_config_docs 内部已存在则不覆盖、幂等。
+    release_config_docs(os.path.dirname(path))
+
     # 1) 主位置已有 → 先做一次性迁移（老单文件 → 四文件），再读取载入。
     #    迁移必须在任何稳态写盘之前：write_setting 已具拆分能力，老配置若先被
     #    写盘（如移动球体触发坐标记忆）会无快照地拆分。已迁移则幂等返回。
@@ -4091,30 +4129,117 @@ def _monitor_rescale_if_changed() -> None:
         _log_crash("monitor_rescale", exc)
 
 
+# ------------------------------------------------- 监视采集偏好三级优先级（v2.03）
+# refresh_ms / idle_stop_sec 的生效值 = setting 已设值 > config 生效值 > 内置默认。
+# 迁移兼容特例（计划 §十.3）：这两键不剥离、留在 setting.yaml 作「用户已设值」，
+# 保迁移前后观感不变；config.yaml collect 组只作「用户没设过」时的调参入口。
+_COLLECT_PREF_KEYS = ("refresh_ms", "idle_stop_sec")
+
+
+class _Unset:
+    """哨兵：区分「用户没设该键」与「用户设了值（含合法的 0=永不停采）」。"""
+    __slots__ = ()
+
+    def __repr__(self):
+        return "<UNSET>"
+
+
+_UNSET = _Unset()
+# tier1 缓存：setting.yaml monitor 块里用户真实设过的采集偏好值；_UNSET=未设。
+# 由 load/save_monitor_config 刷新（写时刷新），_effective_* 只读它 → 零读盘（坑 106）。
+# 初值 None = 从未刷新过，首次取值兜底读盘一次（照 _monitor_locked_getter 先例），
+# 避免某路径未经漏斗就把 None 缓存误当「用户没设」。
+_MONITOR_COLLECT_CACHE: dict | None = None
+
+
+def _strip_unset_collect_prefs(merged: dict, raw_mon: dict) -> dict:
+    """保存监视块前，剥掉用户从未设过的 refresh_ms/idle_stop_sec（防伪造）。
+
+    merged 以出厂默认为底、恒含这两键；若照写回 setting.yaml，用户哪怕从没碰过
+    采集周期，文件里也会凭空出现 refresh_ms: 1000——三级优先级 tier1 就被这个
+    伪造值永久占据，config.yaml 的 collect 调参再也调不动。故只保留 raw_mon
+    （磁盘原始 monitor 块）里真实存在的键；用户设过的原样保留。
+    """
+    for k in _COLLECT_PREF_KEYS:
+        if k not in raw_mon and k in merged:
+            merged.pop(k, None)
+    return merged
+
+
+def _effective_collect_pref(key: str):
+    """采集偏好三级优先级取值（setting 已设值 > config 生效值 > 内置默认）。
+
+    【作用范围】collect.refresh_ms / idle_stop_sec 两键的最终生效值。
+    【影响】
+      · tier1 setting.yaml 已设值（用户在监视设置窗设过、或旧配置迁移保留）——
+        最高优先，钳制后返回（用户可能手改出非法值；idle_stop_sec=0 是合法「永不」，
+        哨兵 _UNSET 专用于区分「没设」，故 0 不会被误当未设而回退）；
+      · tier2 config.yaml collect 生效值（enabled=true 时 apply_tuning 钳制写入
+        COLLECT_LIVE；enabled=false 时 COLLECT_LIVE==内置默认，自然等价 tier3）；
+      · tier3 内置默认 COLLECT_DEFAULTS。
+    只读内存缓存（tier1 查 _MONITOR_COLLECT_CACHE，由 load/save_monitor_config
+    刷新；tier2/3 查 COLLECT_LIVE/DEFAULTS），零读盘——供 1s 闲置定时器热调用
+    （坑 106）。缓存从未刷新时兜底读盘一次，之后恒查内存。
+    """
+    global _MONITOR_COLLECT_CACHE
+    if _MONITOR_COLLECT_CACHE is None:
+        load_monitor_config()          # 唯一漏斗：内部会填好缓存，不会递归
+    v = (_MONITOR_COLLECT_CACHE or {}).get(key, _UNSET)
+    if v is not _UNSET:
+        clamped = monitor_hub.clamp_collect_value(key, v)
+        if clamped is not None:
+            return clamped
+        # tier1 值非法（非数值/NaN）→ 落 tier2/3，不把坏值当真源
+    live = monitor_hub.COLLECT_LIVE.get(key)
+    if live is not None:
+        return live
+    return monitor_hub.COLLECT_DEFAULTS[key]
+
+
+def _effective_refresh_ms() -> int:
+    """界面拉取周期生效值（三级优先级，见 _effective_collect_pref）。"""
+    return _effective_collect_pref("refresh_ms")
+
+
+def _effective_idle_stop_sec() -> int:
+    """闲置停采秒数生效值（三级优先级，见 _effective_collect_pref）。"""
+    return _effective_collect_pref("idle_stop_sec")
+
+
 # ---------------------------------------------------------------- 监视配置（阶段 5）
 def load_monitor_config() -> dict:
     """读取监视配置块；缺键回退默认（照 appearance 先例，解析失败不打断启动）。
 
-    顺带刷新锁定缓存：本函数是监视配置读取的唯一漏斗，拖动热路径的
-    _monitor_locked_getter 改查缓存后，由这里保证缓存与磁盘一致。
+    顺带刷新两个缓存：本函数是监视配置读取的唯一漏斗，拖动热路径的
+    _monitor_locked_getter 与 1s 闲置定时器的 _effective_* 都改查缓存，
+    由这里保证缓存与磁盘一致（坑 106：热路径禁读盘，写时刷新保即时生效）。
     """
-    global _MONITOR_LOCKED_CACHE
+    global _MONITOR_LOCKED_CACHE, _MONITOR_COLLECT_CACHE
     data = read_setting().get("monitor")
-    merged = _merge_monitor_block(None, data if isinstance(data, dict) else {})
+    raw = data if isinstance(data, dict) else {}
+    merged = _merge_monitor_block(None, raw)
     _MONITOR_LOCKED_CACHE = bool(merged.get("locked", False))
+    # 采集偏好「用户是否设过」只认 setting.yaml 里真实存在的键（merged 是补过
+    # 默认的，无法区分「用户设了 1000」与「用户没设、默认 1000」）
+    _MONITOR_COLLECT_CACHE = {k: raw.get(k, _UNSET) for k in _COLLECT_PREF_KEYS}
     return merged
 
 
 def save_monitor_config(cfg: dict) -> None:
     """写回监视配置块（不动其他块）；units/layout 整块归一后落盘。
 
-    落盘同时刷新锁定缓存（写盘即时生效，getter 无需再读盘）。
+    落盘同时刷新锁定与采集偏好缓存（写盘即时生效，getter 无需再读盘）。
+    refresh_ms/idle_stop_sec 只在「用户此前真设过」时才写回，绝不伪造（否则
+    tier1 被默认值永久占据，config.yaml 的 collect 调参就再也调不动了）。
     """
-    global _MONITOR_LOCKED_CACHE
+    global _MONITOR_LOCKED_CACHE, _MONITOR_COLLECT_CACHE
     data = read_setting()
+    raw_mon = data.get("monitor") if isinstance(data.get("monitor"), dict) else {}
     merged = _merge_monitor_block(None, cfg if isinstance(cfg, dict) else {})
+    merged = _strip_unset_collect_prefs(merged, raw_mon)
     data["monitor"] = merged
     _MONITOR_LOCKED_CACHE = bool(merged.get("locked", False))
+    _MONITOR_COLLECT_CACHE = {k: merged.get(k, _UNSET) for k in _COLLECT_PREF_KEYS}
     try:
         write_setting(data)
     except OSError as exc:
@@ -6060,7 +6185,9 @@ def _monitor_sync_windows(cfg: dict) -> None:
             _MONITOR_HUB.start()
             _monitor_backfill_history()
         if want:
-            mgr.start_polling(cfg.get("refresh_ms", 1000))
+            # v2.03：走三级优先级（setting 已设值 > config 生效值 > 内置默认），
+            # 不再散落 cfg.get——否则 config.yaml 的 collect.refresh_ms 永不生效
+            mgr.start_polling(_effective_refresh_ms())
             _MONITOR_LAST_VISIBLE = time.time()
             if _MONITOR_IDLE_TIMER is not None:
                 _MONITOR_IDLE_TIMER.start()
@@ -6199,7 +6326,8 @@ def _monitor_idle_check() -> None:
             if _MONITOR_IDLE_TIMER is not None:
                 _MONITOR_IDLE_TIMER.stop()
             return
-        idle_stop = cfg.get("idle_stop_sec", 300)
+        # v2.03：走三级优先级（setting 已设值 > config 生效值 > 内置默认）
+        idle_stop = _effective_idle_stop_sec()
         any_visible = any(w.isVisible() for w in _MONITOR_MGR._widgets.values())
         if any_visible:
             _MONITOR_LAST_VISIBLE = time.time()

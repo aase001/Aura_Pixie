@@ -65,18 +65,19 @@ HISTORY_POINTS = 60
 
 # ---------------------------------------------------------------------------
 # v2.03 配置拆分：collect 调参的冻结默认快照 + 生效值表 + 唯一写入口
-#   【作用范围】config.yaml 的 collect 组中由 monitor_hub 自身消费的六个键：
-#     history_points / sidecar_interval_ms / stale_sec / max_restarts /
-#     poll_ms / first_frame_timeout_sec。
+#   【作用范围】config.yaml 的 collect 组八个键：history_points / sidecar_interval_ms /
+#     stale_sec / max_restarts / poll_ms / first_frame_timeout_sec（本模块消费）
+#     + refresh_ms / idle_stop_sec（本模块只钳制进 COLLECT_LIVE，不消费）。
 #   【影响】apply_tuning 把这些值写进 COLLECT_LIVE 生效表 + HISTORY_POINTS 全局；
 #     main 侧构造 MetricsHub/SidecarRunner、调 wait_first_frame 时读 COLLECT_LIVE
 #     传参，构造签名不变（坑 100 同款：注入生效值而非动签名）。enabled=false 时
 #     main 传 {}，整表回退内置默认。每次从 COLLECT_DEFAULTS 整表重算，幂等。
-#     注：refresh_ms / idle_stop_sec 虽同在 config.yaml collect 组，但其生效走
-#     main 侧「setting 已设值 > config 生效值 > 内置默认」三级优先级（_effective_*），
-#     不由本模块处理（计划 §四）。history_points 是单一真源（决策12）：同时决定
-#     本模块 deque(maxlen=) 与 monitor_ui.SPARKLINE_POINTS（后者由 main 侧 apply_tuning
-#     联动注入），杜绝两键不等致「记 N 点只画 M 点」错位。
+#     注：refresh_ms / idle_stop_sec 的最终生效值走 main 侧三级优先级
+#     （setting 已设值 > COLLECT_LIVE 生效值 > 内置默认，见 _effective_*）——本模块
+#     只负责把它们钳制进 COLLECT_LIVE 作 tier2/tier3 来源，选择逻辑不在这里。
+#     history_points 是单一真源（决策12）：同时决定本模块 deque(maxlen=) 与
+#     monitor_ui.SPARKLINE_POINTS（后者由 main 侧 apply_tuning 联动注入），
+#     杜绝两键不等致「记 N 点只画 M 点」错位。
 # ---------------------------------------------------------------------------
 COLLECT_DEFAULTS = {
     "history_points": HISTORY_POINTS,   # 60，被 _record_history 的 deque(maxlen=) 消费
@@ -85,6 +86,10 @@ COLLECT_DEFAULTS = {
     "max_restarts": 3,                  # SidecarRunner.max_restarts（连续失败重启上限）
     "poll_ms": 1000,                    # MetricsHub.poll_ms（psutil 聚合节拍）
     "first_frame_timeout_sec": 15.0,    # wait_first_frame(timeout)
+    # refresh_ms / idle_stop_sec：本模块不消费，仅钳制进 COLLECT_LIVE 供 main 侧
+    # 三级优先级（setting 已设值 > 此生效值 > 内置默认）作 tier2/tier3 取值来源。
+    "refresh_ms": 1000,                 # 界面拉取周期（main.start_polling 消费）
+    "idle_stop_sec": 300,               # 闲置停采秒数（main._monitor_idle_check 消费，0=永不）
 }
 # 各键钳制范围（下界, 上界）；对照配置拆分实施计划 §五 collect 组
 _COLLECT_RANGE = {
@@ -94,10 +99,12 @@ _COLLECT_RANGE = {
     "max_restarts": (0, 10),
     "poll_ms": (200, 5000),
     "first_frame_timeout_sec": (5.0, 60.0),
+    "refresh_ms": (200, 5000),
+    "idle_stop_sec": (0, 3600),
 }
-# 整型键（其余按 float 处理）；max_restarts 下界 0 合法=禁用重启
+# 整型键（其余按 float 处理）；max_restarts / idle_stop_sec 下界 0 合法
 _COLLECT_INT_KEYS = {"history_points", "sidecar_interval_ms",
-                     "max_restarts", "poll_ms"}
+                     "max_restarts", "poll_ms", "refresh_ms", "idle_stop_sec"}
 
 #: 生效值表（apply_tuning 写、main 侧构造 hub/runner 时读）；出厂=内置默认
 COLLECT_LIVE = dict(COLLECT_DEFAULTS)
@@ -135,6 +142,29 @@ def apply_tuning(values: dict) -> None:
     # history_points 单一真源（决策12）：同步模块全局 HISTORY_POINTS，
     # _record_history 的 deque(maxlen=HISTORY_POINTS) 下一拍即按新容量积累
     HISTORY_POINTS = live["history_points"]
+
+
+def clamp_collect_value(key: str, value):
+    """按 collect 组的范围表钳制单个值；未知键或非法值返回 None。
+
+    【作用范围】main 侧三级优先级取 tier1（setting.yaml monitor 已设值）时用——
+      范围表只在本模块维护一份（_COLLECT_RANGE），避免两处各写一遍而漂移。
+    【影响】返回钳制后的 int/float（与 COLLECT_DEFAULTS 同类型）；键不在范围表内
+      或值非数值时返回 None，由调用方决定是否回退下一优先级。
+      注意 idle_stop_sec 下界是 0 且 0=永不停采（合法值，不得当「未设」丢弃）。
+    """
+    if key not in _COLLECT_RANGE:
+        return None
+    lo, hi = _COLLECT_RANGE[key]
+    dflt = COLLECT_DEFAULTS[key]
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    c = max(float(lo), min(float(hi), f))
+    return int(round(c)) if key in _COLLECT_INT_KEYS else c
 
 
 CREATE_NO_WINDOW = 0x08000000

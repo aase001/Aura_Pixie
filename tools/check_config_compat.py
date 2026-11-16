@@ -527,6 +527,292 @@ for _f in (_set8, _cmd8, _state8):
 shutil.rmtree(_bkdir8, ignore_errors=True)
 shutil.rmtree(_d8, ignore_errors=True)
 
+# ---- 场景9：v2.03 首启释放 README.md + 出厂 config.yaml（计划 §十一）----
+_d9 = os.path.join(_ISO, "rel9")
+os.makedirs(_d9, exist_ok=True)
+_set9 = os.path.join(_d9, "setting.yaml")
+_readme9 = os.path.join(_d9, "README.md")
+_tune9 = os.path.join(_d9, "config.yaml")
+M.SETTINGS_PATH = M.CONFIG_PATH = _set9
+M.COMMAND_PATH = os.path.join(_d9, "command.yaml")
+M.STATE_PATH = os.path.join(_d9, "state.yaml")
+M.TUNING_PATH = _tune9
+M.BACKUP_DIR = os.path.join(_d9, "backup")
+
+ck("release_config_docs 函数存在", hasattr(M, "release_config_docs"))
+ck("内嵌 README 文本存在且非空", hasattr(M, "CONFIG_README_TEXT")
+   and isinstance(M.CONFIG_README_TEXT, str) and len(M.CONFIG_README_TEXT) > 500,
+   f"（长度 {len(getattr(M, 'CONFIG_README_TEXT', '') or '')}）")
+ck("出厂 config.yaml 模板存在且非空", hasattr(M, "CONFIG_TUNING_TEMPLATE")
+   and isinstance(M.CONFIG_TUNING_TEMPLATE, str)
+   and len(M.CONFIG_TUNING_TEMPLATE) > 500,
+   f"（长度 {len(getattr(M, 'CONFIG_TUNING_TEMPLATE', '') or '')}）")
+
+if hasattr(M, "release_config_docs"):
+    # ① 全新用户：目录里什么都没有 → 释放两个文件
+    for _f in (_set9, _readme9, _tune9):
+        if os.path.exists(_f):
+            os.remove(_f)
+    M.release_config_docs(_d9)
+    ck("全新目录 → 释放 README.md", os.path.isfile(_readme9))
+    ck("全新目录 → 释放 config.yaml", os.path.isfile(_tune9))
+    _rd9 = open(_readme9, encoding="utf-8").read() if os.path.isfile(_readme9) else ""
+    _td9 = open(_tune9, encoding="utf-8").read() if os.path.isfile(_tune9) else ""
+    ck("释放的 README 含关键章节与参数说明（非空壳）",
+       "config.yaml 参数说明" in _rd9 and "总开关 enabled" in _rd9
+       and "ball.hover.trigger_ms" in _rd9 and "monitor.semantics" in _rd9
+       and "collect.history_points" in _rd9, f"（长度 {len(_rd9)}）")
+    ck("README 与内嵌文本一致（无截断）", _rd9 == M.CONFIG_README_TEXT,
+       f"（释放 {len(_rd9)} vs 内嵌 {len(M.CONFIG_README_TEXT)}）")
+    ck("出厂 config.yaml enabled: false（决策3：默认关闭=安全模式）",
+       yaml.safe_load(_td9).get("enabled") is False, f"（{_td9[:200]}）")
+    ck("出厂 config.yaml 含 ball/monitor/collect 三组",
+       set(yaml.safe_load(_td9)) >= {"enabled", "ball", "monitor", "collect"},
+       str(sorted(yaml.safe_load(_td9))))
+    _t9 = yaml.safe_load(_td9)
+    ck("出厂 config.yaml 数值 == 内置默认（开箱即默认，开关真假初始观感一致）",
+       _t9["ball"]["hover"]["trigger_ms"] == M.BALL_DEFAULTS["hover_trigger_ms"]
+       and _t9["monitor"]["pane"]["base_w"] == mu.MONITOR_DEFAULTS["pane"]["base_w"]
+       and _t9["collect"]["history_points"] == M.monitor_hub.COLLECT_DEFAULTS["history_points"],
+       f"（{_t9['ball']['hover']['trigger_ms']}/"
+       f"{_t9['monitor']['pane']['base_w']}/{_t9['collect']['history_points']}）")
+    # 全键逐一比对（不只抽查）：模板是字面量，默认值改了忘同步必须在此变红
+    _drift = []
+    for _grp, _sub in (("ball", "hover"), ("ball", "click"), ("ball", "drag"),
+                       ("ball", "anim")):
+        for _k, _v in (_t9[_grp].get(_sub) or {}).items():
+            _dot = f"{_grp}.{_sub}.{_k}"
+            _ckey = next((c for p, c, _l, _h in M._BALL_TUNE_SPEC if p == _dot), None)
+            if _ckey is None:
+                _drift.append(f"{_dot}: 模板有但 _BALL_TUNE_SPEC 无此路径")
+            elif _v != M.BALL_DEFAULTS[_ckey]:
+                _drift.append(f"{_dot}: 模板 {_v} != 默认 {M.BALL_DEFAULTS[_ckey]}")
+    for _sub in ("pane", "spark", "snap"):
+        for _k, _v in (_t9["monitor"].get(_sub) or {}).items():
+            _want = mu.MONITOR_DEFAULTS[_sub].get(_k)
+            # exclude_keys 默认是 tuple、YAML 加载出 list：按元组比对（顺序也算）
+            if isinstance(_want, tuple):
+                _ok9 = tuple(_v) == _want
+            else:
+                _ok9 = _v == _want
+            if not _ok9:
+                _drift.append(f"monitor.{_sub}.{_k}: 模板 {_v} != 默认 {_want}")
+    for _k, _v in (_t9["monitor"].get("semantics") or {}).items():
+        if _k == "bands":
+            for _bk, _bv in _v.items():
+                _want = mu.MONITOR_DEFAULTS["semantics"]["bands"].get(_bk)
+                _got = (_bv.get("green_max"), _bv.get("yellow_max"), _bv.get("red_max")) \
+                    if isinstance(_bv, dict) else None
+                if _got != _want:
+                    _drift.append(f"bands.{_bk}: 模板 {_got} != 默认 {_want}")
+        elif _v != mu.MONITOR_DEFAULTS["semantics"].get(_k):
+            _drift.append(f"semantics.{_k}: 模板 {_v} != "
+                          f"默认 {mu.MONITOR_DEFAULTS['semantics'].get(_k)}")
+    for _k, _v in (_t9.get("collect") or {}).items():
+        if _v != M.monitor_hub.COLLECT_DEFAULTS.get(_k):
+            _drift.append(f"collect.{_k}: 模板 {_v} != "
+                          f"默认 {M.monitor_hub.COLLECT_DEFAULTS.get(_k)}")
+    ck("出厂模板全键数值与内置默认零漂移（逐键比对，非抽查）", not _drift,
+       f"（{len(_drift)} 处：{_drift[:6]}）")
+    # 反向：_BALL_TUNE_SPEC 的每个可调键都必须在模板里有对应路径（缺键=用户无从调起）
+    _miss2 = []
+    for _p, _c, _l, _h in M._BALL_TUNE_SPEC:
+        _node = _t9
+        for _seg in _p.split("."):
+            _node = _node.get(_seg) if isinstance(_node, dict) else None
+        if _node is None:
+            _miss2.append(_p)
+    ck("_BALL_TUNE_SPEC 全部 16 个可调键在模板中都有路径（不缺键）",
+       not _miss2 and len(M._BALL_TUNE_SPEC) == 16,
+       f"（缺 {_miss2}；规格 {len(M._BALL_TUNE_SPEC)} 键）")
+    ck("模板键数与三组默认快照键数一致（无多余键、无遗漏）",
+       len(_t9["monitor"]["pane"]) == len(mu.MONITOR_DEFAULTS["pane"])
+       and len(_t9["monitor"]["snap"]) == len(mu.MONITOR_DEFAULTS["snap"])
+       and len(_t9["collect"]) == len(M.monitor_hub.COLLECT_DEFAULTS)
+       and len(_t9["monitor"]["spark"]) == len(mu.MONITOR_DEFAULTS["spark"]),
+       f"（pane {len(_t9['monitor']['pane'])}/{len(mu.MONITOR_DEFAULTS['pane'])}, "
+       f"snap {len(_t9['monitor']['snap'])}/{len(mu.MONITOR_DEFAULTS['snap'])}, "
+       f"collect {len(_t9['collect'])}/{len(M.monitor_hub.COLLECT_DEFAULTS)}, "
+       f"spark {len(_t9['monitor']['spark'])}/{len(mu.MONITOR_DEFAULTS['spark'])}）")
+    ck("出厂 config.yaml 含七类 bands 边界（决策11）",
+       set(_t9["monitor"]["semantics"]["bands"]) == {"percent", "celsius", "rpm", "net",
+                                                     "freq", "power", "size"},
+       str(sorted(_t9["monitor"]["semantics"]["bands"])))
+    ck("出厂 config.yaml 不含已废弃的 monitor.spark.points（决策12 单一真源）",
+       "points" not in _t9["monitor"].get("spark", {}),
+       str(sorted(_t9["monitor"].get("spark", {}))))
+    ck("出厂 config.yaml 全中文注释（决策4：每项带作用范围/影响）",
+       _td9.count("作用范围") >= 20 and _td9.count("影响") >= 20,
+       f"（作用范围 {_td9.count('作用范围')} 次 / 影响 {_td9.count('影响')} 次）")
+    ck("出厂 config.yaml 可被 load_interaction_config 正确解析（enabled=true 时生效）",
+       M.load_interaction_config(_tune9) is not None)
+
+    # ② 已存在则不覆盖（用户可能改过 enabled 或数值）
+    with open(_readme9, "w", encoding="utf-8") as fh:
+        fh.write("用户改过的 README")
+    with open(_tune9, "w", encoding="utf-8") as fh:
+        fh.write("enabled: true\n")
+    M.release_config_docs(_d9)
+    ck("已存在的 README.md 不被覆盖（尊重用户修改）",
+       open(_readme9, encoding="utf-8").read() == "用户改过的 README")
+    ck("已存在的 config.yaml 不被覆盖（用户 enabled=true 保留）",
+       open(_tune9, encoding="utf-8").read() == "enabled: true\n")
+
+    # ③ 关键陷阱：老用户升级场景——已有 setting.yaml 时 ensure_settings 走
+    #    「主位置已有 → 直接返回」分支，若不统一释放则老用户永远拿不到 config.yaml
+    with open(_set9, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"layout_version": 2,
+                        "appearance": {"color_mid": "#ABCDEF"},
+                        "window": {"always_on_top": False}}, fh, allow_unicode=True)
+    for _f in (_readme9, _tune9):
+        os.remove(_f)
+    M.ensure_settings(_set9, base=os.path.join(_ISO, "no_root_yaml"))
+    ck("老用户（已有 setting.yaml）经 ensure_settings 也拿到 config.yaml",
+       os.path.isfile(_tune9),
+       "（ensure_settings 早返回分支漏了释放——升级用户会缺 config.yaml，调参无从下手）")
+    ck("老用户经 ensure_settings 也拿到 README.md", os.path.isfile(_readme9))
+    _td_old = open(_tune9, encoding="utf-8").read() if os.path.isfile(_tune9) else ""
+    ck("老用户释放的 config.yaml 同样是出厂完整模板",
+       yaml.safe_load(_td_old or "null") == yaml.safe_load(M.CONFIG_TUNING_TEMPLATE),
+       f"（长度 {len(_td_old)}）")
+    ck("释放不改老用户既有配置内容（setting.yaml 未被覆盖）",
+       M.read_setting(_set9).get("appearance", {}).get("color_mid") == "#ABCDEF")
+
+for _f in (_set9, _readme9, _tune9, M.COMMAND_PATH, M.STATE_PATH):
+    if os.path.exists(_f):
+        try:
+            os.remove(_f)
+        except OSError:
+            pass
+shutil.rmtree(_d9, ignore_errors=True)
+
+# ---- 场景10：collect.refresh_ms / idle_stop_sec 三级优先级（计划 §四，缺口修复）----
+# 消费点不得各自散落 cfg.get(...)，必须走 _effective_* 封装：
+#   setting.yaml monitor 已设值 > config.yaml collect 生效值（enabled=true）> 内置默认
+# 必须用 _ISO\Aura_Pixie（== read_setting/write_setting 默认参数在 import 时绑定的
+# 主位置）：load_monitor_config() 等无参漏斗内部调 read_setting()，monkeypatch
+# M.SETTINGS_PATH 改不动已绑定的默认参数，换别的目录会让 tier1 读到空文件。
+_d10 = os.path.join(_ISO, "Aura_Pixie")
+os.makedirs(_d10, exist_ok=True)
+_set10 = os.path.join(_d10, "setting.yaml")
+_tune10 = os.path.join(_d10, "config.yaml")
+M.SETTINGS_PATH = M.CONFIG_PATH = _set10
+M.COMMAND_PATH = os.path.join(_d10, "command.yaml")
+M.STATE_PATH = os.path.join(_d10, "state.yaml")
+M.TUNING_PATH = _tune10
+M.BACKUP_DIR = os.path.join(_d10, "backup")
+for _f in (_set10, _tune10, M.COMMAND_PATH, M.STATE_PATH):
+    if os.path.exists(_f):
+        os.remove(_f)
+
+ck("_effective_refresh_ms 存在", hasattr(M, "_effective_refresh_ms"))
+ck("_effective_idle_stop_sec 存在", hasattr(M, "_effective_idle_stop_sec"))
+ck("COLLECT_DEFAULTS 含 refresh_ms/idle_stop_sec（config.yaml collect 组两键）",
+   "refresh_ms" in M.monitor_hub.COLLECT_DEFAULTS
+   and "idle_stop_sec" in M.monitor_hub.COLLECT_DEFAULTS,
+   str(sorted(M.monitor_hub.COLLECT_DEFAULTS)))
+if hasattr(M, "_effective_refresh_ms") and hasattr(M, "_effective_idle_stop_sec"):
+    def _w10(mon):
+        """写 setting.yaml 并走真实读取漏斗（load_monitor_config 是缓存刷新点）。
+
+        程序任何读监视配置都经 load_monitor_config，故此处同样调它——
+        既贴近真实路径，也让 tier1 缓存按「写时刷新」口径失效（坑 106）。
+        """
+        with open(_set10, "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"layout_version": 2, "monitor": mon}, fh,
+                           allow_unicode=True)
+        M.load_monitor_config()
+
+    def _t10(enabled, col):
+        with open(_tune10, "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"enabled": enabled, "collect": col}, fh, allow_unicode=True)
+        M.load_interaction_config(_tune10)
+
+    try:
+        # tier1：setting 已设值最高优先（即便 config 另设别的值）
+        _w10({"enabled": True, "refresh_ms": 2500, "idle_stop_sec": 45})
+        _t10(True, {"refresh_ms": 3000, "idle_stop_sec": 600})
+        ck("tier1 setting 已设值优先：refresh_ms=2500（config 的 3000 不生效）",
+           M._effective_refresh_ms() == 2500, str(M._effective_refresh_ms()))
+        ck("tier1 setting 已设值优先：idle_stop_sec=45",
+           M._effective_idle_stop_sec() == 45, str(M._effective_idle_stop_sec()))
+        # tier2：setting 未设 → config 生效值（enabled=true）
+        _w10({"enabled": True})
+        _t10(True, {"refresh_ms": 3000, "idle_stop_sec": 600})
+        ck("tier2 setting 未设 + enabled=true → 取 config 生效值 3000",
+           M._effective_refresh_ms() == 3000, str(M._effective_refresh_ms()))
+        ck("tier2 setting 未设 + enabled=true → idle_stop_sec 取 config 600",
+           M._effective_idle_stop_sec() == 600, str(M._effective_idle_stop_sec()))
+        # tier3：setting 未设 + enabled=false → 内置默认（config 数值被门控忽略）
+        _t10(False, {"refresh_ms": 3000, "idle_stop_sec": 600})
+        ck("tier3 enabled=false → 回内置默认 1000（config 数值被忽略）",
+           M._effective_refresh_ms() == 1000, str(M._effective_refresh_ms()))
+        ck("tier3 enabled=false → idle_stop_sec 回内置默认 300",
+           M._effective_idle_stop_sec() == 300, str(M._effective_idle_stop_sec()))
+        # 钳制：setting 已设但超范围 → 钳到边界（非法值不致命）
+        _w10({"enabled": True, "refresh_ms": 99999, "idle_stop_sec": -5})
+        _t10(False, {})
+        ck("setting 已设超上界 → 钳到 5000", M._effective_refresh_ms() == 5000,
+           str(M._effective_refresh_ms()))
+        ck("setting 已设非法负值 → 钳到 0（0=永不停采合法，坑81 不得抬成最小值）",
+           M._effective_idle_stop_sec() == 0, str(M._effective_idle_stop_sec()))
+        # idle_stop_sec=0（永不）必须原样保留，不得被当「未设」而回退 300
+        _w10({"enabled": True, "idle_stop_sec": 0})
+        _t10(False, {})
+        ck("setting 显式 idle_stop_sec=0（永不）保留，不误判为未设",
+           M._effective_idle_stop_sec() == 0, str(M._effective_idle_stop_sec()))
+        # 零读盘：_effective_* 供 1s 闲置定时器调用，禁止每次读盘解析 yaml（坑 106）
+        _w10({"enabled": True, "refresh_ms": 1500})
+        _t10(False, {})
+        _reads10 = {"n": 0}
+        _real_read10 = M._read_yaml_file
+
+        def _counting_read10(p):
+            _reads10["n"] += 1
+            return _real_read10(p)
+
+        M._read_yaml_file = _counting_read10
+        try:
+            for _ in range(20):
+                M._effective_refresh_ms()
+                M._effective_idle_stop_sec()
+        finally:
+            M._read_yaml_file = _real_read10
+        ck("40 次取值零读盘（缓存生效，坑106 热路径禁读盘）",
+           _reads10["n"] == 0, f"（实际读盘 {_reads10['n']} 次）")
+        # 保存监视设置不得伪造这两键（否则 tier1 永久遮蔽 config.yaml）
+        _w10({"enabled": True, "units": {"cpu.load": {"enabled": True}}})
+        M.save_monitor_config(M.load_monitor_config())
+        _raw10 = yaml.safe_load(open(_set10, encoding="utf-8"))
+        ck("save_monitor_config 不伪造 refresh_ms（用户未设过 → 保持未设态）",
+           "refresh_ms" not in _raw10.get("monitor", {}), str(list(_raw10.get("monitor", {}))))
+        ck("save_monitor_config 不伪造 idle_stop_sec",
+           "idle_stop_sec" not in _raw10.get("monitor", {}),
+           str(list(_raw10.get("monitor", {}))))
+        _w10({"enabled": True, "refresh_ms": 1800, "idle_stop_sec": 90})
+        M.save_monitor_config(M.load_monitor_config())
+        _raw11 = yaml.safe_load(open(_set10, encoding="utf-8"))
+        ck("save_monitor_config 保留用户已设的 refresh_ms=1800",
+           _raw11.get("monitor", {}).get("refresh_ms") == 1800,
+           str(_raw11.get("monitor", {}).get("refresh_ms")))
+        ck("save_monitor_config 保留用户已设的 idle_stop_sec=90",
+           _raw11.get("monitor", {}).get("idle_stop_sec") == 90,
+           str(_raw11.get("monitor", {}).get("idle_stop_sec")))
+        # 消费点接线看守：两处不得再散落 cfg.get
+        ck("start_polling 消费点走 _effective_refresh_ms",
+           "_effective_refresh_ms" in inspect.getsource(M._monitor_sync_windows))
+        ck("闲置停采消费点走 _effective_idle_stop_sec",
+           "_effective_idle_stop_sec" in inspect.getsource(M._monitor_idle_check))
+    finally:
+        for _f in (_set10, _tune10, M.COMMAND_PATH, M.STATE_PATH):
+            if os.path.exists(_f):
+                try:
+                    os.remove(_f)
+                except OSError:
+                    pass
+        M.load_interaction_config(os.path.join(_ISO, "no_such.yaml"))
+shutil.rmtree(_d10, ignore_errors=True)
+
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:
     print("  -", f)
