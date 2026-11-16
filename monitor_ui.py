@@ -152,6 +152,197 @@ BASE_H = 80             # 基准窗格高（×缩放）；状态小字叠加绘�
 # C 列按白名单全量单位——数据跳动不再触发重算撑宽（旧「变宽即重算」已废弃）
 _SAMPLE_VALUES = ("--", "100.0", "9999.9", "12345", "123456")
 
+# ---------------------------------------------------------------------------
+# v2.03 配置拆分：数值调参的冻结默认快照 + 唯一写入口 apply_tuning
+#   【作用范围】config.yaml 的 monitor 组全部数值（pane/spark/snap/semantics/
+#     history_points），经 main.load_interaction_config 钳制后传入本模块。
+#   【影响】enabled=true 时这些值替换模块全局常量（窗格几何/曲线/磁吸/语义色/
+#     分档边界/历史点数），下一帧渲染即按新值；尺寸类键须配合 retune_layout
+#     对已开窗格重排才生效（见 MonitorWindowManager.retune_layout）。
+#     enabled=false 时 main 传 {}，本函数从 MONITOR_DEFAULTS 整表重算回内置默认。
+# ---------------------------------------------------------------------------
+# bands 出厂默认（七类单位的 绿/黄/红 上界；内部用 tuple，config.yaml 用
+# {green_max,yellow_max,red_max} dict 形式，apply_tuning 负责转换）。
+_BANDS_DEFAULT = {
+    "percent": (60, 85, 100),
+    "celsius": (60, 80, 110),
+    "rpm": (2000, 3500, 6000),
+    "net": (10, 50, 200),
+    "freq": (3.0, 4.2, 5.5),
+    "power": (35, 80, 150),
+    "size": (8, 16, 32),
+}
+# 单位字符串 → bands 键（default_thresholds 按此查生效边界）
+_BANDS_BY_UNIT = {"%": "percent", "℃": "celsius", "RPM": "rpm",
+                  "MB/s": "net", "GHz": "freq", "W": "power", "GB": "size"}
+# 各类 bands 的取值上界（下界恒 0）；freq 为 float，其余 int
+_BANDS_RANGE = {"percent": (0, 100), "celsius": (0, 200), "rpm": (0, 20000),
+                "net": (0, 2000), "freq": (0, 10), "power": (0, 1000),
+                "size": (0, 512)}
+# bands 生效表（apply_tuning 写、default_thresholds 读）；出厂=内置默认
+_BANDS_LIVE = {k: tuple(v) for k, v in _BANDS_DEFAULT.items()}
+# 出厂曲线排除清单冻结副本（apply_tuning 改 SPARK_EXCLUDE_KEYS 后默认快照不变）
+SPARK_EXCLUDE_KEYS_DEFAULT = tuple(SPARK_EXCLUDE_KEYS)
+
+# 冻结默认快照：与活值分离，防「关了还残留自定义」（计划 §六）
+MONITOR_DEFAULTS = {
+    "pane": {"base_w": BASE_W, "base_w_expanded": BASE_W_EXPANDED,
+             "base_h": BASE_H, "font_px": FONT_PX, "pad_x": PAD_X,
+             "pad_y": PAD_Y, "col_gap": COL_GAP, "row_gap": ROW_GAP,
+             "corner_px": CORNER_PX, "halo_px": HALO_PX,
+             "halo_alpha": HALO_ALPHA, "body_alpha": BODY_ALPHA},
+    "spark": {"max_h_px": SPARK_MAX_H_PX, "bottom_gap_px": SPARK_BOTTOM_GAP_PX,
+              "line_px": SPARK_LINE_PX, "breath_hz": BREATH_HZ,
+              "breath_alpha_min": BREATH_ALPHA_MIN,
+              "breath_alpha_max": BREATH_ALPHA_MAX,
+              "exclude_keys": SPARK_EXCLUDE_KEYS_DEFAULT},
+    "snap": {"drag_threshold_px": DRAG_THRESHOLD_PX,
+             "preview_px": SNAP_PREVIEW_PX, "strong_px": SNAP_STRONG_PX,
+             "anim_ms": SNAP_ANIM_MS, "fuse_dash_px": FUSE_DASH_PX},
+    "semantics": {"green": SEM_GREEN, "yellow": SEM_YELLOW, "red": SEM_RED,
+                  "bands": {k: tuple(v) for k, v in _BANDS_DEFAULT.items()}},
+    "history_points": SPARKLINE_POINTS,
+}
+
+
+def _clamp_num(v, lo, hi, default) -> float:
+    """把用户值钳进 [lo,hi]；非数值/NaN/inf 回退 default。返回 float。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return float(default)
+    if f != f or f == float("inf") or f == float("-inf"):
+        return float(default)
+    return max(float(lo), min(float(hi), f))
+
+
+def _tune_int(src: dict, key: str, default: int, rng) -> int:
+    """整型调参键：src 有该键则钳制取整，否则用默认。"""
+    if isinstance(src, dict) and key in src:
+        return int(round(_clamp_num(src[key], rng[0], rng[1], default)))
+    return int(default)
+
+
+def _tune_float(src: dict, key: str, default: float, rng) -> float:
+    """浮点调参键：src 有该键则钳制，否则用默认。"""
+    if isinstance(src, dict) and key in src:
+        return _clamp_num(src[key], rng[0], rng[1], default)
+    return float(default)
+
+
+def _valid_hex(v, default: str) -> str:
+    """校验十六进制色（#RGB/#RRGGBB），合法则规范化为大写 #RRGGBB，否则回默认。"""
+    if not isinstance(v, str):
+        return default
+    s = v.strip()
+    if not s.startswith("#") or not QColor.isValidColor(s):
+        return default
+    return QColor(s).name().upper()
+
+
+def apply_tuning(values: dict) -> None:
+    """config.yaml monitor 组的唯一写入口（v2.03 配置拆分）。
+
+    【作用范围】monitor 组全部数值键（pane 窗格几何/底色、spark 曲线、snap 磁吸、
+      semantics 语义色与七类分档边界、history_points 历史点数）。
+    【影响】每次从 MONITOR_DEFAULTS 整表重算再逐键钳制覆盖，幂等：
+      · values={}（enabled=false 或无文件）→ 全部回内置默认；
+      · values 含某键 → 该键钳制后生效，超界钳边界、非法回退默认；
+      · 尺寸类键改后，已开窗格须由 retune_layout 重排才可见生效；
+      · 语义色/分档边界改后，default_thresholds 与渲染下一帧即按新值。
+    方向 main→monitor_ui（本模块禁 import main，不违反依赖约束）。
+    """
+    global BASE_W, BASE_W_EXPANDED, BASE_H, FONT_PX, PAD_X, PAD_Y
+    global COL_GAP, ROW_GAP, CORNER_PX, HALO_PX, HALO_ALPHA, BODY_ALPHA
+    global SPARK_MAX_H_PX, SPARK_BOTTOM_GAP_PX, SPARK_LINE_PX
+    global BREATH_HZ, BREATH_ALPHA_MIN, BREATH_ALPHA_MAX, SPARK_EXCLUDE_KEYS
+    global DRAG_THRESHOLD_PX, SNAP_PREVIEW_PX, SNAP_STRONG_PX, SNAP_ANIM_MS
+    global FUSE_DASH_PX, SEM_GREEN, SEM_YELLOW, SEM_RED, SPARKLINE_POINTS
+    global _BANDS_LIVE
+
+    v = values if isinstance(values, dict) else {}
+    dp = MONITOR_DEFAULTS["pane"]
+    ds = MONITOR_DEFAULTS["spark"]
+    dn = MONITOR_DEFAULTS["snap"]
+    dsem = MONITOR_DEFAULTS["semantics"]
+
+    # ---- pane 窗格几何与底色 ----
+    p = v.get("pane") if isinstance(v.get("pane"), dict) else {}
+    BASE_W = _tune_int(p, "base_w", dp["base_w"], (150, 500))
+    BASE_W_EXPANDED = _tune_int(p, "base_w_expanded", dp["base_w_expanded"], (250, 700))
+    BASE_H = _tune_int(p, "base_h", dp["base_h"], (60, 200))
+    FONT_PX = _tune_int(p, "font_px", dp["font_px"], (10, 24))
+    PAD_X = _tune_int(p, "pad_x", dp["pad_x"], (0, 30))
+    PAD_Y = _tune_int(p, "pad_y", dp["pad_y"], (0, 30))
+    COL_GAP = _tune_int(p, "col_gap", dp["col_gap"], (0, 30))
+    ROW_GAP = _tune_int(p, "row_gap", dp["row_gap"], (0, 30))
+    CORNER_PX = _tune_int(p, "corner_px", dp["corner_px"], (0, 20))
+    HALO_PX = _tune_int(p, "halo_px", dp["halo_px"], (0, 10))
+    HALO_ALPHA = _tune_float(p, "halo_alpha", dp["halo_alpha"], (0.0, 0.5))
+    BODY_ALPHA = _tune_float(p, "body_alpha", dp["body_alpha"], (0.3, 1.0))
+    if BASE_W_EXPANDED < BASE_W:   # 扩宽档须≥基准，否则扩宽无意义
+        BASE_W_EXPANDED = BASE_W
+
+    # ---- spark 曲线 ----
+    sp = v.get("spark") if isinstance(v.get("spark"), dict) else {}
+    SPARK_MAX_H_PX = _tune_int(sp, "max_h_px", ds["max_h_px"], (10, 60))
+    SPARK_BOTTOM_GAP_PX = _tune_int(sp, "bottom_gap_px", ds["bottom_gap_px"], (0, 10))
+    SPARK_LINE_PX = _tune_int(sp, "line_px", ds["line_px"], (1, 4))
+    BREATH_HZ = _tune_float(sp, "breath_hz", ds["breath_hz"], (0.2, 3.0))
+    BREATH_ALPHA_MIN = _tune_float(sp, "breath_alpha_min",
+                                   ds["breath_alpha_min"], (0.0, 1.0))
+    BREATH_ALPHA_MAX = _tune_float(sp, "breath_alpha_max",
+                                   ds["breath_alpha_max"], (0.0, 1.0))
+    if BREATH_ALPHA_MIN > BREATH_ALPHA_MAX:   # min≤max 约束
+        BREATH_ALPHA_MIN, BREATH_ALPHA_MAX = BREATH_ALPHA_MAX, BREATH_ALPHA_MIN
+    ek = sp.get("exclude_keys")
+    SPARK_EXCLUDE_KEYS = (tuple(str(x) for x in ek)
+                          if isinstance(ek, (list, tuple))
+                          else tuple(ds["exclude_keys"]))
+
+    # ---- snap 磁吸 ----
+    sn = v.get("snap") if isinstance(v.get("snap"), dict) else {}
+    DRAG_THRESHOLD_PX = _tune_int(sn, "drag_threshold_px",
+                                  dn["drag_threshold_px"], (1, 20))
+    SNAP_PREVIEW_PX = _tune_int(sn, "preview_px", dn["preview_px"], (5, 60))
+    SNAP_STRONG_PX = _tune_int(sn, "strong_px", dn["strong_px"], (2, 40))
+    SNAP_ANIM_MS = _tune_int(sn, "anim_ms", dn["anim_ms"], (50, 1000))
+    FUSE_DASH_PX = _tune_int(sn, "fuse_dash_px", dn["fuse_dash_px"], (1, 4))
+    if SNAP_STRONG_PX > SNAP_PREVIEW_PX:   # 强预览档须≤预览触发距离
+        SNAP_STRONG_PX = SNAP_PREVIEW_PX
+
+    # ---- semantics 语义色 + 七类分档边界 ----
+    sm = v.get("semantics") if isinstance(v.get("semantics"), dict) else {}
+    SEM_GREEN = _valid_hex(sm.get("green"), dsem["green"])
+    SEM_YELLOW = _valid_hex(sm.get("yellow"), dsem["yellow"])
+    SEM_RED = _valid_hex(sm.get("red"), dsem["red"])
+    bands_src = sm.get("bands") if isinstance(sm.get("bands"), dict) else {}
+    new_bands = {}
+    for bk, dflt in _BANDS_DEFAULT.items():
+        bs = bands_src.get(bk)
+        if isinstance(bs, dict):
+            lo, hi = _BANDS_RANGE[bk]
+            g = _clamp_num(bs.get("green_max"), lo, hi, dflt[0])
+            y = _clamp_num(bs.get("yellow_max"), lo, hi, dflt[1])
+            r = _clamp_num(bs.get("red_max"), lo, hi, dflt[2])
+            if bk != "freq":   # freq 边界为 float，其余取整
+                g, y, r = int(round(g)), int(round(y)), int(round(r))
+            if not (0 < g < y < r):   # 同类内不等式不成立 → 整类回退默认
+                g, y, r = dflt
+        else:
+            g, y, r = dflt
+        new_bands[bk] = (g, y, r)
+    _BANDS_LIVE = new_bands
+
+    # ---- history_points 历史点数（决策12 单一真源，注入 SPARKLINE_POINTS）----
+    SPARKLINE_POINTS = _tune_int(v, "history_points",
+                                 MONITOR_DEFAULTS["history_points"], (10, 300))
+
+
+def _bands_for(bk: str):
+    """取某类 bands 的生效边界 (green_max, yellow_max, red_max)；缺省回出厂默认。"""
+    return _BANDS_LIVE.get(bk) or _BANDS_DEFAULT.get(bk, (60, 85, 100))
+
 
 def fuse_color(theme: dict) -> QColor:
     """幽灵预览轮廓颜色随系统深浅色（浅色系统用深色 20%；合并融合虚线已废除）。"""
@@ -278,35 +469,17 @@ def default_thresholds(key: str, unit: str) -> list:
 
     百分比类 0~60 绿 / 60~85 黄 / 85~100 红；温度/转速/网速/频率/功耗/用量
     各自默认段。段格式 {min, max, color}，固定段色不插值（get_color_for_value）。
+
+    v2.03：边界值不再硬编码，改读 _bands_for 生效表（apply_tuning 写入）；
+    enabled=false 时表=出厂默认，观感与旧版一致。颜色读 SEM_* 模块全局
+    （apply_tuning 同样可改）。无负载语义单位（如 sys.uptime 的 s）走单段中性色。
     """
-    if unit == "%":
-        return [{"min": 0, "max": 60, "color": SEM_GREEN},
-                {"min": 60, "max": 85, "color": SEM_YELLOW},
-                {"min": 85, "max": 100, "color": SEM_RED}]
-    if unit == "℃":
-        return [{"min": 0, "max": 60, "color": SEM_GREEN},
-                {"min": 60, "max": 80, "color": SEM_YELLOW},
-                {"min": 80, "max": 110, "color": SEM_RED}]
-    if unit == "RPM":
-        return [{"min": 0, "max": 2000, "color": SEM_GREEN},
-                {"min": 2000, "max": 3500, "color": SEM_YELLOW},
-                {"min": 3500, "max": 6000, "color": SEM_RED}]
-    if unit == "MB/s":
-        return [{"min": 0, "max": 10, "color": SEM_GREEN},
-                {"min": 10, "max": 50, "color": SEM_YELLOW},
-                {"min": 50, "max": 200, "color": SEM_RED}]
-    if unit == "GHz":
-        return [{"min": 0, "max": 3.0, "color": SEM_GREEN},
-                {"min": 3.0, "max": 4.2, "color": SEM_YELLOW},
-                {"min": 4.2, "max": 5.5, "color": SEM_RED}]
-    if unit == "W":
-        return [{"min": 0, "max": 35, "color": SEM_GREEN},
-                {"min": 35, "max": 80, "color": SEM_YELLOW},
-                {"min": 80, "max": 150, "color": SEM_RED}]
-    if unit == "GB":
-        return [{"min": 0, "max": 8, "color": SEM_GREEN},
-                {"min": 8, "max": 16, "color": SEM_YELLOW},
-                {"min": 16, "max": 32, "color": SEM_RED}]
+    bk = _BANDS_BY_UNIT.get(unit)
+    if bk is not None:
+        g, y, r = _bands_for(bk)
+        return [{"min": 0, "max": g, "color": SEM_GREEN},
+                {"min": g, "max": y, "color": SEM_YELLOW},
+                {"min": y, "max": r, "color": SEM_RED}]
     # sys.uptime（s）等无负载语义 → 单段中性色，不触发高负载呼吸
     return [{"min": 0, "max": 1e12, "color": SEM_GREEN}]
 
@@ -2167,6 +2340,41 @@ class MonitorWindowManager:
             self.rescale()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.request_expand_width", e)
+
+    def retune_layout(self) -> None:
+        """调参（apply_tuning）改了窗格尺寸类常量后，对已开窗格重排使其生效。
+
+        【作用范围】全部已注册窗格的几何尺寸与位置/磁吸关系。
+        【影响】apply_tuning 改 BASE_W/BASE_H/FONT_PX/PAD_* 等尺寸类键后调用——
+          否则 update_layout 不会自动重算（仅由「标签超基准」触发），已开窗格
+          尺寸不变，用户误判「调参没生效」（计划缺口③）。步骤：
+            ① 按新 BASE_W 重算全局扩宽档（label 自然宽是否仍超基准，可升可降）；
+            ② rescale() 重算布局 + 组锚点 BFS 重排 + 屏幕边重贴（复用既有口径）；
+            ③ 对可见窗格 sanitize_layout_pos 越屏夹回（窗格变大可能超出屏幕）。
+          隐藏窗格遵守坑 91：先 processEvents 让 hide 落地再写几何（rescale 内
+          update_layout 对隐藏窗格同样安全，几何写入不依赖 show）。
+        """
+        try:
+            # ① 重算扩宽档：任一可见窗格标签自然宽 > 新基准 → 扩宽，否则收回
+            need_expand = False
+            for w in self._widgets.values():
+                if w.isVisible() and w._label_natural_width() > round(
+                        BASE_W * w.scale_getter()):
+                    need_expand = True
+                    break
+            self._width_expanded = need_expand
+            # ② 重算布局 + 磁吸重排（rescale 内逐窗 update_layout + 组 BFS + 贴边）
+            self.rescale()
+            # ③ 越屏夹回：窗格尺寸变大后中心可能落到屏外，按多屏合法性校验夹回
+            for w in self._widgets.values():
+                if not w.isVisible():
+                    continue
+                r = w.frameGeometry()
+                fixed = sanitize_layout_pos(r.x(), r.y(), r.width(), r.height())
+                if fixed is not None and (fixed[0], fixed[1]) != (r.x(), r.y()):
+                    w.move(fixed[0], fixed[1])
+        except Exception as e:  # noqa: BLE001
+            self.log_fn("monitor_ui.retune_layout", e)
 
     # ---- 显示缩放变化：磁吸关系重排（防错位） ----
     def rescale(self) -> None:

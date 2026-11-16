@@ -3555,6 +3555,114 @@ def section_o():
         w.close()
 
 
+# ---------------------------------------------------------------------------
+# Q. v2.03 配置拆分：apply_tuning 调参写入口 + retune_layout 重排 + bands 外置
+#    断言一律「按当前生效值计算」，不写死默认常量（计划 §12 缺口⑤）
+# ---------------------------------------------------------------------------
+def section_q():
+    print("[Q] apply_tuning 调参写入口 + retune_layout 重排 + bands 外置")
+    inj = make_injections()
+    w_inj = {k: v for k, v in inj.items() if k != "config_io"}
+
+    ok(hasattr(mu, "MONITOR_DEFAULTS"), "MONITOR_DEFAULTS 冻结默认快照存在")
+    ok(hasattr(mu, "apply_tuning"), "apply_tuning 唯一写入口存在")
+    ok(hasattr(mu.MonitorWindowManager, "retune_layout"),
+       "MonitorWindowManager.retune_layout 重排入口存在")
+    if not (hasattr(mu, "apply_tuning") and hasattr(mu, "MONITOR_DEFAULTS")
+            and hasattr(mu.MonitorWindowManager, "retune_layout")):
+        print("  [Q] 调参写入口未实现，跳过行为断言")
+        return
+
+    # 默认快照与内置默认一致（出厂即默认）
+    d = mu.MONITOR_DEFAULTS
+    ok(d["pane"]["base_w"] == 250 and d["pane"]["base_h"] == 80,
+       f"MONITOR_DEFAULTS.pane 基准 250×80（实际 {d['pane']['base_w']}×{d['pane']['base_h']}）")
+    ok(d["semantics"]["bands"]["percent"] == (60, 85, 100),
+       f"MONITOR_DEFAULTS bands.percent=(60,85,100)（实际 {d['semantics']['bands']['percent']}）")
+    ok(set(d["semantics"]["bands"]) == {"percent", "celsius", "rpm", "net",
+                                        "freq", "power", "size"},
+       "bands 七类齐全（含 size 预留键）")
+
+    try:
+        # apply_tuning({}) 幂等回默认
+        mu.apply_tuning({})
+        ok(mu.BASE_W == 250 and mu.SPARK_MAX_H_PX == 30 and mu.SEM_GREEN == "#3FB950",
+           "apply_tuning({}) 幂等回内置默认")
+
+        # 改 pane 几何：模块全局随之变（生效值断言，非写死）
+        mu.apply_tuning({"pane": {"base_w": 300}})
+        ok(mu.BASE_W == 300, f"base_w→BASE_W 生效（实际 {mu.BASE_W}）")
+        # 钳制：超上界钳到 500、超下界钳到 150
+        mu.apply_tuning({"pane": {"base_w": 9999}})
+        ok(mu.BASE_W == 500, f"base_w 超上界钳到 500（实际 {mu.BASE_W}）")
+        mu.apply_tuning({"pane": {"base_w": 1}})
+        ok(mu.BASE_W == 150, f"base_w 超下界钳到 150（实际 {mu.BASE_W}）")
+
+        # 语义色改值生效 + default_thresholds 返回色随之变
+        mu.apply_tuning({"semantics": {"green": "#00FF00"}})
+        ok(mu.SEM_GREEN == "#00FF00", f"SEM_GREEN 改值生效（实际 {mu.SEM_GREEN}）")
+        ok(mu.default_thresholds("cpu.load", "%")[0]["color"] == "#00FF00",
+           "default_thresholds 返回色随语义色变")
+
+        # bands.percent 改值 → default_thresholds 边界随之变（按生效值断言）
+        mu.apply_tuning({"semantics": {"bands": {
+            "percent": {"green_max": 40, "yellow_max": 70, "red_max": 90}}}})
+        th = mu.default_thresholds("cpu.load", "%")
+        ok([s["max"] for s in th] == [40, 70, 90],
+           f"bands.percent 改值生效（实际 {[s['max'] for s in th]}）")
+
+        # 七类逐类接线生效（含 size/GB 预留键——断言「键已接线、生效值可达」）
+        for unit, bk in (("%", "percent"), ("℃", "celsius"), ("RPM", "rpm"),
+                         ("MB/s", "net"), ("GHz", "freq"), ("W", "power"),
+                         ("GB", "size")):
+            mu.apply_tuning({"semantics": {"bands": {
+                bk: {"green_max": 1, "yellow_max": 2, "red_max": 3}}}})
+            th = mu.default_thresholds("x", unit)
+            ok([s["max"] for s in th] == [1, 2, 3],
+               f"bands.{bk}({unit}) 接线生效（实际 {[s['max'] for s in th]}）")
+
+        # bands 钳制：同类 green<yellow<red 不成立 → 整类回退默认（不部分回退）
+        mu.apply_tuning({})
+        before = mu.default_thresholds("x", "℃")
+        mu.apply_tuning({"semantics": {"bands": {
+            "celsius": {"green_max": 90, "yellow_max": 80, "red_max": 110}}}})
+        ok(mu.default_thresholds("x", "℃") == before,
+           "bands 同类不等式不成立(green≥yellow) → 整类回退默认")
+
+        # history_points 注入 SPARKLINE_POINTS（决策12 单一真源）；
+        # spark.points 已废弃，与 history_points 同传时被忽略（history_points 胜）
+        mu.apply_tuning({"history_points": 90, "spark": {"points": 30}})
+        ok(mu.SPARKLINE_POINTS == 90,
+           f"history_points→SPARKLINE_POINTS 注入、spark.points 废弃被忽略（实际 {mu.SPARKLINE_POINTS}）")
+
+        # retune_layout：改 base_w 后已开窗格 frameGeometry 宽随生效值变（缺口③）
+        mu.apply_tuning({})
+        hub = FakeHub()
+        mgr = mu.MonitorWindowManager(hub, **inj)
+        w = mu.MonitorUnitWidget("cpu.load", hub, manager=mgr, **w_inj)
+        mgr.register_widget("cpu.load", w, ["cpu.load"])
+        hub.set_metric("cpu.load", 42.0)
+        w.update_data(hub.snapshot()["cpu.load"])
+        w.update_layout()   # 落地默认 250 几何
+        w.show()
+        APP.processEvents()
+        w0 = w.frameGeometry().width()
+        ok(w0 == 250, f"初始窗格宽=默认 250（实际 {w0}）")
+        mu.apply_tuning({"pane": {"base_w": 320}})
+        # 缺口③坐实：apply_tuning 改了 BASE_W，但不重排时已开窗格几何不变
+        ok(w.frameGeometry().width() == 250,
+           f"apply_tuning 后未重排窗格宽仍 250（实际 {w.frameGeometry().width()}）")
+        mgr.retune_layout()
+        APP.processEvents()
+        ok(w.frameGeometry().width() == 320,
+           f"retune_layout 后窗格宽随 base_w→320（实际 {w.frameGeometry().width()}）")
+        w.close()
+    finally:
+        # 幂等回默认，防污染其他节（apply_tuning({}) 从 MONITOR_DEFAULTS 整表重算）
+        if hasattr(mu, "apply_tuning"):
+            mu.apply_tuning({})
+
+
 if __name__ == "__main__":
     section_a()
     section_b()
@@ -3572,5 +3680,6 @@ if __name__ == "__main__":
     section_n()
     section_o()
     section_p()
+    section_q()
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)
