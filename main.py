@@ -174,6 +174,33 @@ CONFIG = {
     "label_orientation": "auto",
 }
 
+# ---------------------------------------------------------------------------
+# v2.03 配置拆分：ball 组数值调参规格（config.yaml ball.* → CONFIG 平键）
+#   下游 40+ 处现读 CONFIG，零改动；本表只定义「哪些键可外置 + 钳制范围」。
+#   _BALL_TUNE_SPEC：(config.yaml 点号路径, CONFIG 键, 下界, 上界)
+#   BALL_DEFAULTS：import 时对这批键的内置默认做冻结快照（与活值分离，
+#     防「enabled 关了还残留自定义」——load_interaction_config 每次整表重算回它）。
+# ---------------------------------------------------------------------------
+_BALL_TUNE_SPEC = [
+    ("ball.hover.trigger_ms", "hover_trigger_ms", 50, 2000),
+    ("ball.hover.leave_collapse_ms", "leave_collapse_ms", 50, 2000),
+    ("ball.hover.poll_ms", "poll_ms", 4, 50),
+    ("ball.hover.ring_pad", "ring_pad", 0, 30),
+    ("ball.click.confirm_extra_ms", "confirm_extra_ms", 0, 300),
+    ("ball.drag.start_px", "drag_start_px", 1, 50),
+    ("ball.drag.stiffness", "drag_stiffness", 20, 400),
+    ("ball.drag.grace_ms", "drag_grace_ms", 100, 2000),
+    ("ball.drag.press_hold_ms", "press_hold_ms", 100, 2000),
+    ("ball.drag.snap_margin", "snap_margin", 0, 600),
+    ("ball.drag.snap_anim_ms", "snap_anim_ms", 50, 1000),
+    ("ball.anim.expand_ms", "expand_ms", 50, 2000),
+    ("ball.anim.collapse_ms", "collapse_ms", 50, 2000),
+    ("ball.anim.flash_ok_ms", "flash_ms_ok", 50, 2000),
+    ("ball.anim.flash_fail_ms", "flash_ms_fail", 50, 2000),
+    ("ball.anim.warn_period_ms", "warn_period_ms", 100, 2000),
+]
+BALL_DEFAULTS = {_ck: CONFIG[_ck] for _p, _ck, _l, _h in _BALL_TUNE_SPEC}
+
 
 def app_executable() -> str:
     """用户实际启动/分发的程序路径（配置文件的定位基准）。
@@ -381,9 +408,95 @@ _APP_DATA_ROOT = os.environ.get("LOCALAPPDATA") or os.path.join(
     os.path.expanduser("~"), "AppData", "Local")
 APP_CONFIG_DIR = os.path.join(_APP_DATA_ROOT, "Aura_Pixie")
 CONFIG_PATH = os.path.join(APP_CONFIG_DIR, "setting.yaml")   # 统一配置文件（functions+appearance+后续块）
+TUNING_PATH = os.path.join(APP_CONFIG_DIR, "config.yaml")    # v2.03 数值调参文件（enabled 默认 false）
 SETTINGS_PATH = CONFIG_PATH   # 历史别名：旧代码/自检按此名引用，两者恒指向同一文件
 ICON_PATH = os.path.join(BASE_DIR, "icon2.png")   # 兜底：内嵌资源加载失败时回退文件
 RUNNER_DIR = os.path.join(tempfile.gettempdir(), "AuraPixie")   # py 代码临时脚本目录
+
+
+def _clamp_tune(v, lo, hi, default):
+    """把 ball 调参值钳进 [lo,hi]；非数值/NaN/inf 回退 default。保持 default 的类型。
+
+    config.yaml 是用户手改文件，任何值都可能非法；钳制+类型保持确保下游 CONFIG
+    现读处拿到的永远是合法同类型数值（int 键回 int、float 键回 float）。
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if f != f or f in (float("inf"), float("-inf")):
+        return default
+    f = max(float(lo), min(float(hi), f))
+    return int(round(f)) if isinstance(default, int) else f
+
+
+def load_interaction_config(path: str = TUNING_PATH) -> dict:
+    """读取 config.yaml 数值调参并分发到三组生效值（v2.03 配置拆分总装枢纽）。
+
+    【作用范围】config.yaml 的 ball / monitor / collect 三组全部数值键。
+    【影响】
+      · 文件缺失 / enabled=false → 三组全部强制回内置默认（CONFIG ball 键经
+        BALL_DEFAULTS、monitor_ui.apply_tuning({})、monitor_hub.apply_tuning({})）；
+        用户改任何数值都不生效——「安全模式」，开箱即用、排查手感问题时行为已知良好。
+      · enabled=true → 逐键钳制后生效：ball 组写 CONFIG（下游 40+ 处现读零改动）、
+        monitor 组经 monitor_ui.apply_tuning、collect 组经 monitor_hub.apply_tuning；
+        collect.history_points 单一真源同步注入 monitor_ui.SPARKLINE_POINTS（决策12）。
+      · 每次从默认整表重算，幂等；true→false 重载干净回退（防「关了还残留自定义」）。
+      · 坏 yaml / 坏键 → 回退默认 + _log_crash，绝不致命。
+    启动（main）与右键「重载」（reload_config）各调一次；不做文件监听（决策2）。
+    返回归一化生效配置 dict（自检/诊断用）。
+    """
+    data: dict = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh)
+        if isinstance(loaded, dict):
+            data = loaded
+        elif loaded is not None:
+            raise ValueError(f"config.yaml 顶层不是 dict：{type(loaded).__name__}")
+    except FileNotFoundError:
+        data = {}          # 首启正常无此文件 → 全默认，不记日志
+    except Exception as exc:  # noqa: BLE001 - 坏 yaml 回退默认，绝不致命
+        data = {}
+        _log_crash("load_interaction_config", exc)
+
+    enabled = bool(data.get("enabled"))
+
+    # ---- ball 组：写 CONFIG 平键（从冻结默认整表重算，enabled=true 才钳制覆盖）----
+    ball_live = dict(BALL_DEFAULTS)
+    if enabled:
+        for dotpath, cfg_key, lo, hi in _BALL_TUNE_SPEC:
+            node, found = data, True
+            for seg in dotpath.split("."):
+                if isinstance(node, dict) and seg in node:
+                    node = node[seg]
+                else:
+                    found = False
+                    break
+            if found:
+                ball_live[cfg_key] = _clamp_tune(node, lo, hi, BALL_DEFAULTS[cfg_key])
+    CONFIG.update(ball_live)
+
+    # ---- monitor 组：经 monitor_ui.apply_tuning（含 history_points 单一真源注入）----
+    if enabled:
+        mon = data.get("monitor")
+        mon = dict(mon) if isinstance(mon, dict) else {}
+        col = data.get("collect")
+        if isinstance(col, dict) and "history_points" in col:
+            mon["history_points"] = col["history_points"]   # 决策12 单一真源
+        monitor_ui.apply_tuning(mon)
+    else:
+        monitor_ui.apply_tuning({})
+
+    # ---- collect 组：经 monitor_hub.apply_tuning（HISTORY_POINTS + 侧车/poll 参数）----
+    if enabled:
+        col = data.get("collect")
+        monitor_hub.apply_tuning(dict(col) if isinstance(col, dict) else {})
+    else:
+        monitor_hub.apply_tuning({})
+
+    return {"enabled": enabled, "ball": ball_live}
+
 
 try:
     from icon_res import load_app_icon as _load_builtin_icon
@@ -5200,6 +5313,15 @@ class AuraBall(QWidget):
         # 外观同步套用（导入配置/手改 yaml 路径）：缩放因子变化时监视窗
         # 自动重排磁吸关系（_monitor_rescale_if_changed 内部判因子未变即跳过）
         apply_appearance_to_config(load_appearance_config())
+        # v2.03：数值调参重载（config.yaml；决策2 手动重载生效，不做文件监听）。
+        # 须在 apply_appearance 之后——缩放因子与调参都可能影响窗格几何。
+        load_interaction_config()
+        # 尺寸类调参对已开窗格重排（apply_tuning 只改模块全局，缺口③）
+        # + collect 硬件参数热重载（poll/stale/max_restarts/侧车间隔/历史点数）
+        if _MONITOR_MGR is not None:
+            _MONITOR_MGR.retune_layout()
+        if _MONITOR_HUB is not None:
+            _MONITOR_HUB.retune_collect()
         self.update()
 
     # 双击不触发任何操作：此前双击（含双击展开的扇形）会直接退出程序，
@@ -6534,6 +6656,11 @@ def main(argv: list[str]) -> int:
     # 有则直接载入；无则创建目录；再查 exe 根目录 *.yaml/*.yaml.bak（内容功能块
     # 合法者）合并载入并把根源改为 *.yaml.bak_done；都没有则保持空目录待首次写入
     ensure_settings()
+
+    # v2.03：数值调参加载（config.yaml；enabled=false 时三组全回内置默认）。
+    # 须在 ensure_settings 之后（config.yaml 与 setting.yaml 同根目录）、
+    # 建球体之前（球体构造读 CONFIG 的 ball 交互键）。
+    load_interaction_config()
 
     # 开机自启动自我保护：比对配置与注册表，被清理/误删则自动修正（不打扰、不打断）
     autostart_self_heal()

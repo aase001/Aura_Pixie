@@ -136,6 +136,100 @@ ck("monitor_fill=False 保存往返一致",
    M.load_appearance_config()["monitor_fill"] is False)
 M.save_appearance_config(back)   # 还原，避免影响后续用例
 
+# ---- 场景6：v2.03 config.yaml 调参加载（load_interaction_config 门控+钳制+幂等）----
+ck("load_interaction_config 函数存在", hasattr(M, "load_interaction_config"))
+ck("BALL_DEFAULTS 冻结默认快照存在", hasattr(M, "BALL_DEFAULTS"))
+ck("TUNING_PATH 指向 config.yaml",
+   hasattr(M, "TUNING_PATH") and M.TUNING_PATH.endswith("config.yaml"))
+if hasattr(M, "load_interaction_config"):
+    cfg_path = os.path.join(_ISO, "Aura_Pixie", "config.yaml")
+    # 文件不存在 → 全默认（enabled 视为 false）
+    M.load_interaction_config(os.path.join(_ISO, "no_such_config.yaml"))
+    ck("config.yaml 不存在 → 回内置默认（不致命）",
+       M.CONFIG["hover_trigger_ms"] == 300.0 and M.CONFIG["confirm_extra_ms"] == 30,
+       f"{M.CONFIG['hover_trigger_ms']}/{M.CONFIG['confirm_extra_ms']}")
+    # enabled=false → 强制默认（即使文件写了别的值）
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": False, "ball": {"hover": {"trigger_ms": 800}}}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("enabled=false → 忽略文件值、强制内置默认",
+       M.CONFIG["hover_trigger_ms"] == 300.0, str(M.CONFIG["hover_trigger_ms"]))
+    # enabled=true → ball 键钳制生效
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": True, "ball": {"hover": {"trigger_ms": 800}}}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("enabled=true → ball.hover.trigger_ms 钳制生效=800",
+       M.CONFIG["hover_trigger_ms"] == 800, str(M.CONFIG["hover_trigger_ms"]))
+    # enabled=true 超界钳制
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": True, "ball": {"hover": {"trigger_ms": 99999}}}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("enabled=true 超上界 → 钳到 2000",
+       M.CONFIG["hover_trigger_ms"] == 2000, str(M.CONFIG["hover_trigger_ms"]))
+    # true→false 重载干净回退（防「关了还残留自定义」）
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": False}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("true→false 重载干净回退默认",
+       M.CONFIG["hover_trigger_ms"] == 300.0, str(M.CONFIG["hover_trigger_ms"]))
+    # 坏 yaml → 回退默认 + 不致命（不抛异常）；打桩 _log_crash 防污染项目根 crash.log
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        fh.write("enabled: [unclosed\n  bad: yaml: :::")
+    _saved_log = M._log_crash
+    M._log_crash = lambda *a, **k: None
+    try:
+        M.load_interaction_config(cfg_path)
+        bad_ok = True
+    except Exception:   # noqa: BLE001
+        bad_ok = False
+    finally:
+        M._log_crash = _saved_log
+    ck("坏 yaml → 回退默认不致命",
+       bad_ok and M.CONFIG["hover_trigger_ms"] == 300.0, str(M.CONFIG["hover_trigger_ms"]))
+    # history_points 单一真源接线：collect.history_points → monitor_ui.SPARKLINE_POINTS + hub
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": True, "collect": {"history_points": 90}}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("collect.history_points=90 → SPARKLINE_POINTS 与 hub.HISTORY_POINTS 同步（单一真源）",
+       mu.SPARKLINE_POINTS == 90 and M.monitor_hub.HISTORY_POINTS == 90,
+       f"{mu.SPARKLINE_POINTS}/{M.monitor_hub.HISTORY_POINTS}")
+    # monitor 组接线：enabled=true monitor.pane.base_w → monitor_ui.BASE_W
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": True, "monitor": {"pane": {"base_w": 300}}}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("enabled=true monitor.pane.base_w=300 → monitor_ui.BASE_W",
+       mu.BASE_W == 300, str(mu.BASE_W))
+    # enabled=false 时 monitor 组也须回默认（不只 ball）
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"enabled": False, "monitor": {"pane": {"base_w": 300}}}, fh)
+    M.load_interaction_config(cfg_path)
+    ck("enabled=false → monitor 组也回默认（BASE_W=250）",
+       mu.BASE_W == 250, str(mu.BASE_W))
+    # 还原：指向不存在文件触发全默认回退 + 删临时 config.yaml
+    M.load_interaction_config(os.path.join(_ISO, "no_such_config.yaml"))
+    try:
+        os.remove(cfg_path)
+    except OSError:
+        pass
+    ck("还原后三组全回默认",
+       M.CONFIG["hover_trigger_ms"] == 300.0 and mu.BASE_W == 250
+       and mu.SPARKLINE_POINTS == 60 and M.monitor_hub.HISTORY_POINTS == 60)
+    # 接线看守：load_interaction_config 须在 main() 启动与 reload_config 各调一次
+    # （决策2：手动重载生效、不做文件监听；漏接线则调参永不生效，源码看守锁定）
+    import inspect
+    ck("main() 启动接线 load_interaction_config",
+       "load_interaction_config" in inspect.getsource(M.main))
+    ck("reload_config 接线 load_interaction_config",
+       "load_interaction_config" in inspect.getsource(M.AuraBall.reload_config))
+    # 缺口③：尺寸类调参重载后须对已开窗格重排（apply_tuning 只改模块全局）
+    ck("reload_config 接线 retune_layout（尺寸类调参重排）",
+       "retune_layout" in inspect.getsource(M.AuraBall.reload_config))
+    # collect 硬件参数热重载：reload_config 须调 hub.retune_collect
+    # （stale/max_restarts/poll_ms 现读即生效；sidecar_interval 变→重启侧车；
+    #   history_points 变→清历史。main 侧用无参 MetricsHub()，构造默认读 COLLECT_LIVE）
+    ck("reload_config 接线 retune_collect（collect 硬件参数热重载）",
+       "retune_collect" in inspect.getsource(M.AuraBall.reload_config))
+
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:
     print("  -", f)
