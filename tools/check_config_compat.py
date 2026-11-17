@@ -338,6 +338,15 @@ if hasattr(M, "apply_imported_config"):
        and _rsi.get("window", {}).get("always_on_top") is True)
     ck("导入写 command.yaml（functions 用导入值）",
        (_rci.get("functions") or [{}])[0].get("name") == "导入功能")
+    # GUI 导入必须走 apply_imported_config（不覆盖 state + pre_import 快照）：
+    # 直接 merge_settings_with_defaults + write_setting 会用导入包坐标/布局冲掉
+    # 当前 state.yaml 且不落快照——函数本身正确不够，接线漏了承诺照样失效
+    # （坑 128 同款：计划语义必须有对应看守断言）。
+    _src_imp7 = _insp.getsource(M.SettingsDialog._import_config)
+    ck("GUI _import_config 走 apply_imported_config（导入不覆盖 state 的接线看守）",
+       "apply_imported_config(" in _src_imp7)
+    ck("GUI _import_config 不再直接 merge+write 绕过 state 保护",
+       "write_setting(" not in _src_imp7)
 
 # 非主位置路径（导出 .bak）写完整单文件，不拆分、不覆盖主 command/state
 _bak7 = os.path.join(_d7, "setting.yaml.bak")
@@ -803,6 +812,12 @@ if hasattr(M, "_effective_refresh_ms") and hasattr(M, "_effective_idle_stop_sec"
            "_effective_refresh_ms" in inspect.getsource(M._monitor_sync_windows))
         ck("闲置停采消费点走 _effective_idle_stop_sec",
            "_effective_idle_stop_sec" in inspect.getsource(M._monitor_idle_check))
+        # 重载即活更新（计划 §五 collect.refresh_ms）：右键「重载」链路必须重设
+        # 拉取周期——只改 COLLECT_LIVE 不重设 mgr 定时器的话，已开窗格仍按旧周期
+        # 拉取，用户须再开一次监视设置窗才生效，与「改完重载即生效」承诺矛盾。
+        ck("reload_config 接线 start_polling(_effective_refresh_ms())（重载即活更新）",
+           "start_polling(_effective_refresh_ms())"
+           in inspect.getsource(M.AuraBall.reload_config))
     finally:
         for _f in (_set10, _tune10, M.COMMAND_PATH, M.STATE_PATH):
             if os.path.exists(_f):

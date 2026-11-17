@@ -3797,8 +3797,10 @@ class SettingsDialog(QDialog):
         if ret != QMessageBox.StandardButton.Yes:
             return
         try:
-            merged = merge_settings_with_defaults(src)
-            write_setting(merged)
+            # v2.03：必须走 apply_imported_config——保留当前球心坐标/监视布局
+            # （导入包的 state 一律丢弃）+ 覆盖前落 pre_import 快照。直接
+            # merge+write_setting 会用别人机器的坐标冲掉当前 state.yaml。
+            apply_imported_config(src)
         except Exception as exc:  # noqa: BLE001
             _log_crash("import_config", exc)
             QMessageBox.warning(self, "导入/导出配置", f"导入失败：{exc}")
