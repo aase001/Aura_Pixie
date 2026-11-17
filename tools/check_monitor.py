@@ -525,6 +525,30 @@ def section_f():
            "wait_first_frame 默认读 COLLECT_LIVE 且不阻塞（假路径立即 False）")
         ok(time.time() - t0 < 3, "wait_first_frame 未卡满（alive=False 即时返回）")
         hub3.stop()
+        # B2：首帧等待宽限的真实消费点——MetricsHub.start 拉起侧车后按生效值
+        # 等首帧（wait_first_frame(timeout=None) 读 COLLECT_LIVE），超时不致命。
+        # _spawn 桩置入「存活但永不出帧」的假进程 → start 应阻塞约生效宽限后放行。
+        # stdout 用阻塞管道（写端不关）：readline 挂起模拟真实侧车枚举期不出帧；
+        # 若用 StringIO 恒 EOF，读取线程秒退会触发看守重启循环干扰时长测量。
+        mh.apply_tuning({"first_frame_timeout_sec": 5})   # 下界 5，控制用例时长
+        hub4 = mh.MetricsHub(sidecar_path=__file__)
+
+        class _LiveProc:
+            def __init__(self):
+                self._r, self._w = os.pipe()
+                self.stdout = os.fdopen(self._r, "r", encoding="utf-8")
+            def poll(self): return None
+            def terminate(self):
+                try: os.close(self._w)   # 关写端 → readline EOF，线程可收尾
+                except OSError: pass
+
+        hub4.runner._spawn = lambda: setattr(hub4.runner, "_proc", _LiveProc())
+        _t4 = time.time()
+        hub4.start()
+        _el4 = time.time() - _t4
+        ok(4.5 <= _el4 < 12,
+           f"start 按 first_frame_timeout_sec=5 真实等待首帧（实际 {_el4:.1f}s）")
+        hub4.stop()
     finally:
         mh.apply_tuning({})
 

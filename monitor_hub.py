@@ -311,6 +311,12 @@ class SidecarRunner:
         self._thread.start()
         self._watch.start()
         self.alive = True
+        # v2.03（B2）：first_frame_timeout_sec 的真实消费点——冷启动按生效宽限
+        # 等首帧（timeout=None → COLLECT_LIVE）。侧车首帧前要做硬件枚举（本机
+        # 5~20s），等待让调用方拿到就绪状态；超时不致命：进程活着即仍在宽限期
+        # （is_stale 同口径），读取线程继续收帧，窗格先显状态文案后出值。
+        # 幂等分支（进程已活）提前 return 不走这里——热路径绝不阻塞。
+        self.wait_first_frame()
         return True
 
     def stop(self) -> None:
@@ -331,13 +337,14 @@ class SidecarRunner:
         if timeout is None:
             timeout = COLLECT_LIVE["first_frame_timeout_sec"]
         end = time.time() + timeout
-        while time.time() < end:
+        while True:
             if self._latest is not None:
                 return True
             if not self.alive or self._stop.is_set():
                 return False
+            if time.time() >= end:   # 睡醒后先查帧再判超时，保证等满宽限
+                return False
             time.sleep(0.05)
-        return False
 
     # ------------------------------------------------------------------ 数据 --
     @property
@@ -1290,7 +1297,7 @@ if __name__ == "__main__":
     dur = float(sys.argv[1]) if len(sys.argv) > 1 else 4.0
     hub = MetricsHub()
     hub.start()
-    ok = hub.runner.wait_first_frame(timeout=15)
+    ok = hub.runner.wait_first_frame()   # timeout=None → COLLECT_LIVE 生效宽限
     print(f"sidecar installed={hub.runner.installed} first_frame={ok} "
           f"elevated={hub.runner.elevated}")
     t_end = time.time() + dur
