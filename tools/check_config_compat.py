@@ -859,6 +859,73 @@ if hasattr(M, "_effective_refresh_ms") and hasattr(M, "_effective_idle_stop_sec"
         M.load_interaction_config(os.path.join(_ISO, "no_such.yaml"))
 shutil.rmtree(_d10, ignore_errors=True)
 
+# ---- 场景11：setting/command/state 三文件逐键注释（config.yaml 同款风格）----
+# 需求：参考 config.yaml 对参数名的注释解释方式（# 名称 + 作用范围/影响/取值范围），
+# 给另外三个 yaml 的参数名也加注释。注释由生成器机械产出、内嵌 config_docs，
+# 写盘时注入（yaml.safe_dump 本身不产注释）；读回仍走 safe_load，注释不得改变解析值。
+_d11 = tempfile.mkdtemp(prefix="aura_cfg_cmt11_")
+_set11 = os.path.join(_d11, "Aura_Pixie", "setting.yaml")
+os.makedirs(os.path.dirname(_set11), exist_ok=True)
+_old_path11 = M.SETTINGS_PATH
+M.SETTINGS_PATH = _set11
+try:
+    _v11 = M.default_settings()
+    _v11["functions"] = [{"name": "注释样例", "code": "print(1)", "active": True}]
+    _v11["window"]["pos_x"], _v11["window"]["pos_y"] = 123.0, 456.0
+    _v11["monitor"]["layout"] = {"cpu.load": {"x": 10, "y": 20, "group_id": "g1"}}
+    M.write_setting(_v11, _set11)
+    _cmd11 = os.path.join(os.path.dirname(_set11), "command.yaml")
+    _st11 = os.path.join(os.path.dirname(_set11), "state.yaml")
+
+    def _cmt_before(text, needle):
+        """needle 所在行的紧邻上方是否有注释行（逐键注释的判据）。"""
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            if needle in ln and not ln.lstrip().startswith("#"):
+                return i > 0 and lines[i - 1].lstrip().startswith("#")
+        return False
+
+    _t_set = open(_set11, encoding="utf-8").read()
+    _t_cmd = open(_cmd11, encoding="utf-8").read()
+    _t_st = open(_st11, encoding="utf-8").read()
+    # setting.yaml：appearance 逐键 + window/monitor 开关 + display_scale 单元
+    for _k in ("breath:", "color_start:", "dur_start_mid:", "aura_scale:",
+               "idle_sec:", "opacity:", "sleep_opacity:", "monitor_color:",
+               "monitor_fill:", "monitor_opacity:", "display_scale:"):
+        ck(f"setting.yaml {_k.rstrip(':')} 有逐键注释", _cmt_before(_t_set, _k))
+    ck("setting.yaml 注释含「作用范围」说明（config.yaml 同款）",
+       "作用范围" in _t_set)
+    ck("setting.yaml display_scale 单元有注释", _cmt_before(_t_set, "ball:"))
+    ck("setting.yaml window/monitor 开关键有注释",
+       _cmt_before(_t_set, "always_on_top:") and _cmt_before(_t_set, "topmost:"))
+    ck("setting.yaml units 参数键有注释", _cmt_before(_t_set, "cpu.load:"))
+    # command.yaml：functions 列表项字段
+    ck("command.yaml functions 有注释", _cmt_before(_t_cmd, "functions:"))
+    ck("command.yaml 条目 name/code/active 有注释",
+       _cmt_before(_t_cmd, "- name:") and _cmt_before(_t_cmd, "code:")
+       and _cmt_before(_t_cmd, "active:"))
+    # state.yaml：坐标 + 布局逐键
+    ck("state.yaml pos_x/pos_y 有注释",
+       _cmt_before(_t_st, "pos_x:") and _cmt_before(_t_st, "pos_y:"))
+    ck("state.yaml layout 与条目 x/y/group_id 有注释",
+       _cmt_before(_t_st, "layout:") and _cmt_before(_t_st, "x:")
+       and _cmt_before(_t_st, "group_id:"))
+    # 注释不得改变解析值：三文件读回 == 拆分视图
+    _s11, _c11, _st11d = M._split_setting_view(_v11)
+    ck("setting.yaml 注释后解析值不变", yaml.safe_load(_t_set) == _s11)
+    ck("command.yaml 注释后解析值不变", yaml.safe_load(_t_cmd) == _c11)
+    ck("state.yaml 注释后解析值不变", yaml.safe_load(_t_st) == _st11d)
+    # 非主位置（导出 .bak）不注入逐键注释，保持单文件原样
+    _bak11 = os.path.join(_d11, "export.bak")
+    M.write_setting(_v11, _bak11)
+    _t_bak = open(_bak11, encoding="utf-8").read()
+    ck("导出 .bak 不注入逐键注释（非主位置单文件原样）",
+       "作用范围" not in _t_bak)
+    ck("导出 .bak 解析值 == 完整视图", yaml.safe_load(_t_bak) == _v11)
+finally:
+    M.SETTINGS_PATH = _old_path11
+    shutil.rmtree(_d11, ignore_errors=True)
+
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:
     print("  -", f)

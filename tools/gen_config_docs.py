@@ -270,6 +270,118 @@ print("模板自检通过：作用范围 %d 次 / 影响 %d 次 / 总长 %d 字�
       % (tuning.count("作用范围"), tuning.count("影响"), len(tuning)))
 
 
+# ---------------------------------------------------------------- 三文件逐键注释
+# 需求：参考 config.yaml 的注释方式（# 名称 + 作用范围/影响/取值范围），给
+# setting/command/state 三个 yaml 的参数名也加注释。yaml.safe_dump 不产注释，
+# 故注释表机械生成后内嵌 config_docs，由 main._write_yaml_block 写盘时注入。
+# 键 = 点分路径；functions.*/monitor.layout.* 为列表项模板（渲染器对每个条目套用）。
+# 文案与文件头/README 口径一致；数值范围读自代码常量，避免手抄漂移。
+def _c(disp, scope, effect, rng=None, note=None):
+    d = {"disp": disp, "作用范围": scope, "影响": effect}
+    if rng:
+        d["取值范围"] = rng
+    if note:
+        d["说明"] = note
+    return d
+
+SETTING_COMMENTS = {
+    "appearance": _c("外观偏好", "球体与监视窗的视觉表现", "由「外观」设置窗写回，改后即时生效"),
+    "appearance.breath": _c("呼吸渐变开关", "球体颜色是否随时间循环渐变", "关闭=恒起始色、相位停走"),
+    "appearance.color_start": _c("呼吸起始色", "渐变第一段起点颜色", "改色即时生效", "#RRGGBB 十六进制"),
+    "appearance.color_mid": _c("呼吸过渡色", "渐变中段颜色", "改色即时生效", "#RRGGBB 十六进制"),
+    "appearance.color_end": _c("呼吸末尾色", "渐变末段颜色", "改色即时生效", "#RRGGBB 十六进制"),
+    "appearance.dur_start_mid": _c("起始→过渡时长", "呼吸第一段渐变耗时", "调大=渐变越慢", "1~30 秒"),
+    "appearance.dur_mid_end": _c("过渡→末尾时长", "呼吸第二段渐变耗时", "调大=渐变越慢", "1~30 秒"),
+    "appearance.dur_end_start": _c("末尾→起始时长", "呼吸第三段渐变耗时", "调大=渐变越慢", "1~30 秒"),
+    "appearance.aura_scale": _c("球体大小倍率", "球体直径/光晕/扇环几何整体缩放", "调大=球越大", "0.5~3.0"),
+    "appearance.opacity": _c("球体透明度", "球体本体不透明度", "调小=越透明", "0~100（%）"),
+    "appearance.sleep_opacity": _c("休眠透明度", "休眠态球体不透明度", "调小=休眠越隐形", "0~100（%）"),
+    "appearance.idle_sec": _c("休眠倒计时", "无操作多少秒后进休眠", "0=永不休眠", "0 或 10~600 秒"),
+    "appearance.monitor_color": _c("监视窗口色", "监视窗格底色/边缘虚化取色", "改色即时生效", "#RRGGBB 十六进制"),
+    "appearance.monitor_fill": _c("监视底色填充开关", "窗格底色是否填充窗口色", "取消=填充透明色"),
+    "appearance.monitor_opacity": _c("监视透明度", "监视窗格整体不透明度", "调小=窗格越透明", "0~100（%）"),
+    "appearance.display_scale": _c("显示缩放（分单元）", "各单元独立缩放，未勾选恒按 100%", "勾选并设 percent 才生效"),
+    "autostart": _c("开机自启动", "登录时自动拉起球体", "走计划任务（最高权限），不写注册表 Run"),
+    "autostart.enabled": _c("自启开关", "是否注册开机自启计划任务", "勾选=注册，取消=删除任务"),
+    "window": _c("球体窗口开关", "球体置顶与锁定", "球心坐标 pos_x/pos_y 在 state.yaml"),
+    "window.always_on_top": _c("保持球体置顶", "球体是否总在最前", "与监视窗置顶相互独立"),
+    "window.locked": _c("锁定球体", "禁止拖动球体", "锁定后仍可右键菜单"),
+    "monitor": _c("资源监视", "监视总开关/置顶/锁定/采集周期/参数勾选", "窗格布局 layout 在 state.yaml"),
+    "monitor.enabled": _c("监视总开关", "是否启用资源监视", "勾选并保存才拉起采集"),
+    "monitor.topmost": _c("监视窗口置顶", "监视窗格是否总在最前", "与球体置顶独立"),
+    "monitor.locked": _c("锁定监视窗格", "禁止移动窗格与拆分/合并组", "锁定后仍可右键菜单"),
+    "monitor.refresh_ms": _c("拉取周期（用户已设值）", "窗格向采集层取数的间隔",
+                             "三级优先级最高档：此处有值则盖过 config.yaml",
+                             "200~5000 毫秒", "没设过才用 config.yaml 的 collect.refresh_ms"),
+    "monitor.idle_stop_sec": _c("闲置停采（用户已设值）", "连续无监视窗多少秒后停采",
+                                "三级优先级最高档：此处有值则盖过 config.yaml",
+                                "0~3600 秒（0=永不停采）", "没设过才用 config.yaml 的 collect.idle_stop_sec"),
+    "monitor.units": _c("参数勾选与阈值", "每个指标是否建窗 + 自定义分档阈值",
+                        "在监视设置窗勾选；threshold 空=用默认分档"),
+}
+# display_scale 各单元（注册表单一来源）
+for _uk, _ul in M.SCALE_UNITS:
+    SETTING_COMMENTS[f"appearance.display_scale.{_uk}"] = _c(
+        f"{_ul}缩放", f"{_ul}的显示缩放单元", "enabled 勾选 + percent 生效",
+        "50~200 且为 25 的整数倍")
+    SETTING_COMMENTS[f"appearance.display_scale.{_uk}.enabled"] = _c(
+        "启用该单元缩放", f"是否对{_ul}应用自定义缩放", "取消=恒按 100%")
+    SETTING_COMMENTS[f"appearance.display_scale.{_uk}.percent"] = _c(
+        "缩放百分比", f"{_ul}的缩放比例", "调大=该单元越大", "50~200 且为 25 的整数倍")
+# units 各参数键（指标定义表单一来源）
+for _mk, _ml, _mg, _mu in mh.METRIC_DEFS:
+    SETTING_COMMENTS[f"monitor.units.{_mk}"] = _c(
+        f"{_ml}（{_mu}）", f"监视参数 {_mk} 的建窗开关与阈值", "enabled 勾选才建窗")
+for _dk in ("gpu_d.0.load", "gpu_d.0.temp", "gpu_d.0.power",
+            "gpu_d.0.vram_load", "gpu_d.0.vram_used",
+            "fan.cpu.0", "fan.gpu_d.0", "fan.mobo.0",
+            "disk.0.temp", "disk.0.usage"):
+    SETTING_COMMENTS[f"monitor.units.{_dk}"] = _c(
+        f"动态参数 {_dk}", "按硬件实例展开的监视参数", "enabled 勾选才建窗；多卡/多盘运行时展开")
+SETTING_COMMENTS["monitor.units.*.enabled"] = _c("建窗开关", "该参数是否显示监视窗格", "勾选=建窗")
+SETTING_COMMENTS["monitor.units.*.threshold"] = _c(
+    "自定义分档阈值", "该参数的绿/黄/红分档", "空列表=用默认分档；非空覆盖 bands",
+    "[{min,max,color}...] 列表")
+SETTING_COMMENTS["layout_version"] = _c(
+    "四文件拆分标记", "配置 schema 版本锚点", "2=已拆分；程序自动维护，勿手改")
+
+COMMAND_COMMENTS = {
+    "functions": _c("功能扇区列表", "球体展开后的扇区指令", "顺序=条目顺序；等分数=active 数"),
+    "functions.*.name": _c("功能名称", "扇区上显示的名字", "任意字符；空名兜底「未命名」"),
+    "functions.*.code": _c("指令代码", "点击扇区执行的内容",
+                           "默认 py；cmd:/ps:/powershell:/pwsh: 前缀切换通道，均静默执行"),
+    "functions.*.active": _c("是否激活", "该条目是否参与扇区", "true 计入等分；最少 2 最多 9"),
+}
+
+STATE_COMMENTS = {
+    "window": _c("球心坐标记忆", "球体上次停留位置", "程序自动写入，请勿手改"),
+    "window.pos_x": _c("球心 X 坐标", "球心水平位置（像素）", "移动停止后自动落盘"),
+    "window.pos_y": _c("球心 Y 坐标", "球心垂直位置（像素）", "移动停止后自动落盘"),
+    "monitor": _c("监视布局记忆", "窗格位置与吸附组", "程序自动写入，请勿手改"),
+    "monitor.layout": _c("窗格布局表", "每个参数窗格的位置与所属组", "退出/移动停止后自动落盘"),
+    "monitor.layout.*.x": _c("窗格 X 坐标", "窗格左上角水平位置（像素）", "越屏会自动夹回"),
+    "monitor.layout.*.y": _c("窗格 Y 坐标", "窗格左上角垂直位置（像素）", "越屏会自动夹回"),
+    "monitor.layout.*.group_id": _c("吸附组编号", "窗格所属磁吸组", "null=独立窗；同组刚性移动"),
+}
+
+# 注释表自检：键路径必须能对应到真实结构（防写错键名静默不生效）
+_ds = M.default_settings()
+assert "appearance" in SETTING_COMMENTS and "layout_version" in SETTING_COMMENTS
+for _k in _ds["appearance"]:
+    assert f"appearance.{_k}" in SETTING_COMMENTS, _k
+for _k in ("enabled", "topmost", "locked", "refresh_ms", "idle_stop_sec", "units"):
+    assert f"monitor.{_k}" in SETTING_COMMENTS, _k
+for _mk in _ds["monitor"]["units"]:
+    assert f"monitor.units.{_mk}" in SETTING_COMMENTS, _mk
+assert set(COMMAND_COMMENTS) == {"functions", "functions.*.name",
+                                 "functions.*.code", "functions.*.active"}
+assert set(STATE_COMMENTS) >= {"window.pos_x", "window.pos_y", "monitor.layout",
+                               "monitor.layout.*.x", "monitor.layout.*.y",
+                               "monitor.layout.*.group_id"}
+print("三文件注释表自检通过：setting %d 键 / command %d 键 / state %d 键"
+      % (len(SETTING_COMMENTS), len(COMMAND_COMMENTS), len(STATE_COMMENTS)))
+
+
 # ---------------------------------------------------------------- 写 config_docs.py
 def as_literal(text, varname):
     """把长文本渲染成 Python 原始三引号字面量。
@@ -284,18 +396,36 @@ def as_literal(text, varname):
     return "%s = %s\n" % (varname, repr(text))
 
 
+def dict_literal(d, varname):
+    """把注释表渲染成 Python dict 字面量（键序稳定，便于 diff 核对）。"""
+    lines = ["%s = {" % varname]
+    for k in sorted(d):
+        lines.append("    %r: %r," % (k, d[k]))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 with open(OUT, "w", encoding="utf-8") as fh:
     fh.write('# -*- coding: utf-8 -*-\n')
-    fh.write('"""v2.03 首启释放到配置文件夹的两份文本（代码内嵌，避免打包遗漏）。\n\n')
+    fh.write('"""v2.03 配置文件夹内嵌文本与注释表（代码内嵌，避免打包遗漏）。\n\n')
     fh.write('CONFIG_README_TEXT     -> %LOCALAPPDATA%\\\\Aura_Pixie\\\\README.md\n')
-    fh.write('CONFIG_TUNING_TEMPLATE -> %LOCALAPPDATA%\\\\Aura_Pixie\\\\config.yaml\n\n')
+    fh.write('CONFIG_TUNING_TEMPLATE -> %LOCALAPPDATA%\\\\Aura_Pixie\\\\config.yaml\n')
+    fh.write('SETTING_COMMENTS / COMMAND_COMMENTS / STATE_COMMENTS\n')
+    fh.write('    -> setting/command/state 三文件的逐键注释（config.yaml 同款风格），\n')
+    fh.write('       由 main._write_yaml_block 写盘时注入（yaml.safe_dump 不产注释）。\n\n')
     fh.write('本文件由 tools/gen_config_docs.py 从 handover_documents/ 的 README\n')
     fh.write('与各模块内置默认值机械生成，请勿手改：改了 README 或默认值后重新生成，\n')
-    fh.write('否则两份文档会与实现漂移（check_config_compat 场景9 有零漂移断言看守）。\n')
+    fh.write('否则文档会与实现漂移（check_config_compat 场景9/11 有断言看守）。\n')
     fh.write('"""\n\n')
     fh.write(as_literal(readme, "CONFIG_README_TEXT"))
     fh.write("\n")
     fh.write(as_literal(tuning, "CONFIG_TUNING_TEMPLATE"))
+    fh.write("\n")
+    fh.write(dict_literal(SETTING_COMMENTS, "SETTING_COMMENTS"))
+    fh.write("\n")
+    fh.write(dict_literal(COMMAND_COMMENTS, "COMMAND_COMMENTS"))
+    fh.write("\n")
+    fh.write(dict_literal(STATE_COMMENTS, "STATE_COMMENTS"))
 
 # 往返自检：把刚写出的模块 import 回来，逐字节比对——任何嵌入/转义 bug 在此暴露
 import importlib.util  # noqa: E402
@@ -304,6 +434,9 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 assert _mod.CONFIG_README_TEXT == readme, "README 往返不一致（嵌入 bug）"
 assert _mod.CONFIG_TUNING_TEMPLATE == tuning, "config 模板往返不一致（嵌入 bug）"
+assert _mod.SETTING_COMMENTS == SETTING_COMMENTS, "setting 注释表往返不一致"
+assert _mod.COMMAND_COMMENTS == COMMAND_COMMENTS, "command 注释表往返不一致"
+assert _mod.STATE_COMMENTS == STATE_COMMENTS, "state 注释表往返不一致"
 # 模板往返后仍须是合法 YAML 且 enabled=false（防孤立反斜杠那类破坏文档结构的 bug）
 _rt = _yaml.safe_load(_mod.CONFIG_TUNING_TEMPLATE)
 assert _rt["enabled"] is False and set(_rt) >= {"enabled", "ball", "monitor", "collect"}

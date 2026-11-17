@@ -46,7 +46,8 @@ import winreg
 import yaml
 import monitor_hub
 import monitor_ui
-from config_docs import CONFIG_README_TEXT, CONFIG_TUNING_TEMPLATE
+from config_docs import (CONFIG_README_TEXT, CONFIG_TUNING_TEMPLATE,
+                         SETTING_COMMENTS, COMMAND_COMMENTS, STATE_COMMENTS)
 from PySide6.QtCore import (QByteArray, QElapsedTimer, QEvent, QLibraryInfo,
                             QMimeData, QObject, QPoint,
                             QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer,
@@ -1582,8 +1583,95 @@ def _find_root_yamls(base: str | None = None) -> list[str]:
     return [p for _t, p in cands]
 
 
-def _write_yaml_block(path: str, header: str, data: dict) -> None:
-    """把 data 连同注释头写入单个 yaml 文件（目录不存在先建）。"""
+def _render_commented_yaml(data, comments: dict) -> str:
+    """把 dict 渲染成带逐键注释的 YAML 文本（config.yaml 同款注释风格）。
+
+    yaml.safe_dump 不产注释，故自行递归渲染：每个键上方插入注释表里对应的
+    「# 名称 + 作用范围/影响/取值范围/说明」。列表项（functions / layout 条目）
+    用 `父路径.*` 模板注释套用到每个元素。标量序列化仍交 yaml.safe_dump，
+    保证引号/转义/中文与官方一致；渲染结果可被 safe_load 原样读回（注释不改值）。
+    comments 为空 → 退化为纯 safe_dump（导出 .bak 等非主位置不注入注释）。
+    """
+    if not comments:
+        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False,
+                              default_flow_style=False, width=1000)
+
+    def _scalar(v):
+        # 标量 safe_dump 会带流式文档结束符「...」，必须剥掉——否则每个标量行
+        # 后跟一个「...」，YAML 把它当文档边界，后续键成非法第二文档（坑125 同源）。
+        s = yaml.safe_dump(v, allow_unicode=True, default_flow_style=True,
+                           width=1000).strip()
+        if s.endswith("..."):
+            s = s[:-3].rstrip()
+        return s
+
+    def _cmt_lines(path, indent):
+        info = comments.get(path)
+        if not info:
+            return []
+        pad = " " * indent
+        out = [f"{pad}# {info['disp']}"]
+        for tag in ("作用范围", "影响", "取值范围", "说明"):
+            if info.get(tag):
+                out.append(f"{pad}#   {tag}：{info[tag]}")
+        return out
+
+    lines: list = []
+
+    def _emit(obj, path, indent):
+        pad = " " * indent
+        if isinstance(obj, dict):
+            if not obj:
+                return
+            # 映射型条目表（monitor.layout = {参数key: {x,y,group_id}}）：
+            # 键是动态参数名，子键注释走 `父路径.*.子键` 模板（与列表项同口径）。
+            tmpl = f"{path}.*" in comments or any(
+                c.startswith(f"{path}.*.") for c in comments)
+            for k, v in obj.items():
+                kp = f"{path}.{k}" if path else str(k)
+                lines.extend(_cmt_lines(kp, indent))
+                if isinstance(v, dict) and v:
+                    lines.append(f"{pad}{k}:")
+                    _emit(v, f"{path}.*" if tmpl else kp, indent + 2)
+                elif isinstance(v, list) and v:
+                    lines.append(f"{pad}{k}:")
+                    _emit_list(v, kp, indent + 2)
+                else:
+                    lines.append(f"{pad}{k}: {_scalar(v)}")
+        return
+
+    def _emit_list(lst, path, indent):
+        pad = " " * indent
+        for item in lst:
+            if isinstance(item, dict) and item:
+                first = True
+                for k, v in item.items():
+                    kp = f"{path}.*.{k}"
+                    lines.extend(_cmt_lines(kp, indent + 2))
+                    prefix = f"{pad}- " if first else f"{pad}  "
+                    first = False
+                    if isinstance(v, dict) and v:
+                        lines.append(f"{prefix}{k}:")
+                        _emit(v, kp, indent + 4)
+                    elif isinstance(v, list) and v:
+                        lines.append(f"{prefix}{k}:")
+                        _emit_list(v, kp, indent + 4)
+                    else:
+                        lines.append(f"{prefix}{k}: {_scalar(v)}")
+            else:
+                lines.append(f"{pad}- {_scalar(item)}")
+
+    _emit(data, "", 0)
+    return "\n".join(lines) + "\n"
+
+
+def _write_yaml_block(path: str, header: str, data: dict,
+                      comments: dict | None = None) -> None:
+    """把 data 连同注释头写入单个 yaml 文件（目录不存在先建）。
+
+    comments 非空时逐键注入注释（config.yaml 同款风格，主位置三文件用）；
+    为空则纯 safe_dump（导出 .bak / 快照等非主位置保持原样）。
+    """
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         try:
@@ -1593,8 +1681,7 @@ def _write_yaml_block(path: str, header: str, data: dict) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         if header:
             fh.write(header)
-        yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False,
-                       default_flow_style=False, width=1000)
+        fh.write(_render_commented_yaml(data, comments or {}))
 
 
 def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
@@ -1613,9 +1700,9 @@ def write_setting(data: dict, path: str = SETTINGS_PATH) -> None:
         return
     setting_data, command_data, state_data = _split_setting_view(data)
     cmd_path, state_path = _sibling_paths(path)
-    _write_yaml_block(path, SETTINGS_HEADER, setting_data)
-    _write_yaml_block(cmd_path, COMMAND_HEADER, command_data)
-    _write_yaml_block(state_path, STATE_HEADER, state_data)
+    _write_yaml_block(path, SETTINGS_HEADER, setting_data, SETTING_COMMENTS)
+    _write_yaml_block(cmd_path, COMMAND_HEADER, command_data, COMMAND_COMMENTS)
+    _write_yaml_block(state_path, STATE_HEADER, state_data, STATE_COMMENTS)
 
 
 def _backup_snapshot(kind: str, data: dict, backup_dir: str | None = None) -> str | None:

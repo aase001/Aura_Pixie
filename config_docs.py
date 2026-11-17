@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-"""v2.03 首启释放到配置文件夹的两份文本（代码内嵌，避免打包遗漏）。
+"""v2.03 配置文件夹内嵌文本与注释表（代码内嵌，避免打包遗漏）。
 
 CONFIG_README_TEXT     -> %LOCALAPPDATA%\\Aura_Pixie\\README.md
 CONFIG_TUNING_TEMPLATE -> %LOCALAPPDATA%\\Aura_Pixie\\config.yaml
+SETTING_COMMENTS / COMMAND_COMMENTS / STATE_COMMENTS
+    -> setting/command/state 三文件的逐键注释（config.yaml 同款风格），
+       由 main._write_yaml_block 写盘时注入（yaml.safe_dump 不产注释）。
 
 本文件由 tools/gen_config_docs.py 从 handover_documents/ 的 README
 与各模块内置默认值机械生成，请勿手改：改了 README 或默认值后重新生成，
-否则两份文档会与实现漂移（check_config_compat 场景9 有零漂移断言看守）。
+否则文档会与实现漂移（check_config_compat 场景9/11 有断言看守）。
 """
 
 CONFIG_README_TEXT = r"""# Aura Pixie 用户配置文件夹说明
@@ -811,3 +814,84 @@ collect:
   #   取值范围：5~60（秒）。
   first_frame_timeout_sec: 15.0
 """
+
+SETTING_COMMENTS = {
+    'appearance': {'disp': '外观偏好', '作用范围': '球体与监视窗的视觉表现', '影响': '由「外观」设置窗写回，改后即时生效'},
+    'appearance.aura_scale': {'disp': '球体大小倍率', '作用范围': '球体直径/光晕/扇环几何整体缩放', '影响': '调大=球越大', '取值范围': '0.5~3.0'},
+    'appearance.breath': {'disp': '呼吸渐变开关', '作用范围': '球体颜色是否随时间循环渐变', '影响': '关闭=恒起始色、相位停走'},
+    'appearance.color_end': {'disp': '呼吸末尾色', '作用范围': '渐变末段颜色', '影响': '改色即时生效', '取值范围': '#RRGGBB 十六进制'},
+    'appearance.color_mid': {'disp': '呼吸过渡色', '作用范围': '渐变中段颜色', '影响': '改色即时生效', '取值范围': '#RRGGBB 十六进制'},
+    'appearance.color_start': {'disp': '呼吸起始色', '作用范围': '渐变第一段起点颜色', '影响': '改色即时生效', '取值范围': '#RRGGBB 十六进制'},
+    'appearance.display_scale': {'disp': '显示缩放（分单元）', '作用范围': '各单元独立缩放，未勾选恒按 100%', '影响': '勾选并设 percent 才生效'},
+    'appearance.display_scale.ball': {'disp': '球体及扇形缩放', '作用范围': '球体及扇形的显示缩放单元', '影响': 'enabled 勾选 + percent 生效', '取值范围': '50~200 且为 25 的整数倍'},
+    'appearance.display_scale.ball.enabled': {'disp': '启用该单元缩放', '作用范围': '是否对球体及扇形应用自定义缩放', '影响': '取消=恒按 100%'},
+    'appearance.display_scale.ball.percent': {'disp': '缩放百分比', '作用范围': '球体及扇形的缩放比例', '影响': '调大=该单元越大', '取值范围': '50~200 且为 25 的整数倍'},
+    'appearance.display_scale.monitor': {'disp': '资源监视单元缩放', '作用范围': '资源监视单元的显示缩放单元', '影响': 'enabled 勾选 + percent 生效', '取值范围': '50~200 且为 25 的整数倍'},
+    'appearance.display_scale.monitor.enabled': {'disp': '启用该单元缩放', '作用范围': '是否对资源监视单元应用自定义缩放', '影响': '取消=恒按 100%'},
+    'appearance.display_scale.monitor.percent': {'disp': '缩放百分比', '作用范围': '资源监视单元的缩放比例', '影响': '调大=该单元越大', '取值范围': '50~200 且为 25 的整数倍'},
+    'appearance.display_scale.quicklaunch': {'disp': '快捷启动单元缩放', '作用范围': '快捷启动单元的显示缩放单元', '影响': 'enabled 勾选 + percent 生效', '取值范围': '50~200 且为 25 的整数倍'},
+    'appearance.display_scale.quicklaunch.enabled': {'disp': '启用该单元缩放', '作用范围': '是否对快捷启动单元应用自定义缩放', '影响': '取消=恒按 100%'},
+    'appearance.display_scale.quicklaunch.percent': {'disp': '缩放百分比', '作用范围': '快捷启动单元的缩放比例', '影响': '调大=该单元越大', '取值范围': '50~200 且为 25 的整数倍'},
+    'appearance.dur_end_start': {'disp': '末尾→起始时长', '作用范围': '呼吸第三段渐变耗时', '影响': '调大=渐变越慢', '取值范围': '1~30 秒'},
+    'appearance.dur_mid_end': {'disp': '过渡→末尾时长', '作用范围': '呼吸第二段渐变耗时', '影响': '调大=渐变越慢', '取值范围': '1~30 秒'},
+    'appearance.dur_start_mid': {'disp': '起始→过渡时长', '作用范围': '呼吸第一段渐变耗时', '影响': '调大=渐变越慢', '取值范围': '1~30 秒'},
+    'appearance.idle_sec': {'disp': '休眠倒计时', '作用范围': '无操作多少秒后进休眠', '影响': '0=永不休眠', '取值范围': '0 或 10~600 秒'},
+    'appearance.monitor_color': {'disp': '监视窗口色', '作用范围': '监视窗格底色/边缘虚化取色', '影响': '改色即时生效', '取值范围': '#RRGGBB 十六进制'},
+    'appearance.monitor_fill': {'disp': '监视底色填充开关', '作用范围': '窗格底色是否填充窗口色', '影响': '取消=填充透明色'},
+    'appearance.monitor_opacity': {'disp': '监视透明度', '作用范围': '监视窗格整体不透明度', '影响': '调小=窗格越透明', '取值范围': '0~100（%）'},
+    'appearance.opacity': {'disp': '球体透明度', '作用范围': '球体本体不透明度', '影响': '调小=越透明', '取值范围': '0~100（%）'},
+    'appearance.sleep_opacity': {'disp': '休眠透明度', '作用范围': '休眠态球体不透明度', '影响': '调小=休眠越隐形', '取值范围': '0~100（%）'},
+    'autostart': {'disp': '开机自启动', '作用范围': '登录时自动拉起球体', '影响': '走计划任务（最高权限），不写注册表 Run'},
+    'autostart.enabled': {'disp': '自启开关', '作用范围': '是否注册开机自启计划任务', '影响': '勾选=注册，取消=删除任务'},
+    'layout_version': {'disp': '四文件拆分标记', '作用范围': '配置 schema 版本锚点', '影响': '2=已拆分；程序自动维护，勿手改'},
+    'monitor': {'disp': '资源监视', '作用范围': '监视总开关/置顶/锁定/采集周期/参数勾选', '影响': '窗格布局 layout 在 state.yaml'},
+    'monitor.enabled': {'disp': '监视总开关', '作用范围': '是否启用资源监视', '影响': '勾选并保存才拉起采集'},
+    'monitor.idle_stop_sec': {'disp': '闲置停采（用户已设值）', '作用范围': '连续无监视窗多少秒后停采', '影响': '三级优先级最高档：此处有值则盖过 config.yaml', '取值范围': '0~3600 秒（0=永不停采）', '说明': '没设过才用 config.yaml 的 collect.idle_stop_sec'},
+    'monitor.locked': {'disp': '锁定监视窗格', '作用范围': '禁止移动窗格与拆分/合并组', '影响': '锁定后仍可右键菜单'},
+    'monitor.refresh_ms': {'disp': '拉取周期（用户已设值）', '作用范围': '窗格向采集层取数的间隔', '影响': '三级优先级最高档：此处有值则盖过 config.yaml', '取值范围': '200~5000 毫秒', '说明': '没设过才用 config.yaml 的 collect.refresh_ms'},
+    'monitor.topmost': {'disp': '监视窗口置顶', '作用范围': '监视窗格是否总在最前', '影响': '与球体置顶独立'},
+    'monitor.units': {'disp': '参数勾选与阈值', '作用范围': '每个指标是否建窗 + 自定义分档阈值', '影响': '在监视设置窗勾选；threshold 空=用默认分档'},
+    'monitor.units.*.enabled': {'disp': '建窗开关', '作用范围': '该参数是否显示监视窗格', '影响': '勾选=建窗'},
+    'monitor.units.*.threshold': {'disp': '自定义分档阈值', '作用范围': '该参数的绿/黄/红分档', '影响': '空列表=用默认分档；非空覆盖 bands', '取值范围': '[{min,max,color}...] 列表'},
+    'monitor.units.cpu.freq': {'disp': 'CPU频率（GHz）', '作用范围': '监视参数 cpu.freq 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.cpu.load': {'disp': 'CPU利用（%）', '作用范围': '监视参数 cpu.load 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.cpu.power': {'disp': 'CPU功耗（W）', '作用范围': '监视参数 cpu.power 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.cpu.temp': {'disp': 'CPU温度（℃）', '作用范围': '监视参数 cpu.temp 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.disk.0.temp': {'disp': '动态参数 disk.0.temp', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.disk.0.usage': {'disp': '动态参数 disk.0.usage', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.fan.cpu.0': {'disp': '动态参数 fan.cpu.0', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.fan.gpu_d.0': {'disp': '动态参数 fan.gpu_d.0', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.fan.mobo.0': {'disp': '动态参数 fan.mobo.0', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.gpu_d.0.load': {'disp': '动态参数 gpu_d.0.load', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.gpu_d.0.power': {'disp': '动态参数 gpu_d.0.power', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.gpu_d.0.temp': {'disp': '动态参数 gpu_d.0.temp', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.gpu_d.0.vram_load': {'disp': '动态参数 gpu_d.0.vram_load', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.gpu_d.0.vram_used': {'disp': '动态参数 gpu_d.0.vram_used', '作用范围': '按硬件实例展开的监视参数', '影响': 'enabled 勾选才建窗；多卡/多盘运行时展开'},
+    'monitor.units.gpu_i.load': {'disp': 'GPU利用（%）', '作用范围': '监视参数 gpu_i.load 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.gpu_i.shared': {'disp': '共享内存用量（GB）', '作用范围': '监视参数 gpu_i.shared 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.mem.load': {'disp': '内存利用（%）', '作用范围': '监视参数 mem.load 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.mem.used': {'disp': '内存用量（GB）', '作用范围': '监视参数 mem.used 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.net.rx': {'disp': '网络接收速率（MB/s）', '作用范围': '监视参数 net.rx 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'monitor.units.net.tx': {'disp': '网络发送速率（MB/s）', '作用范围': '监视参数 net.tx 的建窗开关与阈值', '影响': 'enabled 勾选才建窗'},
+    'window': {'disp': '球体窗口开关', '作用范围': '球体置顶与锁定', '影响': '球心坐标 pos_x/pos_y 在 state.yaml'},
+    'window.always_on_top': {'disp': '保持球体置顶', '作用范围': '球体是否总在最前', '影响': '与监视窗置顶相互独立'},
+    'window.locked': {'disp': '锁定球体', '作用范围': '禁止拖动球体', '影响': '锁定后仍可右键菜单'},
+}
+
+COMMAND_COMMENTS = {
+    'functions': {'disp': '功能扇区列表', '作用范围': '球体展开后的扇区指令', '影响': '顺序=条目顺序；等分数=active 数'},
+    'functions.*.active': {'disp': '是否激活', '作用范围': '该条目是否参与扇区', '影响': 'true 计入等分；最少 2 最多 9'},
+    'functions.*.code': {'disp': '指令代码', '作用范围': '点击扇区执行的内容', '影响': '默认 py；cmd:/ps:/powershell:/pwsh: 前缀切换通道，均静默执行'},
+    'functions.*.name': {'disp': '功能名称', '作用范围': '扇区上显示的名字', '影响': '任意字符；空名兜底「未命名」'},
+}
+
+STATE_COMMENTS = {
+    'monitor': {'disp': '监视布局记忆', '作用范围': '窗格位置与吸附组', '影响': '程序自动写入，请勿手改'},
+    'monitor.layout': {'disp': '窗格布局表', '作用范围': '每个参数窗格的位置与所属组', '影响': '退出/移动停止后自动落盘'},
+    'monitor.layout.*.group_id': {'disp': '吸附组编号', '作用范围': '窗格所属磁吸组', '影响': 'null=独立窗；同组刚性移动'},
+    'monitor.layout.*.x': {'disp': '窗格 X 坐标', '作用范围': '窗格左上角水平位置（像素）', '影响': '越屏会自动夹回'},
+    'monitor.layout.*.y': {'disp': '窗格 Y 坐标', '作用范围': '窗格左上角垂直位置（像素）', '影响': '越屏会自动夹回'},
+    'window': {'disp': '球心坐标记忆', '作用范围': '球体上次停留位置', '影响': '程序自动写入，请勿手改'},
+    'window.pos_x': {'disp': '球心 X 坐标', '作用范围': '球心水平位置（像素）', '影响': '移动停止后自动落盘'},
+    'window.pos_y': {'disp': '球心 Y 坐标', '作用范围': '球心垂直位置（像素）', '影响': '移动停止后自动落盘'},
+}
