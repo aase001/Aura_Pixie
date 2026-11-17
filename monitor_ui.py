@@ -181,6 +181,11 @@ _BANDS_RANGE = {"percent": (0, 100), "celsius": (0, 200), "rpm": (0, 20000),
                 "size": (0, 512)}
 # bands 生效表（apply_tuning 写、default_thresholds 读）；出厂=内置默认
 _BANDS_LIVE = {k: tuple(v) for k, v in _BANDS_DEFAULT.items()}
+# 最近一次 apply_tuning 的回退原因清单（C4）：bands 整类回退/语义色非法回退
+# 逐条记录（中文描述）。本模块无日志入口（禁 import main），由 main 侧
+# load_interaction_config 读取后经 _log_crash 落 crash.log——兑现计划 §五 与
+# README「问题记入 crash.log」的承诺。每次 apply_tuning 开头清空（只报本次）。
+TUNING_FALLBACKS: list = []
 # 出厂曲线排除清单冻结副本（apply_tuning 改 SPARK_EXCLUDE_KEYS 后默认快照不变）
 SPARK_EXCLUDE_KEYS_DEFAULT = tuple(SPARK_EXCLUDE_KEYS)
 
@@ -258,8 +263,9 @@ def apply_tuning(values: dict) -> None:
     global BREATH_HZ, BREATH_ALPHA_MIN, BREATH_ALPHA_MAX, SPARK_EXCLUDE_KEYS
     global DRAG_THRESHOLD_PX, SNAP_PREVIEW_PX, SNAP_STRONG_PX, SNAP_ANIM_MS
     global FUSE_DASH_PX, SEM_GREEN, SEM_YELLOW, SEM_RED, SPARKLINE_POINTS
-    global _BANDS_LIVE
+    global _BANDS_LIVE, TUNING_FALLBACKS
 
+    TUNING_FALLBACKS = []   # 只报本次调参的回退（C4，main 侧读取后落日志）
     v = values if isinstance(values, dict) else {}
     dp = MONITOR_DEFAULTS["pane"]
     ds = MONITOR_DEFAULTS["spark"]
@@ -313,9 +319,23 @@ def apply_tuning(values: dict) -> None:
 
     # ---- semantics 语义色 + 七类分档边界 ----
     sm = v.get("semantics") if isinstance(v.get("semantics"), dict) else {}
-    SEM_GREEN = _valid_hex(sm.get("green"), dsem["green"])
-    SEM_YELLOW = _valid_hex(sm.get("yellow"), dsem["yellow"])
-    SEM_RED = _valid_hex(sm.get("red"), dsem["red"])
+    for _ck in ("green", "yellow", "red"):
+        if _ck not in sm:      # 未提供=用默认，不是非法（不记日志）
+            _norm = dsem[_ck]
+        else:
+            _raw = sm[_ck]
+            # 哨兵判非法：_valid_hex 合法返回规范化色（必非哨兵），非法才回哨兵
+            _norm = _valid_hex(_raw, "\x00INVALID")
+            if _norm == "\x00INVALID":
+                TUNING_FALLBACKS.append(
+                    f"semantics.{_ck} 色值非法（{_raw!r}），回退默认 {dsem[_ck]}")
+                _norm = dsem[_ck]
+        if _ck == "green":
+            SEM_GREEN = _norm
+        elif _ck == "yellow":
+            SEM_YELLOW = _norm
+        else:
+            SEM_RED = _norm
     bands_src = sm.get("bands") if isinstance(sm.get("bands"), dict) else {}
     new_bands = {}
     for bk, dflt in _BANDS_DEFAULT.items():
@@ -328,6 +348,9 @@ def apply_tuning(values: dict) -> None:
             if bk != "freq":   # freq 边界为 float，其余取整
                 g, y, r = int(round(g)), int(round(y)), int(round(r))
             if not (0 < g < y < r):   # 同类内不等式不成立 → 整类回退默认
+                TUNING_FALLBACKS.append(
+                    f"bands.{bk} 不满足 0<green_max<yellow_max<red_max"
+                    f"（{g}/{y}/{r}），整类回退默认 {dflt}")
                 g, y, r = dflt
         else:
             g, y, r = dflt

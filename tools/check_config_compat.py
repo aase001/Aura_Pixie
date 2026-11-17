@@ -207,6 +207,37 @@ if hasattr(M, "load_interaction_config"):
     M.load_interaction_config(cfg_path)
     ck("enabled=false → monitor 组也回默认（BASE_W=250）",
        mu.BASE_W == 250, str(mu.BASE_W))
+    # C4：bands 整类回退 / 语义色非法回退须记 crash.log（计划 §五 与 README
+    # 都承诺「问题记入 crash.log」；apply_tuning 静默回退则用户无从知晓）
+    _logs6 = []
+    _real_log6 = M._log_crash
+    M._log_crash = lambda where, exc: _logs6.append((where, str(exc)))
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"enabled": True, "monitor": {"semantics": {
+                "green": "不是颜色",
+                "bands": {"celsius": {"green_max": 90, "yellow_max": 80,
+                                      "red_max": 110}}}}}, fh)
+        M.load_interaction_config(cfg_path)
+        ck("bands 不等式不成立整类回退默认",
+           mu.default_thresholds("x", "℃") == [
+               {"min": 0, "max": 60, "color": mu.SEM_GREEN},
+               {"min": 60, "max": 80, "color": mu.SEM_YELLOW},
+               {"min": 80, "max": 110, "color": mu.SEM_RED}])
+        ck("bands 整类回退记 crash.log（承诺可追溯）",
+           any("bands.celsius" in str(e) for w, e in _logs6),
+           f"（日志 {_logs6}）")
+        ck("语义色非法回退记 crash.log",
+           any("green" in str(e) for w, e in _logs6), f"（日志 {_logs6}）")
+        _logs6.clear()
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"enabled": True, "monitor": {"semantics": {
+                "bands": {"percent": {"green_max": 40, "yellow_max": 70,
+                                      "red_max": 90}}}}}, fh)
+        M.load_interaction_config(cfg_path)
+        ck("合法调参不记回退日志（无噪音）", _logs6 == [], f"（日志 {_logs6}）")
+    finally:
+        M._log_crash = _real_log6
     # 还原：指向不存在文件触发全默认回退 + 删临时 config.yaml
     M.load_interaction_config(os.path.join(_ISO, "no_such_config.yaml"))
     try:

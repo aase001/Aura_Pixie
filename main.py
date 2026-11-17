@@ -497,6 +497,11 @@ def load_interaction_config(path: str = TUNING_PATH) -> dict:
         monitor_ui.apply_tuning(mon)
     else:
         monitor_ui.apply_tuning({})
+    # C4：bands 整类回退/语义色非法回退须记 crash.log（计划 §五 与 README 承诺）。
+    # monitor_ui 无日志入口（禁 import main），回退原因记在 TUNING_FALLBACKS，
+    # 由这里统一落日志；enabled=false 走 {} 无回退，清单恒空不产噪音。
+    for _fb in getattr(monitor_ui, "TUNING_FALLBACKS", []):
+        _log_crash("load_interaction_config", ValueError(f"config.yaml 调参回退：{_fb}"))
 
     # ---- collect 组：经 monitor_hub.apply_tuning（HISTORY_POINTS + 侧车/poll 参数）----
     if enabled:
