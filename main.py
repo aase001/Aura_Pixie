@@ -5857,6 +5857,11 @@ class AuraBall(QWidget):
         # + collect 硬件参数热重载（poll/stale/max_restarts/侧车间隔/历史点数）
         if _MONITOR_MGR is not None:
             _MONITOR_MGR.retune_layout()
+            # v2.03：collect.refresh_ms「重载即活更新」（计划 §五）——重设拉取
+            # 周期为三级优先级生效值。start_polling 自带可见性守卫（无可见窗格
+            # 只更新间隔不启动定时器）；不重设的话已开窗格仍按旧周期拉取，
+            # 用户须再开一次监视设置窗才生效，与「改完重载即生效」矛盾。
+            _MONITOR_MGR.start_polling(_effective_refresh_ms())
         if _MONITOR_HUB is not None:
             _MONITOR_HUB.retune_collect()
         # v2.03：执行脚本孤儿回收（计划 §七「启动/重载时」）。须在 load_functions
