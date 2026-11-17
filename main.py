@@ -40,7 +40,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import winreg
 
@@ -2017,9 +2016,11 @@ def load_functions(path: str = CONFIG_PATH) -> list[dict]:
 
 
 def save_functions(rows: list[dict], path: str = CONFIG_PATH) -> None:
-    """写回功能扇区块（functions），保留 setting.yaml 中其他配置块（appearance/autostart/未来扩展）。
+    """写回功能扇区块（functions），其余配置块原样保留。
 
-    条目顺序 = 表格行顺序；总数不限，可含未激活。
+    v2.03 四文件：经 read_setting/write_setting 视图漏斗——主位置的 functions
+    落 command.yaml，appearance/autostart 等仍在 setting.yaml，坐标布局在
+    state.yaml，互不干扰。条目顺序 = 表格行顺序；总数不限，可含未激活。
     """
     data = read_setting(path)
     data["functions"] = [
@@ -2532,9 +2533,11 @@ def saved_ball_position(path: str = SETTINGS_PATH) -> tuple[float, float] | None
 
 
 def save_ball_position(x: float, y: float, path: str = SETTINGS_PATH) -> None:
-    """把球心坐标写入 setting.yaml 的 window.pos_x / pos_y（保留其他配置块）。
+    """把球心坐标写入 window.pos_x / pos_y（保留其他配置块）。
 
-    非法数值不落盘（守护：坐标来源异常时不污染配置）。"""
+    v2.03 四文件：经 write_setting 拆分，主位置的坐标实际落 state.yaml
+    （程序独占写），setting.yaml 只留窗口开关。非法数值不落盘（守护：
+    坐标来源异常时不污染配置）。"""
     if not (math.isfinite(x) and math.isfinite(y)):
         return
     try:

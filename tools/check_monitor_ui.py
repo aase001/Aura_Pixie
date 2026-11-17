@@ -3674,6 +3674,49 @@ def section_q():
         mu.apply_tuning({})   # 回默认 60，防污染后续断言
         mgr.retune_layout()
         w.close()
+
+        # C3：越屏夹回须按组刚性平移——成组窗格若逐窗独立夹回，个别成员被
+        # 单独挪走会拆散组内对齐。构造贴近屏右缘的两窗组，调大 base_w 触发
+        # 夹回，断言组内相对关系不变（同一 delta）。
+        hub2 = FakeHub()
+        mgr2 = mu.MonitorWindowManager(hub2, **inj)
+        wa = mu.MonitorUnitWidget("cpu.load", hub2, manager=mgr2, **w_inj)
+        wb = mu.MonitorUnitWidget("cpu.temp", hub2, manager=mgr2, **w_inj)
+        mgr2.register_widget("cpu.load", wa, ["cpu.load"])
+        mgr2.register_widget("cpu.temp", wb, ["cpu.temp"])
+        hub2.set_metric("cpu.load", 42.0)
+        hub2.set_metric("cpu.temp", 55.0)
+        wa.update_data(hub2.snapshot()["cpu.load"])
+        wb.update_data(hub2.snapshot()["cpu.temp"])
+        wa.update_layout(); wb.update_layout()
+        wa.show(); wb.show()
+        APP.processEvents()
+        _scr = APP.primaryScreen().availableGeometry()
+        wa.move(_scr.right() - wa.width() - 40, _scr.top() + 100)
+        wb.move(wa.x(), wa.y() + wa.height())   # 上下堆叠
+        grp_q = mgr2.new_group()
+        grp_q.add(wa); grp_q.add(wb)
+        wb._snap_constraints = [(wa, "top")]
+        wa._is_snapped = wb._is_snapped = True
+        APP.processEvents()
+        mu.apply_tuning({"pane": {"base_w": 500, "base_h": 200}})
+        mgr2.retune_layout()
+        APP.processEvents()
+        ok(wa.frameGeometry().width() == 500,
+           f"组级夹回用例：窗格已扩到 500（实际 {wa.frameGeometry().width()}）")
+        # 断言口径：② BFS 已按新尺寸重排（堆叠间距=新窗高），③ 夹回只平移
+        # 不拆组——故夹回后仍须「左缘对齐 + 间距=新窗高」，且整组在屏内。
+        ok(wb.x() == wa.x() and wb.y() - wa.y() == wa.frameGeometry().height(),
+           f"越屏夹回整组同一 delta，组内对齐不拆散"
+           f"（实际 x 差 {wb.x() - wa.x()}、y 差 {wb.y() - wa.y()}，"
+           f"期望 0/{wa.frameGeometry().height()}）")
+        _br_q = grp_q.bounding_rect()
+        _fit_q = mu.sanitize_layout_pos(_br_q.x(), _br_q.y(),
+                                        _br_q.width(), _br_q.height())
+        ok(_fit_q == (_br_q.x(), _br_q.y()),
+           f"夹回后整组包围盒中心在屏内（sanitize 原样返回=合法，{_br_q}）")
+        mu.apply_tuning({})
+        wa.close(); wb.close()
     finally:
         # 幂等回默认，防污染其他节（apply_tuning({}) 从 MONITOR_DEFAULTS 整表重算）
         if hasattr(mu, "apply_tuning"):

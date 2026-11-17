@@ -236,7 +236,8 @@ def _tune_float(src: dict, key: str, default: float, rng) -> float:
 
 
 def _valid_hex(v, default: str) -> str:
-    """校验十六进制色（#RGB/#RRGGBB），合法则规范化为大写 #RRGGBB，否则回默认。"""
+    """校验十六进制色（#RRGGBB；QColor 也认 #RGB 等写法，一律展开规范化为
+    大写 #RRGGBB），非法/非字符串回 default。"""
     if not isinstance(v, str):
         return default
     s = v.strip()
@@ -2373,12 +2374,15 @@ class MonitorWindowManager:
           尺寸不变，用户误判「调参没生效」（计划缺口③）。步骤：
             ① 按新 BASE_W 重算全局扩宽档（label 自然宽是否仍超基准，可升可降）；
             ② rescale() 重算布局 + 组锚点 BFS 重排 + 屏幕边重贴（复用既有口径）；
-            ③ 对可见窗格 sanitize_layout_pos 越屏夹回（窗格变大可能超出屏幕）。
-          隐藏窗格遵守坑 91：先 processEvents 让 hide 落地再写几何（rescale 内
-          update_layout 对隐藏窗格同样安全，几何写入不依赖 show）。
-          ④ history_points 变 → 存量窗格曲线容量重建：UnitRow.history 的
-          maxlen 构造时冻结，不重建则调大后「记 N 点只画旧 M 点」、调小后画得
-          比记的多（决策12 单一真源对已开窗格也须成立）；重建后从 hub 回填。
+            ③ 越屏夹回（窗格变大可能超出屏幕）：成组窗格按组包围盒判定、
+              整组同一 delta 刚性平移（逐窗独立夹回会破坏 ② 的组内对齐）；
+              独立窗逐窗 sanitize_layout_pos。
+            ④ history_points 变 → 存量窗格曲线容量重建：UnitRow.history 的
+              maxlen 构造时冻结，不重建则调大后「记 N 点只画旧 M 点」、调小后画得
+              比记的多（决策12 单一真源对已开窗格也须成立）；重建后从 hub 回填。
+          隐藏窗格不写几何（rescale 的 move 只作用可见窗格；update_layout 对
+          隐藏窗格安全，不依赖 show——坑 91 的 processEvents 前置仅在显式对
+          隐藏窗格写几何时需要，本函数无此路径）。
         """
         try:
             # ① 重算扩宽档：任一可见窗格标签自然宽 > 新基准 → 扩宽，否则收回
@@ -2391,9 +2395,25 @@ class MonitorWindowManager:
             self._width_expanded = need_expand
             # ② 重算布局 + 磁吸重排（rescale 内逐窗 update_layout + 组 BFS + 贴边）
             self.rescale()
-            # ③ 越屏夹回：窗格尺寸变大后中心可能落到屏外，按多屏合法性校验夹回
+            # ③ 越屏夹回：窗格尺寸变大后中心可能落到屏外。成组窗格按组包围盒
+            #    判定、整组同一 delta 刚性平移——逐窗独立夹回会把 ② 刚对齐的
+            #    组内关系拆散（个别成员被单独挪走 → 错位/重叠）。
+            grouped: set = set()
+            for grp in list(self._groups):
+                members = [w for w in grp.members if w.isVisible()]
+                if not members:
+                    continue
+                grouped.update(id(w) for w in members)
+                br = grp.bounding_rect()
+                fixed = sanitize_layout_pos(br.x(), br.y(), br.width(), br.height())
+                if fixed is None:
+                    continue
+                dx, dy = fixed[0] - br.x(), fixed[1] - br.y()
+                if dx or dy:
+                    for w in members:
+                        w.move(w.x() + dx, w.y() + dy)
             for w in self._widgets.values():
-                if not w.isVisible():
+                if not w.isVisible() or id(w) in grouped:
                     continue
                 r = w.frameGeometry()
                 fixed = sanitize_layout_pos(r.x(), r.y(), r.width(), r.height())
