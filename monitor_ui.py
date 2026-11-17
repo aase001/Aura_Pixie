@@ -2353,6 +2353,9 @@ class MonitorWindowManager:
             ③ 对可见窗格 sanitize_layout_pos 越屏夹回（窗格变大可能超出屏幕）。
           隐藏窗格遵守坑 91：先 processEvents 让 hide 落地再写几何（rescale 内
           update_layout 对隐藏窗格同样安全，几何写入不依赖 show）。
+          ④ history_points 变 → 存量窗格曲线容量重建：UnitRow.history 的
+          maxlen 构造时冻结，不重建则调大后「记 N 点只画旧 M 点」、调小后画得
+          比记的多（决策12 单一真源对已开窗格也须成立）；重建后从 hub 回填。
         """
         try:
             # ① 重算扩宽档：任一可见窗格标签自然宽 > 新基准 → 扩宽，否则收回
@@ -2373,6 +2376,20 @@ class MonitorWindowManager:
                 fixed = sanitize_layout_pos(r.x(), r.y(), r.width(), r.height())
                 if fixed is not None and (fixed[0], fixed[1]) != (r.x(), r.y()):
                     w.move(fixed[0], fixed[1])
+            # ④ 历史容量重建（含隐藏窗格——重勾秒回曲线也须按新容量）：
+            #    容量未变不动（避免无谓清空）；变了换新 deque 并从 hub 回填，
+            #    hub 历史为空时保留已有内容按新容量截断，不清空观感。
+            for w in self._widgets.values():
+                for row in w._rows:
+                    if row.history.maxlen == SPARKLINE_POINTS:
+                        continue
+                    nd = deque(row.history, maxlen=SPARKLINE_POINTS)
+                    hist = self.hub.history(row.key)
+                    if hist:
+                        nd.clear()
+                        nd.extend(hist)
+                    row.history = nd
+                w.update()
         except Exception as e:  # noqa: BLE001
             self.log_fn("monitor_ui.retune_layout", e)
 

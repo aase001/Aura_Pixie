@@ -3656,6 +3656,23 @@ def section_q():
         APP.processEvents()
         ok(w.frameGeometry().width() == 320,
            f"retune_layout 后窗格宽随 base_w→320（实际 {w.frameGeometry().width()}）")
+        # B1：history_points 改值后存量窗格曲线容量随之重建（决策12「记多少点
+        # 就画多少点」对已开窗格成立）。UnitRow.history 的 maxlen 构造时冻结，
+        # 不重建则调大后 hub 记 N 点只画旧 M 点、调小后画得比记的多。
+        hub.seed_history("cpu.load", [float(i) for i in range(90)])
+        mu.apply_tuning({"history_points": 90})
+        mgr.retune_layout()
+        _row_q = next(r for r in w._rows if r.key == "cpu.load")
+        ok(_row_q.history.maxlen == 90,
+           f"history_points→90 后存量窗格 deque 容量重建（实际 {_row_q.history.maxlen}）")
+        ok(len(_row_q.history) == 90,
+           f"重建后从 hub 回填 90 点不被旧容量截断（实际 {len(_row_q.history)}）")
+        mu.apply_tuning({"history_points": 20})
+        mgr.retune_layout()
+        ok(_row_q.history.maxlen == 20 and len(_row_q.history) == 20,
+           f"调小→20 容量同步收缩（实际 maxlen={_row_q.history.maxlen} len={len(_row_q.history)}）")
+        mu.apply_tuning({})   # 回默认 60，防污染后续断言
+        mgr.retune_layout()
         w.close()
     finally:
         # 幂等回默认，防污染其他节（apply_tuning({}) 从 MONITOR_DEFAULTS 整表重算）
