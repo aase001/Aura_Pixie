@@ -572,6 +572,41 @@ def main() -> int:
                   not os.path.isdir(M.RUNNER_TEST_DIR)
                   or all(not n.startswith("fn_")
                          for n in os.listdir(M.RUNNER_TEST_DIR)), "", failures)
+
+            # ⑧ C1：测试残留兜底清扫——超时仍在跑的 tst_* 被放弃后无人读后即删，
+            #    旧 24h 全清已废，须按 mtime 超龄清扫（跳过占用），否则永久堆积
+            os.makedirs(M.RUNNER_TEST_DIR, exist_ok=True)
+            _stale_t = os.path.join(M.RUNNER_TEST_DIR, "tst_stale9.py")
+            _fresh_t = os.path.join(M.RUNNER_TEST_DIR, "tst_fresh9.py")
+            for _p in (_stale_t, _fresh_t):
+                with open(_p, "w", encoding="utf-8") as fh:
+                    fh.write("pass")
+            _old_ts = time.time() - 25 * 3600
+            os.utime(_stale_t, (_old_ts, _old_ts))   # 造 25h 前残留
+            _rm_test = M.reclaim_runner_orphans()
+            check("测试残留超 24h 被兜底清扫", not os.path.exists(_stale_t),
+                  f"（{_stale_t} 仍在）", failures)
+            check("未超龄测试脚本不动（读后即删主路径不受影响）",
+                  os.path.isfile(_fresh_t), "", failures)
+            check("清扫清单含测试残留名（供诊断）",
+                  os.path.basename(_stale_t) in _rm_test, f"（{_rm_test}）", failures)
+            # 占用跳过：超龄但正被占用 → 不删不抛，下轮再试
+            os.utime(_fresh_t, (_old_ts, _old_ts))
+            _real_remove_t = os.remove
+
+            def _busy_remove_t(p, *a, **k):
+                if p == _fresh_t:
+                    raise PermissionError(32, "另一个程序正在使用此文件", p)
+                return _real_remove_t(p, *a, **k)
+
+            os.remove = _busy_remove_t
+            try:
+                M.reclaim_runner_orphans()
+            finally:
+                os.remove = _real_remove_t
+            check("超龄但被占用的测试残留跳过不删（下轮再试）",
+                  os.path.isfile(_fresh_t), "", failures)
+            os.remove(_fresh_t)
         finally:
             M.RUNNER_DIR = _old_runner_dir
             M.RUNNER_TEST_DIR = _old_test_dir9

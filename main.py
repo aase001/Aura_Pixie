@@ -1120,13 +1120,16 @@ def _referenced_runner_names() -> set:
 def reclaim_runner_orphans() -> list:
     """孤儿回收：删除 command\\ 下不再被任何指令引用的 fn_* 脚本（v2.03）。
 
-    【作用范围】RUNNER_DIR 顶层的 fn_*.bat / fn_*.py；不碰 test\\ 子目录
-      （tst_* 归 _out_files 读后即删），也不碰任何非 fn_* 文件。
+    【作用范围】RUNNER_DIR 顶层的 fn_*.bat / fn_*.py + test\\ 内超龄 tst_* 残留；
+      不碰任何非 fn_*/tst_* 文件。
     【影响】替代旧 cleanup_runner_dir 的「24 小时全清」——按引用关系精确回收：
       仍被 command.yaml 任一指令（含次级项）引用的脚本保留（下次点击秒复用），
       无人引用的删掉，缓存目录不再随指令编辑历史无限增长。
       **删除失败（文件正被 cmd.exe 占用）则跳过、下轮再试**，绝不强删正在执行的
       脚本（计划 §七：只写一次 + 跳过占用，两条保护缺一不可）。
+      test\\ 的 tst_* 主路径是「读后即删」（_out_files）；但测试超时仍在跑时
+      输出文件被放弃（进程留后台），旧 24h 全清废除后这些残留无人回收——
+      故对 mtime 超 24h 的 tst_* 兜底清扫（同样跳过占用），防永久堆积。
     返回已删文件名列表（诊断/日志用）。启动与右键「重载」各调一次。
     """
     removed: list = []
@@ -1149,6 +1152,24 @@ def reclaim_runner_orphans() -> list:
             os.remove(path)
         except OSError:
             continue          # 被占用（cmd 正在逐行读）→ 跳过，下轮再试
+        removed.append(name)
+    # test\ 超龄残留兜底（C1）：只认 tst_* 前缀，mtime 超 24h 才动；
+    # 未超龄的留给「读后即删」主路径，占用跳过下轮再试。
+    try:
+        test_names = os.listdir(RUNNER_TEST_DIR)
+    except OSError:
+        return removed
+    cutoff = time.time() - 24 * 3600
+    for name in test_names:
+        if not name.startswith("tst_"):
+            continue
+        path = os.path.join(RUNNER_TEST_DIR, name)
+        try:
+            if not os.path.isfile(path) or os.path.getmtime(path) >= cutoff:
+                continue
+            os.remove(path)
+        except OSError:
+            continue
         removed.append(name)
     return removed
 
@@ -3147,7 +3168,7 @@ class CodeEditDialog(QDialog):
             if time.time() >= self._deadline:
                 self._stop_polling()
                 # 进程仍在后台写输出文件：此时不删文件（避免占用冲突），
-                # 留给 cleanup_runner_dir 的 24h 残留清理
+                # 留给 reclaim_runner_orphans 对 test\ 超 24h tst_* 的兜底清扫
                 self._out_files = []
                 self._show_result(
                     "已超时（超过 %g 秒）" % TEST_RUN_TIMEOUT_SEC,
@@ -3237,7 +3258,8 @@ class CodeEditDialog(QDialog):
         except RuntimeError:
             pass
         self._proc = None   # 不再持有；进程若未结束会自行跑完（与正式执行一致）
-        # 输出文件：进程已结束才删；仍在跑则留给 24h 残留清理（避免占用冲突）
+        # 输出文件：能删即删；被占用删不掉的留给 reclaim_runner_orphans
+        # 对 test\ 超 24h tst_* 的兜底清扫（避免占用冲突）
         if self._out_files:
             for p in self._out_files:
                 try:
