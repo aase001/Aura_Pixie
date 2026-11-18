@@ -32,9 +32,11 @@ import main as M  # noqa: E402
 import monitor_ui as mu  # noqa: E402
 
 fails = []
+_RUN = [0]   # 断言执行总数（含通过与失败），供末尾执行量下限哨兵使用
 
 
 def ck(name, cond, extra=""):
+    _RUN[0] += 1
     print(("[OK] " if cond else "[FAIL] ") + name + (f"  {extra}" if extra else ""))
     if not cond:
         fails.append(name)
@@ -935,4 +937,17 @@ finally:
 print("\n== 审计结果:", "PASS" if not fails else f"FAIL {len(fails)}", "==")
 for f in fails:
     print("  -", f)
+
+# ---- 执行量下限哨兵（防「整段场景消失却仍报 PASS」）----
+# 本脚本是模块级顺序执行，大量断言包在 `if hasattr(M, ...)` 分支里：一旦某个函数
+# 被删/改名，整段场景连断言一起消失，fails 仍为空 → 照样 PASS。这与
+# check_user_config 曾把「漏斗读不到 functions」当「用户没配功能」静默通过同类。
+# 基线 174 条（连跑三遍稳定）。有意增删断言须同步此值并说明原因。
+MIN_RUN = 174
+if _RUN[0] < MIN_RUN:
+    fails.append(f"执行量不足 {_RUN[0]} < 基线 {MIN_RUN}（疑似场景被跳过或断言被删）")
+    print(f"[FAIL] 执行量不足：实跑 {_RUN[0]} 条 < 基线 {MIN_RUN} 条")
+else:
+    print(f"[OK] 执行量达标：实跑 {_RUN[0]} 条 >= 基线 {MIN_RUN} 条")
+
 sys.exit(1 if fails else 0)

@@ -31,9 +31,11 @@ import main as M  # noqa: E402
 
 failures: list[str] = []
 _SRC = open(os.path.join(_ROOT, "main.py"), encoding="utf-8").read()
+_RUN = [0]   # 断言执行总数（含通过与失败），供末尾执行量下限哨兵使用
 
 
 def check(name: str, ok: bool, extra: str = "") -> None:
+    _RUN[0] += 1
     print(("[OK] " if ok else "[FAIL] ") + name + (f"  {extra}" if extra else ""))
     if not ok:
         failures.append(name)
@@ -313,6 +315,14 @@ if _saved["frozen"] is None:
         delattr(M.sys, "frozen")
 else:
     M.sys.frozen = _saved["frozen"]
+
+# ---- 执行量下限哨兵（防「整段用例消失却仍报 PASS」）----
+# 总判定原本只看 failures 是否为空：若某段因前置 hasattr 失配被跳过、或断言被误删，
+# failures 仍为空 → 照样 PASS。基线 40 条（连跑三遍稳定，不带 dryrun 运行）。
+MIN_RUN = 40
+if _RUN[0] < MIN_RUN:
+    failures.append(f"执行量不足 {_RUN[0]} < 基线 {MIN_RUN}（疑似用例被跳过或断言被删）")
+    print(f"[FAIL] 执行量不足：实跑 {_RUN[0]} 条 < 基线 {MIN_RUN} 条")
 
 print("\n总判定:", "PASS" if not failures else "NEEDS_REVIEW")
 for f in failures:

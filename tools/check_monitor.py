@@ -467,8 +467,11 @@ def section_e():
 # ---------------------------------------------------------------------------
 def section_f():
     print("[F] collect 生效接线（构造读 COLLECT_LIVE + retune_collect 热重载）")
+    # 自身看守：不依赖 [E] 节的 ok() 顺带覆盖。若 apply_tuning 被删/改名，
+    # 此处直接记 FAIL 而非静默跳过——静默跳过会让整节断言消失却仍报 PASS。
+    ok(hasattr(mh, "apply_tuning"), "[F] 前置：apply_tuning 唯一写入口存在")
     if not hasattr(mh, "apply_tuning"):
-        print("  [F] apply_tuning 未实现，跳过")
+        print("  [F] apply_tuning 未实现，跳过后续行为断言（已记 FAIL）")
         return
     ok(hasattr(mh.MetricsHub, "retune_collect"),
        "MetricsHub.retune_collect 热重载入口存在")
@@ -560,5 +563,17 @@ if __name__ == "__main__":
     section_d()
     section_e()
     section_f()
+
+    # ---- 执行量下限哨兵（防「整节消失却仍报 PASS」）----
+    # 根因：最终判定原本只看 FAIL==0。若某个 section 因前置 hasattr 失配被跳过、
+    # 或断言被误删，FAIL 仍是 0，脚本照样 PASS——这与 check_user_config 曾把
+    # 「漏斗读不到 functions」当成「用户没配功能」静默通过是同一类假绿。
+    # 基线：侧车在位 136 条；侧车缺失时 section_b 整节 SKIP 掉 21 条 → 下限取 115。
+    # 改动断言后必须同步此下限并说明原因，否则视为断言被静默移除。
+    MIN_PASS = 115
+    if PASS < MIN_PASS:
+        FAIL += 1
+        print(f"  FAIL: 执行量不足 PASS={PASS} < 下限 {MIN_PASS}"
+              f"——疑似有 section 被跳过或断言被删（FAIL==0 也不算通过）")
     print(f"\n== PASS {PASS} / FAIL {FAIL} / SKIP {SKIP} ==")
     sys.exit(1 if FAIL else 0)

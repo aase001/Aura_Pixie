@@ -153,7 +153,11 @@ def hexs(c):
     return f"{c.red():02X}{c.green():02X}{c.blue():02X}"
 
 
+_RUN = [0]   # 断言执行总数（含通过与失败），供末尾执行量下限哨兵使用
+
+
 def check(label, ok, detail, failures):
+    _RUN[0] += 1
     print(f"[{'OK' if ok else 'NG'}] {label}{detail}")
     if not ok:
         failures.append(f"{label}{detail}")
@@ -3204,6 +3208,18 @@ py: 1 +
     check("首行修复：编辑器顶部夹进视口（source 含 max(0, option.rect.y())）",
           "max(0, option.rect.y())" in _src_geo,
           "（源码未夹紧视口顶部）", failures)
+
+    # ---- 执行量下限哨兵（防「整段用例消失却仍报 PASS」）----
+    # 总判定原本只看 failures 是否为空：若某段用例因前置条件失配被跳过、或断言被
+    # 误删，failures 仍为空 → 照样 PASS。基线 551 条真实断言（连跑三遍稳定，
+    # 不含本哨兵——故先把计数快照到 _final_run 再比较，避免 check() 自增干扰判定）。
+    # 有意增删断言须同步此值并说明原因，不能为了变绿而静默减少覆盖。
+    MIN_RUN = 551
+    _final_run = _RUN[0]
+    check(f"执行量达标：实跑 {_final_run} 条 >= 基线 {MIN_RUN} 条",
+          _final_run >= MIN_RUN,
+          "" if _final_run >= MIN_RUN
+          else f"（实跑 {_final_run}，疑似有用例被跳过或断言被删）", failures)
 
     print("总判定:", "PASS" if not failures else "NEEDS_REVIEW")
     for f in failures:

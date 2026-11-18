@@ -3741,5 +3741,16 @@ if __name__ == "__main__":
     section_o()
     section_p()
     section_q()
+
+    # ---- 执行量下限哨兵（防「整节消失却仍报 PASS」）----
+    # 最终判定原本只看 FAIL==0：若某 section 前置 hasattr 失配被跳过、或断言被误删，
+    # FAIL 仍是 0 照样 PASS。本脚本全程用 FakeHub 造数、与本机硬件无关，
+    # 断言数确定性稳定（连跑三遍均 730），故用精确基线。
+    # 有意删改断言必须同步下调此值并说明原因，不能为了变绿而静默减少覆盖。
+    MIN_PASS = 730
+    if PASS < MIN_PASS:
+        FAIL += 1
+        print(f"  FAIL: 执行量不足 PASS={PASS} < 基线 {MIN_PASS}"
+              f"——疑似有 section 被跳过或断言被删")
     print(f"\n== PASS {PASS} / FAIL {FAIL} ==")
     sys.exit(1 if FAIL else 0)
