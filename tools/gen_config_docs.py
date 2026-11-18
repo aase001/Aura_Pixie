@@ -42,14 +42,14 @@ BLOCK = re.compile(
     r"\*\*([A-Za-z0-9_.]+)\*\*\s*｜\s*(.+?)\s*｜\s*默认\s*(.+?)\s*\n((?:-\s.+\n)+)")
 INFO = {}
 for m in BLOCK.finditer(readme):
-    key, disp, bullets = m.group(1), m.group(2), m.group(4)
+    key, disp, declared, bullets = m.group(1), m.group(2), m.group(3), m.group(4)
     d = {}
     for b in bullets.strip().splitlines():
         b = b.lstrip("- ").strip()
         for tag in ("作用范围", "影响", "取值范围", "说明"):
             if b.startswith(tag + "："):
                 d[tag] = b[len(tag) + 1:].strip()
-    INFO[key] = {"disp": disp, **d}
+    INFO[key] = {"disp": disp, "declared": declared, **d}
 
 print("解析到 README 键块：", len(INFO))
 for k in ("ball.hover.trigger_ms", "monitor.pane.base_w", "monitor.spark.max_h_px",
@@ -268,6 +268,77 @@ assert "points" not in _parsed["monitor"]["spark"], "spark.points 已废弃不�
 assert tuning.count("作用范围") >= 20 and tuning.count("影响") >= 20
 print("模板自检通过：作用范围 %d 次 / 影响 %d 次 / 总长 %d 字符"
       % (tuning.count("作用范围"), tuning.count("影响"), len(tuning)))
+
+
+# ------------------------------------------- README 声明默认值 ↔ 代码默认值交叉校验
+# 为什么必须有这一段：上面第 245~266 行只校验「出厂 config.yaml 数值 == 代码默认」，
+# 而 README 键块标题里的「默认 X」是人写的文字，此前被正则捕获后直接丢弃（group(3)
+# 未用）。变异测试 M1 实测：把源文档改成「默认 777」而代码仍是 1000.0，生成器
+# EXIT=0 顺利产出，出厂 README 会告诉用户「默认 777」，六套自检全绿无人发现。
+# 用户拿到的说明与实际行为不符 —— 这是文档漂移类假绿，必须双向看守。
+_CN_NUM = {"零": 0, "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _declared_matches(declared: str, actual) -> bool:
+    """判断 README 声明的默认值文字是否与代码默认值等价。
+
+    覆盖三种书写形态：
+      · 数值：'1000' / '0.15' / '1.0' ↔ 1000.0 / 0.15 / 1.0（按 float 比）
+      · 色值带中文后缀：'#3FB950（绿）' ↔ '#3FB950'（剥全角括号后比）
+      · 计数类：'七项' ↔ 7 元 tuple（中文数字→int 比长度）
+    """
+    s = declared.strip()
+    # 计数类：exclude_keys 等，声明形如「七项」/「7 项」
+    if s.endswith("项"):
+        head = s[:-1].strip()
+        n = _CN_NUM.get(head)
+        if n is None:
+            try:
+                n = int(head)
+            except ValueError:
+                return False
+        return hasattr(actual, "__len__") and len(actual) == n
+    # 剥掉全角/半角括号里的补充说明（如「#3FB950（绿）」「250（像素）」）
+    s = re.split(r"[（(]", s)[0].strip()
+    # 数值
+    try:
+        return float(s) == float(actual)
+    except (TypeError, ValueError):
+        pass
+    # 字符串（色值等）：大小写不敏感，代码里 QColor.name() 返回小写（坑36）
+    return str(s).strip().upper() == str(actual).strip().upper()
+
+
+# 键集必须双向精确对应：代码侧全部调参键都要有 README 键块，反之亦然。
+# 只在 INFO（README 解析结果）与三组代码默认之间比对，缺键/多键都说明文档脱节。
+_EXPECT = {}
+for _sub, _keys in BALL_GROUPS:
+    for _yk, _ck in _keys:
+        _EXPECT[f"ball.{_sub}.{_yk}"] = M.BALL_DEFAULTS[_ck]
+for _k in PANE:
+    _EXPECT[f"monitor.pane.{_k}"] = mu.MONITOR_DEFAULTS["pane"][_k]
+for _k in SPARK:
+    _EXPECT[f"monitor.spark.{_k}"] = mu.MONITOR_DEFAULTS["spark"][_k]
+for _k in SNAP:
+    _EXPECT[f"monitor.snap.{_k}"] = mu.MONITOR_DEFAULTS["snap"][_k]
+for _c in ("green", "yellow", "red"):
+    _EXPECT[f"monitor.semantics.{_c}"] = mu.MONITOR_DEFAULTS["semantics"][_c]
+for _k in COLLECT:
+    _EXPECT[f"collect.{_k}"] = mh.COLLECT_DEFAULTS[_k]
+
+_only_code = sorted(set(_EXPECT) - set(INFO))
+_only_doc = sorted(set(INFO) - set(_EXPECT))
+assert not _only_code, f"代码有调参键但 README 缺键块：{_only_code}"
+assert not _only_doc, f"README 有键块但代码无此调参键（文档写了不存在的参数）：{_only_doc}"
+
+_drift = [(k, INFO[k]["declared"], _EXPECT[k])
+          for k in _EXPECT if not _declared_matches(INFO[k]["declared"], _EXPECT[k])]
+assert not _drift, "README 声明默认值与代码默认不一致：" + ", ".join(
+    f"{k}（文档写 {d!r}，代码是 {v!r}）" for k, d, v in _drift)
+
+print("README 声明默认值交叉校验通过：%d 键全对齐（键集双向精确 + 值等价）"
+      % len(_EXPECT))
 
 
 # ---------------------------------------------------------------- 三文件逐键注释
