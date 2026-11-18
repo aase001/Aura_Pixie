@@ -143,19 +143,22 @@ ck("load_interaction_config 函数存在", hasattr(M, "load_interaction_config")
 ck("BALL_DEFAULTS 冻结默认快照存在", hasattr(M, "BALL_DEFAULTS"))
 ck("TUNING_PATH 指向 config.yaml",
    hasattr(M, "TUNING_PATH") and M.TUNING_PATH.endswith("config.yaml"))
+# 内置默认真源：断言一律比对它，勿写死毫秒数——否则改默认值要连改五处断言（坑104）
+_hv_def = float(M.BALL_DEFAULTS["hover_trigger_ms"])
 if hasattr(M, "load_interaction_config"):
     cfg_path = os.path.join(_ISO, "Aura_Pixie", "config.yaml")
     # 文件不存在 → 全默认（enabled 视为 false）
     M.load_interaction_config(os.path.join(_ISO, "no_such_config.yaml"))
     ck("config.yaml 不存在 → 回内置默认（不致命）",
-       M.CONFIG["hover_trigger_ms"] == 300.0 and M.CONFIG["confirm_extra_ms"] == 30,
-       f"{M.CONFIG['hover_trigger_ms']}/{M.CONFIG['confirm_extra_ms']}")
+       M.CONFIG["hover_trigger_ms"] == _hv_def and M.CONFIG["confirm_extra_ms"] == 30,
+       f"{M.CONFIG['hover_trigger_ms']}/{M.CONFIG['confirm_extra_ms']}（默认 {_hv_def}）")
     # enabled=false → 强制默认（即使文件写了别的值）
     with open(cfg_path, "w", encoding="utf-8") as fh:
         yaml.safe_dump({"enabled": False, "ball": {"hover": {"trigger_ms": 800}}}, fh)
     M.load_interaction_config(cfg_path)
     ck("enabled=false → 忽略文件值、强制内置默认",
-       M.CONFIG["hover_trigger_ms"] == 300.0, str(M.CONFIG["hover_trigger_ms"]))
+       M.CONFIG["hover_trigger_ms"] == _hv_def,
+       f"{M.CONFIG['hover_trigger_ms']}（默认 {_hv_def}）")
     # enabled=true → ball 键钳制生效
     with open(cfg_path, "w", encoding="utf-8") as fh:
         yaml.safe_dump({"enabled": True, "ball": {"hover": {"trigger_ms": 800}}}, fh)
@@ -173,7 +176,8 @@ if hasattr(M, "load_interaction_config"):
         yaml.safe_dump({"enabled": False}, fh)
     M.load_interaction_config(cfg_path)
     ck("true→false 重载干净回退默认",
-       M.CONFIG["hover_trigger_ms"] == 300.0, str(M.CONFIG["hover_trigger_ms"]))
+       M.CONFIG["hover_trigger_ms"] == _hv_def,
+       f"{M.CONFIG['hover_trigger_ms']}（默认 {_hv_def}）")
     # 坏 yaml → 回退默认 + 不致命（不抛异常）；打桩 _log_crash 防污染项目根 crash.log
     with open(cfg_path, "w", encoding="utf-8") as fh:
         fh.write("enabled: [unclosed\n  bad: yaml: :::")
@@ -187,7 +191,8 @@ if hasattr(M, "load_interaction_config"):
     finally:
         M._log_crash = _saved_log
     ck("坏 yaml → 回退默认不致命",
-       bad_ok and M.CONFIG["hover_trigger_ms"] == 300.0, str(M.CONFIG["hover_trigger_ms"]))
+       bad_ok and M.CONFIG["hover_trigger_ms"] == _hv_def,
+       f"{M.CONFIG['hover_trigger_ms']}（默认 {_hv_def}）")
     # history_points 单一真源接线：collect.history_points → monitor_ui.SPARKLINE_POINTS + hub
     with open(cfg_path, "w", encoding="utf-8") as fh:
         yaml.safe_dump({"enabled": True, "collect": {"history_points": 90}}, fh)
@@ -245,8 +250,9 @@ if hasattr(M, "load_interaction_config"):
     except OSError:
         pass
     ck("还原后三组全回默认",
-       M.CONFIG["hover_trigger_ms"] == 300.0 and mu.BASE_W == 250
-       and mu.SPARKLINE_POINTS == 60 and M.monitor_hub.HISTORY_POINTS == 60)
+       M.CONFIG["hover_trigger_ms"] == _hv_def and mu.BASE_W == 250
+       and mu.SPARKLINE_POINTS == 60 and M.monitor_hub.HISTORY_POINTS == 60,
+       f"（悬停默认 {_hv_def}）")
     # 接线看守：load_interaction_config 须在 main() 启动与 reload_config 各调一次
     # （决策2：手动重载生效、不做文件监听；漏接线则调参永不生效，源码看守锁定）
     import inspect

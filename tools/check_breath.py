@@ -4,7 +4,8 @@
     1. 球体本体直径 100 → 110 → 100 px；光晕外扩 ≤2×glow_px+容差
     2. 颜色 白 → #283FFE → 白；最蓝一帧实际渲染像素为 #283FFE
     3. 帧率 60 FPS 实测
-    4. 悬停状态机：球内累计 ≥300ms 展开；不足不展开；离开收起；回入立即展开
+    4. 悬停状态机：球内累计 ≥hover_trigger_ms 展开；不足不展开；离开收起；回入立即展开
+       （拍数按当前生效阈值推导，不把默认值写死进断言）
     5. 扇区数：<2 补 2，>9 截 9；命中判定 2/3/5/9 等分
     6. 触发冻结色 + 扇区统一填充 + 文字色随明度反转
     7. 代码格式标准化：py 默认 / cmd: / ps: / powershell:；语法错误拒绝执行
@@ -57,6 +58,16 @@ _SELFTEST_SOURCE_DIR = tempfile.mkdtemp(prefix="aura_rootcfg_")
 
 BODY_ALPHA = 200
 GLOW_ALPHA = 4   # 验光晕外扩边界必须低阈值，高阈值会截掉淡出尾巴虚报合格
+
+# —— 悬停阈值联动：迭代次数按「当前生效阈值」推导，不写死拍数 ——
+# 原因：写死 20ms×N 拍等价于把 hover_trigger_ms 默认值当成契约写进测试，
+# 改默认值就会打红一片；更隐蔽的是「不展开」类断言会因拍数不够而假绿
+# （坑65 弱断言）。以下统一以 _STEP_MS 为拍长推导，_TUNE_MS 随 config.yaml 生效。
+_STEP_MS = 20.0
+_HOVER_TRIGGER_MS = float(M.CONFIG["hover_trigger_ms"])
+_HOVER_TICKS = math.ceil(_HOVER_TRIGGER_MS / _STEP_MS)        # 恰好达标所需拍数
+_HOVER_TICKS_UNDER = _HOVER_TICKS - 1                        # 差一拍=不展开
+_HOVER_TICKS_OVER = _HOVER_TICKS + 5                         # 超阈值=必定展开
 
 
 def ensure_fonts() -> bool:
@@ -246,21 +257,25 @@ def main() -> int:
     # ---------- 4 悬停状态机 ----------
     print("\n悬停状态机")
     b = fresh_ball()
-    for _ in range(14):
-        b._evaluate(20.0, center)  # noqa: SLF001
-    check("280ms 悬停不展开", b.state == "hidden", f"（state={b.state}）", failures)
-    b._evaluate(20.0, center)  # noqa: SLF001
-    check("满 300ms 触发展开", b.state == "expanding", f"（state={b.state}）", failures)
+    _under_ms = _HOVER_TICKS_UNDER * _STEP_MS
+    for _ in range(_HOVER_TICKS_UNDER):
+        b._evaluate(_STEP_MS, center)  # noqa: SLF001
+    check(f"{_under_ms:.0f}ms 悬停不展开（差一拍）", b.state == "hidden",
+          f"（state={b.state}）", failures)
+    b._evaluate(_STEP_MS, center)  # noqa: SLF001
+    check(f"满 {_HOVER_TRIGGER_MS:.0f}ms 触发展开", b.state == "expanding",
+          f"（state={b.state}）", failures)
 
     b2 = fresh_ball()
     edge_in = QPointF(size / 2.0 + M.HOVER_RADIUS - 1, size / 2.0)
-    for _ in range(20):
-        b2._evaluate(20.0, edge_in)  # noqa: SLF001
+    for _ in range(_HOVER_TICKS_OVER):
+        b2._evaluate(_STEP_MS, edge_in)  # noqa: SLF001
     check("球边缘内侧 49px 触发", b2.state == "expanding", f"（state={b2.state}）", failures)
 
     b3 = fresh_ball()
-    for _ in range(20):
-        b3._evaluate(20.0, QPointF(size / 2.0 + 51, size / 2.0 + 51))  # noqa: SLF001
+    # 拍数必须超阈值，否则「不触发」只是因为时间不够（坑65 弱断言：假绿）
+    for _ in range(_HOVER_TICKS_OVER):
+        b3._evaluate(_STEP_MS, QPointF(size / 2.0 + 51, size / 2.0 + 51))  # noqa: SLF001
     check("距球心 72px 不触发", b3.state == "hidden", f"（state={b3.state}）", failures)
 
     b4 = fresh_ball()
@@ -311,20 +326,23 @@ def main() -> int:
     print("\n触发冻结色与扇区渲染")
     b5 = fresh_ball()
     b5._phase = 0.5  # noqa: SLF001
-    for _ in range(15):
-        b5._evaluate(20.0, center)  # noqa: SLF001
+    for _ in range(_HOVER_TICKS_OVER):
+        b5._evaluate(_STEP_MS, center)  # noqa: SLF001
     check("触发于 50% → 冻结 #283FFE", hexs(b5.fill_color) == "283FFE",  # noqa: SLF001
           f"（实得 #{hexs(b5.fill_color)}）", failures)
     for _ in range(10):
         b5._phase = (b5._phase + 0.01) % 1.0  # noqa: SLF001
-        b5._evaluate(20.0, center)  # noqa: SLF001
+        b5._evaluate(_STEP_MS, center)  # noqa: SLF001
     check("展开期间冻结不随呼吸变", hexs(b5.fill_color) == "283FFE",  # noqa: SLF001
           f"（仍 #{hexs(b5.fill_color)}）", failures)
 
     b6 = fresh_ball()
     b6._phase = 0.0  # noqa: SLF001
-    for _ in range(15):
-        b6._evaluate(20.0, center)  # noqa: SLF001
+    for _ in range(_HOVER_TICKS_OVER):
+        b6._evaluate(_STEP_MS, center)  # noqa: SLF001
+    # 必须先确认真的展开了：未展开时 fill_color 同样是 FFFFFF，只比色值会假绿（坑65）
+    check("触发于 0% → 已进入展开态", b6.state in ("expanding", "open"),  # noqa: SLF001
+          f"（state={b6.state}）", failures)
     check("触发于 0% → 冻结 #FFFFFF", hexs(b6.fill_color) == "FFFFFF",  # noqa: SLF001
           f"（实得 #{hexs(b6.fill_color)}）", failures)
     check("近白冻结 → 深色文字", hexs(M.choose_text_color(M.QColor("#FFFFFF"))) == "0E1430",
@@ -1717,15 +1735,15 @@ def main() -> int:
         bh._evaluate(20.0, center)  # noqa: SLF001
     check("长按回收中：扇形收到 hidden 且不重开", bh.state == "hidden",
           f"（state={bh.state}）", failures)
-    # 松开后标志复位，可再次悬停展开（16×20ms=320ms 已推进到 open，两种展开态都算）
+    # 松开后标志复位，可再次悬停展开（按生效阈值超量推进，两种展开态都算）
     # 注意：收起后窗口已缩回 IDLE_SIZE，光标必须取「当前窗口中心」，
     # 固定点 (ACTIVE_SIZE/2, ACTIVE_SIZE/2) 在缩窗后相对中心偏移 70px，会飞出球径判定。
     _w = bh.width()
     cur_ball = QPointF(_w / 2.0, _w / 2.0)
     bh._press = None  # noqa: SLF001
     bh._hold_collapsed = False  # noqa: SLF001
-    for _ in range(16):
-        bh._evaluate(20.0, cur_ball)  # noqa: SLF001
+    for _ in range(_HOVER_TICKS_OVER):
+        bh._evaluate(_STEP_MS, cur_ball)  # noqa: SLF001
     check("松开后可再次正常展开", bh.state in ("expanding", "open"),
           f"（state={bh.state}）", failures)
 
@@ -1734,10 +1752,21 @@ def main() -> int:
     _w_m = bm.width()
     center_m = QPointF(_w_m / 2.0, _w_m / 2.0)
     bm._menu_active = True  # noqa: SLF001
-    for _ in range(20):   # 400ms > 300ms 悬停阈值
-        bm._evaluate(20.0, center_m)  # noqa: SLF001
+    # 拍数必须超阈值，否则「不展开」只是时间不够（坑65 弱断言：假绿）
+    for _ in range(_HOVER_TICKS_OVER):
+        bm._evaluate(_STEP_MS, center_m)  # noqa: SLF001
     check("右键菜单期间悬停不展开扇形", bm._state == "hidden",
           f"（state={bm._state}）", failures)
+    # 对照组：同样拍数、同样光标位置，仅解除菜单抑制 → 必须展开。
+    # 没有这条，上一条通过可能只是因为「拍数不够」而非「抑制生效」。
+    bm_ctrl = fresh_ball()
+    _w_c = bm_ctrl.width()
+    center_c = QPointF(_w_c / 2.0, _w_c / 2.0)
+    bm_ctrl._menu_active = False  # noqa: SLF001
+    for _ in range(_HOVER_TICKS_OVER):
+        bm_ctrl._evaluate(_STEP_MS, center_c)  # noqa: SLF001
+    check("对照组：无菜单抑制时同拍数必定展开（证明上一条不是假绿）",
+          bm_ctrl._state in ("expanding", "open"), f"（state={bm_ctrl._state}）", failures)
     bm._enter_expanding()  # noqa: SLF001
     bm._enter_collapsing()  # noqa: SLF001
     bm._progress = 0.6  # noqa: SLF001 - 非零进度，单次 evaluate 不收完
