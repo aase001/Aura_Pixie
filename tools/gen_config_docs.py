@@ -28,7 +28,7 @@ import main as M  # noqa: E402
 import monitor_ui as mu  # noqa: E402
 import monitor_hub as mh  # noqa: E402
 
-README_SRC = os.path.join(ROOT, "handover_documents", "配置文件夹README-v2.03.md")
+README_SRC = os.path.join(ROOT, "handover_documents", "old_documents", "配置文件夹README-v2.03.md")
 OUT = os.path.join(ROOT, "config_docs.py")
 
 readme = open(README_SRC, encoding="utf-8").read()
