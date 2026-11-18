@@ -1,10 +1,15 @@
 """Aura Pixie 用户配置模仿测试（只读校验，绝不真实执行指令）
 
 用途
-    在虚拟环境（.venv）下加载真实用户配置 `%LOCALAPPDATA%\\Aura_Pixie\\setting.yaml`，
+    在虚拟环境（.venv）下加载真实用户配置 `%LOCALAPPDATA%\\Aura_Pixie\\`，
     模拟「设置窗保存 / 高级编辑窗保存」会对每条指令做的全部校验，逐条给出
     PASS / NEEDS_REVIEW。适合用户改完配置后快速体检，也用于回归验证
     「子功能块数量 2~9」「成对标记闭合」「指令格式合法」等规则。
+
+    v2.03 起功能指令存于 `command.yaml`（不再是 `setting.yaml.functions`）。
+    本脚本走程序统一读取漏斗 `main.read_setting()` 取合并视图，不自拼单文件
+    路径——配置结构再演进时自检自动跟随，不会像 v2.03 拆分那次一样因路径
+    没跟进而恒定「无 functions 条目」跳过（坑134 同类：函数对、接线错）。
 
 安全
     · 只调用 parse_special_sections / classify_code / validate_sub_items_count
@@ -25,15 +30,7 @@ import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import yaml  # noqa: E402
-
 import main as M  # noqa: E402
-
-
-def _config_path() -> str:
-    root = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Local")
-    return os.path.join(root, "Aura_Pixie", "setting.yaml")
 
 
 def _seg_label(kind: str, name: str) -> str:
@@ -41,20 +38,26 @@ def _seg_label(kind: str, name: str) -> str:
 
 
 def main() -> int:
-    path = _config_path()
-    if not os.path.isfile(path):
-        print(f"[跳过] 未找到用户配置：{path}")
+    # 主位置 setting.yaml + 同目录 command.yaml（functions）+ state.yaml 合并视图。
+    # 用程序统一漏斗 read_setting()，不自拼单文件路径——拆分后 functions 已搬走，
+    # 只读 setting.yaml 会恒定「无 functions 条目」跳过，形成虚假 PASS。
+    path = M.SETTINGS_PATH
+    cmd_path, _state_path = M._sibling_paths(path)
+    if not os.path.isfile(path) and not os.path.isfile(cmd_path):
+        print(f"[跳过] 未找到用户配置（两者皆无）：{path} / {cmd_path}")
         print("总判定: PASS（无配置可校验）")
         return 0
-    with open(path, encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
+    data = M.read_setting(path) or {}
     items = [f for f in (data.get("functions") or []) if isinstance(f, dict)]
     if not items:
-        print(f"[跳过] 用户配置 {path} 无 functions 条目")
+        print(f"[跳过] 用户配置无 functions 条目：{cmd_path}")
+        print("（v2.03 起功能指令存于 command.yaml；若你确实配过功能扇区，"
+              "说明拆分/迁移没搬到，请检查该文件）")
         print("总判定: PASS（无功能可校验）")
         return 0
 
-    print(f"用户配置：{path}")
+    print(f"用户配置目录：{os.path.dirname(path)}")
+    print(f"功能指令来源：{cmd_path}")
     print(f"功能条目：{len(items)} 个\n")
     failures: list[str] = []
     for idx, item in enumerate(items, 1):
