@@ -34,7 +34,7 @@ OUT = os.path.join(ROOT, "config_docs.py")
 readme = open(README_SRC, encoding="utf-8").read()
 
 # ---------------------------------------------------------------- 解析 README 键块
-# 形如：**ball.hover.trigger_ms** ｜ 悬停展开等待 ｜ 默认 300
+# 形如：**ball.hover.trigger_ms** ｜ 悬停展开等待 ｜ 默认 1000
 #        - 作用范围：...
 #        - 影响：...
 #        - 取值范围：50~2000（毫秒）。

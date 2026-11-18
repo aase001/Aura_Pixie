@@ -6,7 +6,7 @@
       （V10 起废弃固定 20s；球体呼吸可关，关闭时恒渲染起始色、大小静止）
     · 光晕：halo 半径 = 球半径 + 2×glow_px（默认外扩 6px，虚化淡出）
     · 帧率：60 FPS（15ms 心跳 + 帧点节流）
-    · 悬停：鼠标在球体 100×100 范围内累计 ≥300ms → 扇形外框展开
+    · 悬停：鼠标在球体 100×100 范围内累计 ≥1000ms → 扇形外框展开
     · 扇形等分：= 激活功能模块数，最少 2、最多 9；总数不限
     · 扇形填充色：= 触发瞬间球体中心本色，展开期间冻结
     · 右键-设置：三列表格（复选框=激活 / 项目名 / 功能代码），支持拖拽排序，
@@ -135,7 +135,7 @@ CONFIG = {
     "ring_gap": 7.0,
     "ring_width": 44.0,
     "ring_sector_gap_deg": 4.0,
-    "hover_trigger_ms": 300.0,
+    "hover_trigger_ms": 1000.0,
     "leave_collapse_ms": 180.0,
     "expand_ms": 320.0,
     "collapse_ms": 220.0,
@@ -4839,7 +4839,7 @@ class AuraBall(QWidget):
         #   · 窗口到期 → 收起 → 300ms → 展开次级环。
         # 无标记扇区没有歧义（单击双击同义），立即执行、零延迟。
         # 次级环扇区：单击=直接执行（不递归）；双击自然退化（首击已执行、次击落空）。
-        # 确认窗口 = 系统双击间隔 + 30ms（约 330ms），与悬停展开节奏一致。
+        # 确认窗口 = 系统双击间隔 + 30ms（约 330ms），独立于悬停展开阈值。
         self._pending_sub_sector: int | None = None   # 待展开次级的扇区号（None=无）
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
@@ -5111,7 +5111,7 @@ class AuraBall(QWidget):
             return
         try:
             # dt 取「距上次采样的真实毫秒」而非固定 8ms：系统忙时采样会被推迟，
-            # 写死 8ms 会让悬停 300ms 的判定越走越慢。
+            # 写死 8ms 会让悬停累计时长的判定越走越慢。
             elapsed = self._clock.elapsed()
             dt = max(1.0, float(elapsed - self._last_poll_ms))
             self._last_poll_ms = elapsed
@@ -5443,7 +5443,7 @@ class AuraBall(QWidget):
         elif self._state == "open":
             self._settle_out(in_ball, in_ring, dt_ms)
         elif self._state == "collapsing":
-            # 收起途中鼠标回球/环 → 立即重新展开，不重等 300ms；冻结色按当时本色刷新
+            # 收起途中鼠标回球/环 → 立即重新展开，不重等悬停累计时长；冻结色按当时本色刷新
             # 例外1：长按回收（_hold_collapsed 且仍按住）期间不得重开，否则扇形
             #   刚收起就被展开——此前该分支未排除长按场景，导致回收永远不生效。
             # 例外2：次级展开的收起飞行（_sub_launching）同样不得重开，必须等
