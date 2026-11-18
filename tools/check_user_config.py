@@ -30,11 +30,34 @@ import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import yaml  # noqa: E402
+
 import main as M  # noqa: E402
 
 
 def _seg_label(kind: str, name: str) -> str:
     return {"main": "主指令", "sub": f"次级项「{name}」"}.get(kind, kind)
+
+
+def _physical_functions() -> tuple[str, list]:
+    """独立真相通道：不经程序漏斗，直接按固定文件名读 command.yaml 的 functions。
+
+    存在的意义是交叉验证——`main._sibling_paths` 若把路径派生改错（v2.03 拆分
+    结构再演进），`read_setting()` 会返回空 functions，本脚本就会把「读不到」误判成
+    「用户没配功能」而静默 PASS（变异测试 M5 实测复现：漏斗指向 WRONG_cmd.yaml
+    时本脚本仍 EXIT=0）。这里绕开漏斗读物理文件，两边条数不一致即打红。
+    """
+    cfg_dir = M.APP_CONFIG_DIR
+    cmd = os.path.join(cfg_dir, "command.yaml")
+    if not os.path.isfile(cmd):
+        return cmd, []
+    try:
+        with open(cmd, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+    except Exception as exc:  # noqa: BLE001 - 读不动属异常，返回空由调用方交叉判定
+        print(f"[NG] 物理读取 command.yaml 失败：{exc!r}")
+        return cmd, []
+    return cmd, [f for f in (raw.get("functions") or []) if isinstance(f, dict)]
 
 
 def main() -> int:
@@ -43,23 +66,57 @@ def main() -> int:
     # 只读 setting.yaml 会恒定「无 functions 条目」跳过，形成虚假 PASS。
     path = M.SETTINGS_PATH
     cmd_path, _state_path = M._sibling_paths(path)
-    if not os.path.isfile(path) and not os.path.isfile(cmd_path):
-        print(f"[跳过] 未找到用户配置（两者皆无）：{path} / {cmd_path}")
+    phys_cmd, phys_items = _physical_functions()
+
+    # 接线自检：漏斗派生出的 command.yaml 路径必须与固定物理名一致。
+    # 不一致说明 _sibling_paths 派生逻辑与 v2.03 目录约定脱节（M5 类缺陷）。
+    funnel_ok = os.path.normcase(os.path.abspath(cmd_path)) == \
+        os.path.normcase(os.path.abspath(phys_cmd))
+    failures: list[str] = []
+    if not funnel_ok:
+        failures.append("漏斗 command.yaml 路径与物理约定不一致")
+        print(f"[NG] 接线：漏斗派生 {cmd_path}")
+        print(f"     物理约定 {phys_cmd}")
+    else:
+        print(f"[OK] 接线：漏斗 command.yaml 路径与物理约定一致")
+
+    if not os.path.isfile(path) and not os.path.isfile(phys_cmd):
+        if failures:
+            print("\n总判定: NEEDS_REVIEW")
+            for f in failures:
+                print("  -", f)
+            return 1
+        print(f"[跳过] 未找到用户配置（两者皆无）：{path} / {phys_cmd}")
         print("总判定: PASS（无配置可校验）")
         return 0
+
     data = M.read_setting(path) or {}
     items = [f for f in (data.get("functions") or []) if isinstance(f, dict)]
+
+    # 交叉验证：漏斗读到的条数必须等于物理文件里的条数。
+    # 物理有、漏斗空 = 接线断了（正是 v2.03 拆分那次踩的坑），绝不能当「无功能」放过。
+    if len(items) != len(phys_items):
+        failures.append(
+            f"漏斗读到 {len(items)} 条 functions，物理 command.yaml 有 {len(phys_items)} 条")
+        print(f"[NG] 交叉验证：漏斗 {len(items)} 条 vs 物理 {len(phys_items)} 条")
+        print("     漏斗读不到而物理文件有内容 → 拆分/迁移或路径派生接线断了")
+    else:
+        print(f"[OK] 交叉验证：漏斗与物理均为 {len(items)} 条 functions")
+
     if not items:
-        print(f"[跳过] 用户配置无 functions 条目：{cmd_path}")
-        print("（v2.03 起功能指令存于 command.yaml；若你确实配过功能扇区，"
-              "说明拆分/迁移没搬到，请检查该文件）")
+        # 走到这里说明物理文件也确实没有 functions（两边都空，交叉一致）
+        print(f"[跳过] 用户配置确实无 functions 条目：{phys_cmd}")
+        if failures:
+            print("\n总判定: NEEDS_REVIEW")
+            for f in failures:
+                print("  -", f)
+            return 1
         print("总判定: PASS（无功能可校验）")
         return 0
 
-    print(f"用户配置目录：{os.path.dirname(path)}")
-    print(f"功能指令来源：{cmd_path}")
+    print(f"\n用户配置目录：{os.path.dirname(path)}")
+    print(f"功能指令来源：{phys_cmd}")
     print(f"功能条目：{len(items)} 个\n")
-    failures: list[str] = []
     for idx, item in enumerate(items, 1):
         name = str(item.get("name", ""))
         code = str(item.get("code") or item.get("command") or "")
