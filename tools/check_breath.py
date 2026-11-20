@@ -1809,10 +1809,10 @@ def main() -> int:
           f"（phase={bf._phase}，期望 {phase_before}）", failures)
     bf._clock.invalidate()
 
-    # ── 尺寸切换同帧同步重绘（真机：分层窗口陈旧表面致展开/收起闪烁）──────
-    # 分层透明窗口的原生层表面只在重绘 flush 时更新。缩窗若不同步重绘，DWM 在
-    # 下一帧心跳前一直合成旧的大尺寸表面 → 收缩闪烁（高频触发更明显）。行为断言：
-    # 扩/缩两个方向都必须在 _resize_keep_center 返回前同步触发 paintEvent。
+    # ── 状态切换同帧同步重绘（恒尺寸修法：窗口不 resize，只刷绘制内容）──────
+    # 恒尺寸下展开/收起不改原生几何（消除分层表面位置/表面不同步闪烁），但绘制
+    # 内容变化仍须同帧 repaint，否则 DWM 下一帧心跳前合成旧内容。行为断言：
+    # 展开/收起两个方向都必须在 _resize_keep_center 返回前同步触发 paintEvent。
     class _PaintSpy(M.AuraBall):
         def __init__(self):
             super().__init__()
@@ -1828,12 +1828,12 @@ def main() -> int:
     ps.show()
     app.processEvents()
     ps.paint_calls = 0
-    ps._resize_keep_center(M.ACTIVE_SIZE)   # noqa: SLF001 - 扩容
-    check("扩容同帧同步重绘（防展开首帧陈旧表面）", ps.paint_calls >= 1,
+    ps._resize_keep_center(M.ACTIVE_SIZE)   # noqa: SLF001 - 展开
+    check("展开同帧同步重绘（恒尺寸只刷内容）", ps.paint_calls >= 1,
           f"（paint_calls={ps.paint_calls}）", failures)
     ps.paint_calls = 0
-    ps._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 缩窗
-    check("缩窗同帧同步重绘（防收缩闪烁·累积效应）", ps.paint_calls >= 1,
+    ps._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 收起
+    check("收起同帧同步重绘（恒尺寸只刷内容）", ps.paint_calls >= 1,
           f"（paint_calls={ps.paint_calls}）", failures)
 
     # ── 分层窗口每帧透明清屏（真机：半透明光晕/扇形逐帧累积成鬼影）──────
@@ -1888,17 +1888,17 @@ def main() -> int:
           cs.saw_clear, f"（saw_clear={cs.saw_clear}）", failures)
     _w0 = bf.width()
     bf._resize_keep_center(_w0 + 100)
-    check("扩容路径可执行且球心不偏移", bf.width() == _w0 + 100, "", failures)
+    check("恒尺寸：_resize_keep_center 不改窗口尺寸（防分层表面闪烁）",
+          bf.width() == _w0, f"（w={bf.width()}，期望 {_w0}）", failures)
     bf._on_hidden()
     check("回收后解冻呼吸", bf._breath_frozen is False and bf.state == "hidden",
           f"（frozen={bf._breath_frozen}, state={bf.state}）", failures)
 
-    # ── 展开/收起球心不跳变（真机：主/次扇形展开收起过程球体闪烁）──────
-    # 根因：_resize_keep_center 旧实现 setFixedSize(改尺寸、左上角锚定)+move(补位置)
-    # 是两次分离的原生窗口操作。resize 已生效而 move 未生效的中间态，窗口尺寸已变
-    # 但位置未动，球心=位置+尺寸/2 瞬时偏移 (新-旧)/2 px；分层透明窗口把这一帧呈现
-    # 出来就是「球体闪烁」。次级环=收主环(缩窗)+展次级(扩窗)两次切换，闪得更明显。
-    # 行为断言：尺寸切换的每一个几何事件里，窗口几何推出的球心都必须等于 _center。
+    # ── 展开/收起恒尺寸无几何事件（真机慢动作：resize 致分层表面移位+消失）──────
+    # 根因（恒尺寸修法）：原生 resize 触发 DWM 分层表面重建，旧尺寸表面贴到新位置
+    # 1~2 帧＝对角「移位+消失+重现」。窗口矩形层虽原子，分层表面呈现层不原子。
+    # 修法=窗口常驻 ACTIVE_SIZE、展开/收起永不 resize。行为断言：展开/收起调用
+    # _resize_keep_center 不产生任何 resize/move 几何事件，且窗口球心恒等于 _center。
     # 期望值 _center 是独立摆位的字面量，不复用被测代码逻辑。
     class _CenterProbe(M.AuraBall):
         def __init__(self):
@@ -1929,17 +1929,17 @@ def main() -> int:
     app.processEvents()
     bp.center_offsets.clear()
     bp.geo_events.clear()
-    bp._resize_keep_center(M.ACTIVE_SIZE)   # noqa: SLF001 - 展开扩窗
-    check("展开扩窗：确有几何事件（非空测）", len(bp.geo_events) > 0,
-          f"（事件数={len(bp.geo_events)}）", failures)
-    check("展开扩窗：球心全程不跳变（防闪烁）", not bp.center_offsets,
+    bp._resize_keep_center(M.ACTIVE_SIZE)   # noqa: SLF001 - 展开
+    check("展开：恒尺寸不产生几何事件（防分层表面移位闪烁）",
+          len(bp.geo_events) == 0, f"（事件数={len(bp.geo_events)}）", failures)
+    check("展开：窗口球心恒等于 _center", not bp.center_offsets,
           f"（跳变帧 {bp.center_offsets}）", failures)
     bp.center_offsets.clear()
     bp.geo_events.clear()
-    bp._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 收起缩窗
-    check("收起缩窗：确有几何事件（非空测）", len(bp.geo_events) > 0,
-          f"（事件数={len(bp.geo_events)}）", failures)
-    check("收起缩窗：球心全程不跳变（防闪烁）", not bp.center_offsets,
+    bp._resize_keep_center(M.IDLE_SIZE)     # noqa: SLF001 - 收起
+    check("收起：恒尺寸不产生几何事件（防分层表面移位闪烁）",
+          len(bp.geo_events) == 0, f"（事件数={len(bp.geo_events)}）", failures)
+    check("收起：窗口球心恒等于 _center", not bp.center_offsets,
           f"（跳变帧 {bp.center_offsets}）", failures)
 
     # ---------- 18 外观设置（V12：原「动效设置」改名 + 四项改滑块） ----------
@@ -2810,9 +2810,9 @@ def main() -> int:
     # 推进到定位结束：_locate_left_ms 耗尽后 _warn_on 复位、窗口缩回
     while bloc._locate_left_ms > 0:
         bloc._advance_motion(50.0)
-    check("定位结束自动复位（红框熄灭、窗口缩回 IDLE）",
+    check("定位结束自动复位（红框熄灭、恒尺寸不变）",
           bloc._locate_left_ms == 0.0 and not bloc._warn_on
-          and bloc.width() == M.IDLE_SIZE,
+          and bloc.width() == M.ACTIVE_SIZE,
           f"（left={bloc._locate_left_ms}, warn={bloc._warn_on}, w={bloc.width()}）", failures)
     bloc.deleteLater()
 
