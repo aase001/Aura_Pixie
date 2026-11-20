@@ -4792,7 +4792,10 @@ class AuraBall(QWidget):
         self._ball_locked = ball_locked()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setFixedSize(IDLE_SIZE, IDLE_SIZE)
+        # 恒尺寸修法（真机慢动作实锤）：窗口常驻 ACTIVE_SIZE，展开/收起只改绘制
+        # 内容、永不 resize。原生 resize 会触发分层窗口「位置/表面」呈现不同步
+        # （旧尺寸表面贴到新位置 1~2 帧＝对角移位+消失+重现）；恒尺寸从根上消除。
+        self.setFixedSize(ACTIVE_SIZE, ACTIVE_SIZE)
         self.setWindowIcon(app_icon())       # 统一图标辅助（内嵌优先，回退外部文件）
 
         self._sectors = load_functions()
@@ -5518,37 +5521,19 @@ class AuraBall(QWidget):
             self._sub_pending_items = None
 
     def _resize_keep_center(self, size: int) -> None:
-        """改窗口尺寸并保持球心不动（球心是唯一坐标真源）。
+        """恒尺寸修法：窗口常驻 ACTIVE_SIZE，展开/收起只改绘制内容、永不 resize。
 
-        尺寸变化后必须同帧同步 repaint()（扩容、缩窗两个方向都要）：
-        ① 扩容：Qt 后备存储的新增区域内容未定义，只被标脏、等下一帧才补画，
-           首次展开时这块内存恰是系统回收来的其他窗口缓冲，闪出「陌生窗口一角」；
-        ② 缩窗：分层透明窗口的原生层表面只在重绘 flush 时更新，缩窗后若不同步
-           重绘，DWM 在下一帧心跳前一直合成旧的大尺寸表面——屏幕上残留旧扇形环
-           1~2 帧，即「收缩闪烁」；触发越频繁单位时间缩窗越多、越明显（累积效应）。
-        repaint() 在改尺寸的同一轮里同步整窗重绘，陈旧表面不会出现在任何一帧。
+        历史（坑117/118）曾以「单次 setGeometry 原子落尺寸+位置 + 扩/缩同帧
+        repaint」修窗口矩形层的球心跳变与陈旧表面。但真机慢动作录像实锤更深层
+        缺陷：原生 resize 触发 DWM 分层表面重建，旧尺寸表面被贴到新位置 1~2 帧，
+        呈现为对角「移位+消失+重现」（展开往左上、收起往右下，量级=(新-旧)/2）。
+        窗口矩形层（GetWindowRect）虽原子，分层表面呈现层却不原子。
 
-        尺寸+位置必须单次 setGeometry 原子落下：旧实现 setFixedSize(改尺寸、
-        左上角锚定)+move(补位置)是两次分离的原生窗口操作，resize 已生效而 move
-        未生效的中间态里，窗口尺寸已变但位置未动，球心=位置+尺寸/2 瞬时偏移
-        (新-旧)/2 px；分层透明窗口把这一帧呈现出来就是展开/收起时「球体闪烁」。
-        setGeometry 一次设置尺寸+位置，resize/move 事件看到同一终态几何，
-        球心全程不跳变。
+        故窗口尺寸恒为 ACTIVE_SIZE（构造时 setFixedSize），本函数不再改任何原生
+        几何，仅同帧 repaint 刷新绘制内容（球/环按 self.width() 居中）。size 参数
+        保留仅为兼容既有调用点（展开/收起/休眠/定位/越界），恒尺寸下无几何意义。
+        球心 _center 仍是唯一坐标真源，窗口位置由 _apply_center 按 ACTIVE_SIZE 推出。
         """
-        grew = size > self.width()
-        x = round(self._center.x() - size / 2.0)
-        y = round(self._center.y() - size / 2.0)
-        # setFixedSize 会把 min/max 都锁在当前尺寸，直接 setGeometry 会被钳回；
-        # 先放开「目标方向」的约束，setGeometry 才能单次原子落下尺寸+位置。
-        if grew:
-            self.setMaximumSize(size, size)
-            self.setGeometry(x, y, size, size)
-            self.setMinimumSize(size, size)
-        else:
-            self.setMinimumSize(size, size)
-            self.setGeometry(x, y, size, size)
-            self.setMaximumSize(size, size)
-        # 扩/缩都同帧同步重绘：缩窗不刷会让 DWM 合成旧的大尺寸分层表面（收缩闪烁）
         self.repaint()
 
     # ------------------------------------------------------------ 绘制
@@ -5985,6 +5970,11 @@ class AuraBall(QWidget):
         # 之后——command.yaml 刚重新加载，引用集才是新的；用户删掉某条指令后，
         # 它对应的 fn_* 脚本立刻成孤儿被回收，缓存不随编辑历史无限增长。
         reclaim_runner_orphans()
+        # 恒尺寸：缩放因子变化可能改变 ACTIVE_SIZE；仅当目标尺寸与当前不同才
+        # 重设窗口（低频配置事件，非展开/收起热路径），并按球心复位防偏移。
+        if self.width() != ACTIVE_SIZE:
+            self.setFixedSize(ACTIVE_SIZE, ACTIVE_SIZE)
+            self._apply_center()
         self.update()
 
     # 双击不触发任何操作：此前双击（含双击展开的扇形）会直接退出程序，
